@@ -33,10 +33,16 @@ python3 -m pip install -e .
 
 ## Install the Codex skill
 
-The installable plugin lives at `skills/taskledger` with its manifest in
-`.codex-plugin/plugin.json`. From a local clone, install it through a Codex
-marketplace that points to this repository, then start a new Codex thread so
-the skill is picked up.
+After installing the CLI, copy the included skill into Codex's local skills
+directory, then start a new Codex thread so it is picked up:
+
+```sh
+mkdir -p ~/.codex/skills
+cp -R skills/taskledger ~/.codex/skills/taskledger
+```
+
+The repository also includes an installable plugin manifest at
+`.codex-plugin/plugin.json` for marketplace-based installation.
 
 If you only need the CLI, the plugin is optional. The CLI is the source of
 truth for Taskledger state and emits a single JSON envelope on stdout for every
