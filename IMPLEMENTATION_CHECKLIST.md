@@ -11,4 +11,4 @@
 - [x] Slice 8: independent verification state transitions.
 - [x] Slice 9: deterministic integration and reachability reconciliation.
 - [x] Slice 10: requirement verification, recovery view, and completion checks.
-- [ ] Slice 11: exhaustive failure-injection and full 66-requirement conformance suite.
+- [ ] Slice 11: exhaustive failure-injection and full 71-requirement conformance suite.

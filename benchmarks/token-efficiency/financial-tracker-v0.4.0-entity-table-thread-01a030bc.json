@@ -1,0 +1,115 @@
+{
+  "cohorts": {
+    "gpt-5.6-sol|xhigh": {
+      "agent_roles": {
+        "none": 1
+      },
+      "compactions": 1,
+      "files": 1,
+      "taskledger_commands": {
+        "assignment show": 1,
+        "plan validate": 1,
+        "project complete": 1,
+        "project init": 1,
+        "requirement list": 1,
+        "requirement verify": 2,
+        "spec check": 1,
+        "submission review-context": 1,
+        "submission verify": 1
+      },
+      "thread_sources": {
+        "user": 1
+      },
+      "token_events": 134,
+      "tokens": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 16422400,
+        "input_tokens": 16848133,
+        "output_tokens": 29324,
+        "reasoning_output_tokens": 8574,
+        "total_tokens": 16901512
+      }
+    },
+    "gpt-5.6-terra|high": {
+      "agent_roles": {
+        "taskledger_worker_complex": 1
+      },
+      "compactions": 1,
+      "files": 1,
+      "taskledger_commands": {
+        "worker submit": 5
+      },
+      "thread_sources": {
+        "subagent": 1
+      },
+      "token_events": 66,
+      "tokens": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 7589888,
+        "input_tokens": 8053602,
+        "output_tokens": 42168,
+        "reasoning_output_tokens": 4243,
+        "total_tokens": 8140428
+      }
+    }
+  },
+  "durable_progress": {
+    "available": true,
+    "event_counts": {
+      "ASSIGNMENT_ACTIVATED": 1,
+      "COMPLETION_INVALIDATED": 1,
+      "PLAN_VALIDATED": 1,
+      "PROJECT_COMPLETED": 1,
+      "REQUIREMENT_CREATED": 2,
+      "REQUIREMENT_VERIFIED": 2,
+      "SPECIFICATION_REGISTERED": 1,
+      "SPECIFICATION_REVIEW_COMPLETED": 1,
+      "SUBMISSION_RECORDED": 1,
+      "SUBMISSION_VERIFIED": 1,
+      "TASK_CREATED": 1,
+      "TASK_INTEGRATED": 1
+    },
+    "planning_structure": {
+      "acceptance_criteria_created": 6,
+      "plan_validations": 1,
+      "requirements_created": 2,
+      "specification_reviews_created": 1,
+      "specification_revisions_approved": 0,
+      "specification_revisions_observed": 1,
+      "specifications_created": 1,
+      "successful_plan_validations": 1,
+      "task_dependencies_created": 0,
+      "task_requirement_links_created": 2,
+      "tasks_created": 1
+    },
+    "project_id": "402ddaf7-9249-4074-9f1e-cb56cecbecbe"
+  },
+  "interpretation": {
+    "credits": "Use observed provider credits/rate versions only; this collector does not invent prices.",
+    "cross_model_fallback": "Report each model separately; optionally weight within-model post/pre ratios by the baseline model mix.",
+    "do_not_do": "Do not convert lower-tier token counts into hypothetical higher-tier behavior.",
+    "primary_comparison": "Compare identical model and reasoning-effort cohorts per durable progress event."
+  },
+  "label": "Financial Tracker v0.4.0 EntityTable correction thread 01a030bc",
+  "repository": "/Users/christophercaldwell/Code/business/clients/destinations_beyond/db_financial_tracker",
+  "schema_version": 1,
+  "source": {
+    "codex_cli_versions": {
+      "0.148.0-alpha.15": 5
+    },
+    "files_matched": 5,
+    "files_scanned": 220,
+    "inherited_history": {
+      "compactions_excluded": 0,
+      "forked_files": 4,
+      "token_events_excluded": 0
+    },
+    "session_id": "01a030bc-c6b0-7ea0-837b-0b283b179064",
+    "sessions": "/Users/christophercaldwell/.codex/sessions"
+  },
+  "taskledger_version": "0.4.0",
+  "window": {
+    "since": "2026-08-24T00:31:16.000Z",
+    "until": "2026-08-24T00:57:23.000Z"
+  }
+}

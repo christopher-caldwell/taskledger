@@ -1,0 +1,703 @@
+{
+  "created_at": "2026-08-24T14:16:35Z",
+  "interpretation": {
+    "do_not_use": "Do not treat elapsed time, lines changed, or integrated-task count alone as task complexity.",
+    "overlap": "If task windows overlap, their token totals are not additive and must not be pooled.",
+    "planning": "Planning tokens fall outside assignment-to-integration windows and must be reported separately.",
+    "use": "Compare like task families and inspect each observable complexity dimension before aggregating tokens."
+  },
+  "label": "financial-tracker-http-spec-task-complexity",
+  "ledger_db": "/Users/christophercaldwell/Code/business/clients/destinations_beyond/db_financial_tracker/.taskledger/taskledger.sqlite3",
+  "repository": "/Users/christophercaldwell/Code/business/clients/destinations_beyond/db_financial_tracker",
+  "schema_version": 1,
+  "source": {
+    "files_matched_to_repo": 109,
+    "files_scanned": 220,
+    "inherited_history": {
+      "compactions_excluded": 69,
+      "forked_files": 43,
+      "token_events_excluded": 11607
+    },
+    "overlapping_task_windows": [],
+    "sessions": "/Users/christophercaldwell/.codex/sessions"
+  },
+  "tasks": [
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T05:22:24.682Z",
+      "assignment_attempts": 2,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "a5e6469be25ff095c28b31a49f2dea5c6a3ec112",
+      "canonical_before_oid": "016562c7a861f7f768952e81fa52a0bed6b549b1",
+      "created_at": "2026-08-22T05:15:46.932Z",
+      "dependencies": 0,
+      "execution_seconds": 599.383,
+      "git_diff": {
+        "additions": 602,
+        "binary_files": 0,
+        "deletions": 94,
+        "files_changed": 32,
+        "lines_changed": 696,
+        "top_level_areas": {
+          "server": 32
+        }
+      },
+      "id": "0aa85653-5985-45b7-bb33-8672ad72abd9",
+      "implementation_scope": "Change application command leaves and sibling tests for client, supplier, destination, category, provider, insurance, activity, transportation, and hotel-stay create/update/remove use cases, plus their repository payload declarations only where naming or explicit mapping requires it. Each one-use-case input becomes public in its owning leaf and maps explicitly to a repository-owned payload. Preserve all existing behavior, errors, transactions, results, containers, ports, adapter contracts, and completed application semantics. Do not change trip create/update/list, HTTP, infrastructure behavior, domain, SQL, DDL, auth, or CORS.",
+      "integrated_at": "2026-08-22T05:32:24.065Z",
+      "linked_requirements": 1,
+      "objective": "Separate reference-resource and add-on command inputs from repository operation payloads.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 5,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 92928,
+            "input_tokens": 156140,
+            "output_tokens": 643,
+            "reasoning_output_tokens": 340,
+            "total_tokens": 156783
+          }
+        },
+        "gpt-5.6-sol|high": {
+          "compactions": 0,
+          "token_events": 34,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2248192,
+            "input_tokens": 2325985,
+            "output_tokens": 8065,
+            "reasoning_output_tokens": 2211,
+            "total_tokens": 2334050
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 36,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2522112,
+            "input_tokens": 2635857,
+            "output_tokens": 19853,
+            "reasoning_output_tokens": 1664,
+            "total_tokens": 2655710
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T05:32:44.373Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "0948e5469cbab55b6d7264e4a069468756f3f319",
+      "canonical_before_oid": "a5e6469be25ff095c28b31a49f2dea5c6a3ec112",
+      "created_at": "2026-08-22T05:15:47.210Z",
+      "dependencies": 1,
+      "execution_seconds": 966.969,
+      "git_diff": {
+        "additions": 658,
+        "binary_files": 0,
+        "deletions": 132,
+        "files_changed": 35,
+        "lines_changed": 790,
+        "top_level_areas": {
+          "server": 35
+        }
+      },
+      "id": "784e85c8-c021-4016-8d47-7eee803cfe80",
+      "implementation_scope": "Change application trip create/update/list leaves, trip/application composition, narrow destination/category/supplier read ports, repository-owned trip write/filter payloads, PostgreSQL read adapters and trip write mapping as required, and directly affected application/infrastructure/HTTP test-support adapters and tests. Trip command inputs use destination_uuid, category_uuid, and primary_supplier_uuid. Resolve UUIDs through ordinary RO repository factories before opening one write transaction, then pass numeric IDs only in the repository trip payload. Add explicit missing-reference errors. Reuse existing UUID SQL where sufficient. Do not add transactional reads/locks, DDL, roles, DELETE/TRUNCATE, domain changes, HTTP routes, auth, CORS, or runtime-state changes.",
+      "integrated_at": "2026-08-22T05:48:51.342Z",
+      "linked_requirements": 1,
+      "objective": "Give trip create/update/list leaf-owned public inputs and reconcile relationship UUIDs through read-only repositories.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 6,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 257536,
+            "input_tokens": 335296,
+            "output_tokens": 1063,
+            "reasoning_output_tokens": 686,
+            "total_tokens": 336359
+          }
+        },
+        "gpt-5.6-sol|high": {
+          "compactions": 0,
+          "token_events": 41,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 4252416,
+            "input_tokens": 4324780,
+            "output_tokens": 9046,
+            "reasoning_output_tokens": 2198,
+            "total_tokens": 4333826
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 61,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 6260480,
+            "input_tokens": 6428328,
+            "output_tokens": 29110,
+            "reasoning_output_tokens": 4673,
+            "total_tokens": 6457438
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T05:49:13.324Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "c99798633bf1828679ed6fa2edf2cea4d514c5b7",
+      "canonical_before_oid": "0948e5469cbab55b6d7264e4a069468756f3f319",
+      "created_at": "2026-08-22T05:15:47.485Z",
+      "dependencies": 1,
+      "execution_seconds": 1064.49,
+      "git_diff": {
+        "additions": 2264,
+        "binary_files": 0,
+        "deletions": 33,
+        "files_changed": 28,
+        "lines_changed": 2297,
+        "top_level_areas": {
+          "server": 28
+        }
+      },
+      "id": "2a4ea183-2802-48a1-8a5e-0a3a4f68e943",
+      "implementation_scope": "Add or change HTTP router subtrees, resource-local response types, method-owned request/path DTOs, exhaustive local error mappings, paired endpoint tests, root protected-router/OpenAPI registration, tags, and HTTP-test-local adapters for PUT /clients/{client_uuid}; POST/GET /destinations and PUT /destinations/{destination_uuid}; POST/GET /categories and PUT /categories/{category_uuid}; and POST/GET /providers/{provider_context} plus GET/PUT /providers/{provider_context}/{provider_uuid}. Update direct HTTP date/decimal dependencies only if used by these operations. Preserve existing client/supplier routes and all config, deps, state, auth, CORS, application behavior, infrastructure, SQL, and DDL.",
+      "integrated_at": "2026-08-22T06:06:57.814Z",
+      "linked_requirements": 2,
+      "objective": "Expose client update, destinations, categories, and context-specific providers through protected HTTP operations.",
+      "rejected_reviews": 2,
+      "submissions": 3,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 8,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 176128,
+            "input_tokens": 291493,
+            "output_tokens": 884,
+            "reasoning_output_tokens": 393,
+            "total_tokens": 292377
+          }
+        },
+        "gpt-5.6-sol|high": {
+          "compactions": 0,
+          "token_events": 36,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 5267456,
+            "input_tokens": 5324120,
+            "output_tokens": 8910,
+            "reasoning_output_tokens": 1171,
+            "total_tokens": 5333030
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 61,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 6518528,
+            "input_tokens": 6679747,
+            "output_tokens": 35179,
+            "reasoning_output_tokens": 2727,
+            "total_tokens": 6714926
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T06:07:15.530Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "c0dcd136f289f95db749c4d8063d6647a697c0d8",
+      "canonical_before_oid": "c99798633bf1828679ed6fa2edf2cea4d514c5b7",
+      "created_at": "2026-08-22T05:15:47.773Z",
+      "dependencies": 1,
+      "execution_seconds": 2653.499,
+      "git_diff": {
+        "additions": 1879,
+        "binary_files": 0,
+        "deletions": 17,
+        "files_changed": 14,
+        "lines_changed": 1896,
+        "top_level_areas": {
+          "server": 14
+        }
+      },
+      "id": "30786e38-f110-4b2a-871f-ae87101d39c8",
+      "implementation_scope": "Add the /trips router subtree for POST/GET /trips and GET/PUT /trips/{trip_uuid}, canonical trip/add-on/detail HTTP representations, method-owned trip request/path/query DTOs, explicit date/decimal parsing, trip filter validation and mapping, exhaustive leaf-error mapping, protected root/OpenAPI registration, paired endpoint tests, and HTTP-test-local adapter support. Responses omit numeric IDs and use string decimals/ISO dates. Preserve application behavior established by the dependency task and do not change domain, persistence behavior, SQL, DDL, auth, CORS, config, or runtime state.",
+      "integrated_at": "2026-08-22T06:51:29.029Z",
+      "linked_requirements": 1,
+      "objective": "Expose trip create, update, filtered list, and complete detail through the canonical protected HTTP resource.",
+      "rejected_reviews": 3,
+      "submissions": 4,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 5,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 38656,
+            "input_tokens": 185450,
+            "output_tokens": 710,
+            "reasoning_output_tokens": 405,
+            "total_tokens": 186160
+          }
+        },
+        "gpt-5.6-sol|high": {
+          "compactions": 0,
+          "token_events": 66,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 12087808,
+            "input_tokens": 12365636,
+            "output_tokens": 14102,
+            "reasoning_output_tokens": 3239,
+            "total_tokens": 12379738
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 125,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 12591872,
+            "input_tokens": 12884805,
+            "output_tokens": 57375,
+            "reasoning_output_tokens": 6019,
+            "total_tokens": 12942180
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T06:51:47.977Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "81d04bb167d687efd4a3cf9644c3e0c9f103931c",
+      "canonical_before_oid": "c0dcd136f289f95db749c4d8063d6647a697c0d8",
+      "created_at": "2026-08-22T05:15:48.062Z",
+      "dependencies": 1,
+      "execution_seconds": 1384.401,
+      "git_diff": {
+        "additions": 362,
+        "binary_files": 0,
+        "deletions": 7,
+        "files_changed": 7,
+        "lines_changed": 369,
+        "top_level_areas": {
+          "server": 7
+        }
+      },
+      "id": "e4d95bea-d863-423b-873f-50e1f044465a",
+      "implementation_scope": "Add PUT and DELETE /trips/{trip_uuid}/clients/{client_uuid} route nodes, method-owned path DTOs, one-leaf handlers, exhaustive local error mappings, OpenAPI registration, paired endpoint tests, and only required HTTP-test-local adapter support. PUT has no body. Preserve existing application membership behavior and soft lifecycle semantics; do not change application, infrastructure, SQL, DDL, auth, CORS, config, or state.",
+      "integrated_at": "2026-08-22T07:14:52.378Z",
+      "linked_requirements": 1,
+      "objective": "Expose trip/client attachment and detachment through the canonical nested relationship.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 2,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 9728,
+            "input_tokens": 138820,
+            "output_tokens": 169,
+            "reasoning_output_tokens": 59,
+            "total_tokens": 138989
+          }
+        },
+        "gpt-5.6-sol|high": {
+          "compactions": 1,
+          "token_events": 32,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1456384,
+            "input_tokens": 1519547,
+            "output_tokens": 5655,
+            "reasoning_output_tokens": 1204,
+            "total_tokens": 1547847
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 19,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2166016,
+            "input_tokens": 2204627,
+            "output_tokens": 8573,
+            "reasoning_output_tokens": 905,
+            "total_tokens": 2213200
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T07:15:11.432Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "61bfca721026327314eb5d4b19d2d2d415c9e94c",
+      "canonical_before_oid": "81d04bb167d687efd4a3cf9644c3e0c9f103931c",
+      "created_at": "2026-08-22T05:15:48.356Z",
+      "dependencies": 1,
+      "execution_seconds": 39686.057,
+      "git_diff": {
+        "additions": 1043,
+        "binary_files": 0,
+        "deletions": 9,
+        "files_changed": 11,
+        "lines_changed": 1052,
+        "top_level_areas": {
+          "server": 11
+        }
+      },
+      "id": "4a9f5b79-60eb-421c-b94e-68a4bf119651",
+      "implementation_scope": "Add POST /trips/{trip_uuid}/insurance-add-ons and PUT/DELETE /trips/{trip_uuid}/insurance-add-ons/{insurance_addon_uuid}, insurance resource-local response mapping, method-owned path/body DTOs, ISO-date/string-decimal parsing, one-leaf handlers, exhaustive error mapping, OpenAPI registration, paired tests, and required HTTP-test adapter behavior. DELETE must call the existing soft-removal command. Do not change application, persistence, SQL, DDL, roles, auth, CORS, config, or state.",
+      "integrated_at": "2026-08-22T18:16:37.489Z",
+      "linked_requirements": 1,
+      "objective": "Expose insurance add-on create, update, and soft removal under trips.",
+      "rejected_reviews": 1,
+      "submissions": 2,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 1,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 4864,
+            "input_tokens": 18655,
+            "output_tokens": 237,
+            "reasoning_output_tokens": 174,
+            "total_tokens": 18892
+          }
+        },
+        "gpt-5.6-sol|high": {
+          "compactions": 1,
+          "token_events": 88,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 5164288,
+            "input_tokens": 5472565,
+            "output_tokens": 25966,
+            "reasoning_output_tokens": 6306,
+            "total_tokens": 5511507
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 72,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 6039552,
+            "input_tokens": 6278664,
+            "output_tokens": 31885,
+            "reasoning_output_tokens": 4127,
+            "total_tokens": 6310549
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T18:16:58.518Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "60de5e9fcbe15f4b93f4adc801c7bd7916b5f302",
+      "canonical_before_oid": "61bfca721026327314eb5d4b19d2d2d415c9e94c",
+      "created_at": "2026-08-22T05:15:48.655Z",
+      "dependencies": 1,
+      "execution_seconds": 881.632,
+      "git_diff": {
+        "additions": 1184,
+        "binary_files": 0,
+        "deletions": 9,
+        "files_changed": 10,
+        "lines_changed": 1193,
+        "top_level_areas": {
+          "server": 10
+        }
+      },
+      "id": "3279b025-828b-4949-96e8-05c3042ee263",
+      "implementation_scope": "Add POST /trips/{trip_uuid}/activity-add-ons and PUT/DELETE /trips/{trip_uuid}/activity-add-ons/{activity_addon_uuid}, activity resource-local response mapping, method-owned path/body DTOs, ISO-date/string-decimal parsing, one-leaf handlers, exhaustive error mapping, OpenAPI registration, paired tests, and required HTTP-test adapter behavior. DELETE must call the existing soft-removal command. Do not change application, persistence, SQL, DDL, roles, auth, CORS, config, or state.",
+      "integrated_at": "2026-08-22T18:31:40.150Z",
+      "linked_requirements": 1,
+      "objective": "Expose activity add-on create, update, and soft removal under trips.",
+      "rejected_reviews": 1,
+      "submissions": 2,
+      "usage_by_model_effort": {
+        "gpt-5.6-sol|high": {
+          "compactions": 0,
+          "token_events": 14,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2010624,
+            "input_tokens": 2047455,
+            "output_tokens": 5702,
+            "reasoning_output_tokens": 1434,
+            "total_tokens": 2053157
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 47,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 4375808,
+            "input_tokens": 4515739,
+            "output_tokens": 30110,
+            "reasoning_output_tokens": 2353,
+            "total_tokens": 4545849
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T18:31:48.736Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "9b4ff5f34450cef402b00ef62ce309849aef6d84",
+      "canonical_before_oid": "60de5e9fcbe15f4b93f4adc801c7bd7916b5f302",
+      "created_at": "2026-08-22T05:15:48.938Z",
+      "dependencies": 1,
+      "execution_seconds": 531.633,
+      "git_diff": {
+        "additions": 1195,
+        "binary_files": 0,
+        "deletions": 7,
+        "files_changed": 10,
+        "lines_changed": 1202,
+        "top_level_areas": {
+          "server": 10
+        }
+      },
+      "id": "4c800fa1-d059-4239-aa42-22a38a6d2280",
+      "implementation_scope": "Add POST /trips/{trip_uuid}/transportation-add-ons and PUT/DELETE /trips/{trip_uuid}/transportation-add-ons/{transportation_addon_uuid}, transportation resource-local response mapping, method-owned path/body DTOs, ISO-date/string-decimal parsing, one-leaf handlers, exhaustive error mapping, OpenAPI registration, paired tests, and required HTTP-test adapter behavior. DELETE must call the existing soft-removal command. Do not change application, persistence, SQL, DDL, roles, auth, CORS, config, or state.",
+      "integrated_at": "2026-08-22T18:40:40.369Z",
+      "linked_requirements": 1,
+      "objective": "Expose transportation add-on create, update, and soft removal under trips.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-sol|high": {
+          "compactions": 0,
+          "token_events": 10,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1708544,
+            "input_tokens": 1729886,
+            "output_tokens": 2466,
+            "reasoning_output_tokens": 128,
+            "total_tokens": 1732352
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 30,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2264576,
+            "input_tokens": 2371622,
+            "output_tokens": 18694,
+            "reasoning_output_tokens": 1399,
+            "total_tokens": 2390316
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T18:40:46.933Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "a5a175f5aa40ab8eb5fde9dd243ac0f8af3026d0",
+      "canonical_before_oid": "9b4ff5f34450cef402b00ef62ce309849aef6d84",
+      "created_at": "2026-08-22T05:15:49.223Z",
+      "dependencies": 1,
+      "execution_seconds": 538.738,
+      "git_diff": {
+        "additions": 1094,
+        "binary_files": 0,
+        "deletions": 7,
+        "files_changed": 10,
+        "lines_changed": 1101,
+        "top_level_areas": {
+          "server": 10
+        }
+      },
+      "id": "02abee38-1fba-4453-89de-dfcd51b1edfd",
+      "implementation_scope": "Add POST /trips/{trip_uuid}/hotel-stay-add-ons and PUT/DELETE /trips/{trip_uuid}/hotel-stay-add-ons/{hotel_stay_addon_uuid}, hotel-stay resource-local response mapping, method-owned path/body DTOs, ISO-date/string-decimal parsing, one-leaf handlers, exhaustive error mapping, OpenAPI registration, paired tests, and required HTTP-test adapter behavior. DELETE must call the existing soft-removal command. Do not change application, persistence, SQL, DDL, roles, auth, CORS, config, or state.",
+      "integrated_at": "2026-08-22T18:49:45.671Z",
+      "linked_requirements": 1,
+      "objective": "Expose hotel-stay add-on create, update, and soft removal under trips.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-sol|high": {
+          "compactions": 0,
+          "token_events": 10,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1921536,
+            "input_tokens": 1943555,
+            "output_tokens": 2583,
+            "reasoning_output_tokens": 193,
+            "total_tokens": 1946138
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 32,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2546688,
+            "input_tokens": 2653424,
+            "output_tokens": 19388,
+            "reasoning_output_tokens": 1461,
+            "total_tokens": 2672812
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T18:49:54.840Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "ac492c9d7bd7bb8a64efa604a8d2cd90a771d2d8",
+      "canonical_before_oid": "a5a175f5aa40ab8eb5fde9dd243ac0f8af3026d0",
+      "created_at": "2026-08-22T05:15:49.507Z",
+      "dependencies": 1,
+      "execution_seconds": 482.31,
+      "git_diff": {
+        "additions": 565,
+        "binary_files": 0,
+        "deletions": 2,
+        "files_changed": 6,
+        "lines_changed": 567,
+        "top_level_areas": {
+          "server": 6
+        }
+      },
+      "id": "71c91f15-8297-4990-94ed-eb99021f2768",
+      "implementation_scope": "Add GET /dashboard with method-owned query and response DTOs, selected_year/as_of parsing, exact mapping of the existing dashboard result, string-decimal/ISO-date formatting, one-query handler, exhaustive local error mapping, protected router/OpenAPI registration, paired tests, and required HTTP-test read adapter support. Do not change dashboard application arithmetic, domain, persistence selection, SQL, DDL, auth, CORS, config, or state.",
+      "integrated_at": "2026-08-22T18:57:57.150Z",
+      "linked_requirements": 1,
+      "objective": "Expose consolidated dashboard retrieval through the protected singleton HTTP resource.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-sol|high": {
+          "compactions": 0,
+          "token_events": 8,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1713152,
+            "input_tokens": 1730617,
+            "output_tokens": 2349,
+            "reasoning_output_tokens": 170,
+            "total_tokens": 1732966
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 37,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2870016,
+            "input_tokens": 2971383,
+            "output_tokens": 16206,
+            "reasoning_output_tokens": 1604,
+            "total_tokens": 2987589
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T18:58:11.284Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "4609bff55a0267c0566f2ab700f1b520c829730c",
+      "canonical_before_oid": "ac492c9d7bd7bb8a64efa604a8d2cd90a771d2d8",
+      "created_at": "2026-08-22T05:15:49.788Z",
+      "dependencies": 1,
+      "execution_seconds": 526.436,
+      "git_diff": {
+        "additions": 137,
+        "binary_files": 0,
+        "deletions": 3,
+        "files_changed": 3,
+        "lines_changed": 140,
+        "top_level_areas": {
+          "server": 3
+        }
+      },
+      "id": "1ed020d4-4173-47e3-94cf-2b9878104fe7",
+      "implementation_scope": "Review and adjust only HTTP root router/OpenAPI composition, resource tags, shared HTTP-generic test support, cross-cutting access/CORS/canonical-path/OpenAPI integration tests, and narrowly related Cargo dependencies or documentation needed to verify the complete implemented surface. Ensure every route is protected and registered exactly once with its real operation contract. Run full repository verification and correct only defects within the approved HTTP/application-boundary surface. Do not change domain policy/entities, DDL, roles, deletion semantics, auth behavior, CORS behavior, runtime state, deployment, pagination, telemetry, or maintenance.",
+      "integrated_at": "2026-08-22T19:06:57.720Z",
+      "linked_requirements": 1,
+      "objective": "Complete assembled protected-router and OpenAPI verification for the full HTTP API.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-sol|high": {
+          "compactions": 1,
+          "token_events": 36,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1553664,
+            "input_tokens": 1634485,
+            "output_tokens": 8471,
+            "reasoning_output_tokens": 2892,
+            "total_tokens": 1660712
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 29,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2283264,
+            "input_tokens": 2382032,
+            "output_tokens": 11147,
+            "reasoning_output_tokens": 2403,
+            "total_tokens": 2393179
+          }
+        }
+      }
+    }
+  ]
+}

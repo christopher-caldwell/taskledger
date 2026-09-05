@@ -32,7 +32,8 @@ def error_exit(code: str) -> int:
         return 4
     if code in {"GIT_COMMAND_FAILED", "NOT_A_GIT_REPOSITORY", "BARE_REPOSITORY_UNSUPPORTED",
                 "DETACHED_HEAD", "CANONICAL_BRANCH_NOT_FOUND", "CANONICAL_BRANCH_NOT_CHECKED_OUT",
-                "CANONICAL_WORKTREE_DIRTY", "INTEGRATION_FAILED_SAFE"}:
+                "CANONICAL_WORKTREE_DIRTY", "INTEGRATION_FAILED_SAFE", "INITIAL_COMMIT_REQUIRED",
+                "LEDGER_DIRECTORY_NOT_IGNORED"}:
         return 5
     if code in {"RECOVERY_REQUIRED", "INTEGRATION_STATE_UNCERTAIN"}:
         return 6
@@ -67,9 +68,27 @@ def token() -> str:
     return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
 
 
-def taskledger_home() -> Path:
-    path = Path(os.environ.get("TASKLEDGER_HOME", Path.home() / ".taskledger")).expanduser()
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+def taskledger_home(repository_root: str | Path | None = None, *, create: bool = True) -> Path:
+    configured = os.environ.get("TASKLEDGER_HOME")
+    if configured:
+        path = Path(configured).expanduser()
+    elif repository_root is not None:
+        path = Path(repository_root).resolve() / ".taskledger"
+    else:
+        raise LedgerError(
+            "PROJECT_REQUIRED",
+            "Run Taskledger from the repository or set TASKLEDGER_HOME for a legacy shared ledger.",
+        )
+    if not create:
+        return path
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise LedgerError(
+            "LEDGER_STORAGE_UNAVAILABLE",
+            "Taskledger could not access this repository's local state directory.",
+            details={"path": str(path), "reason": exc.__class__.__name__},
+        )
     try:
         path.chmod(0o700)
     except OSError:
@@ -78,10 +97,10 @@ def taskledger_home() -> Path:
 
 
 def atomic_secret(path: Path, value: str) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp-" + new_id())
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(value + "\n")
             f.flush()
@@ -91,9 +110,18 @@ def atomic_secret(path: Path, value: str) -> None:
             path.chmod(0o600)
         except OSError:
             pass
+    except OSError as exc:
+        raise LedgerError(
+            "LEDGER_STORAGE_UNAVAILABLE",
+            "Taskledger could not write a credential in this repository's local state.",
+            details={"path": str(path), "reason": exc.__class__.__name__},
+        )
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        try:
+            if temporary.exists():
+                temporary.unlink()
+        except OSError:
+            pass
 
 
 def require_object(value: Any, allowed: Iterable[str], required: Iterable[str] = ()) -> dict[str, Any]:

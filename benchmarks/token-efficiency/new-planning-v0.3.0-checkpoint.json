@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "checkpoint": "begin-first-brand-new-v0.3.0-planning-effort",
+  "created_at": "2026-08-22T19:28:55Z",
+  "taskledger_version": "0.3.0",
+  "meaning": "The first completed v0.3.0 sample ended successfully, but its plan and queue already existed before v0.3.0. The next Taskledger session after this timestamp will begin from a brand-new specification and will be the first sample that exercises v0.3.0 planning as well as execution.",
+  "timeline": {
+    "pre_v0_3_baseline": "financial-tracker-pre-v0.3.0.json",
+    "first_v0_3_queued_run": "financial-tracker-post-v0.3.0-thread-01a02aa8.json",
+    "first_v0_3_queued_run_comparison": "comparison-v0.3.0-thread-01a02aa8.md",
+    "first_v0_3_task_level_reconstruction": "financial-tracker-http-spec-task-complexity.json",
+    "comparison_methodology": "task-complexity-methodology.md",
+    "next_sample_starts_after": "2026-08-22T19:28:55Z",
+    "next_sample_kind": "brand-new specification, planning, materialization, execution, verification, and completion"
+  },
+  "interpretation_policy": {
+    "forward_only_hard_baseline": false,
+    "retain_prior_samples": true,
+    "description": "Treat this as a chronological phase marker, not as an instruction to discard or reset earlier evidence. Future analysis should extend the existing series and label the already-queued run separately from the first brand-new planning run."
+  },
+  "next_run_qualification": {
+    "required": [
+      "The root Taskledger task begins after the checkpoint timestamp.",
+      "The rollout injects Taskledger skill metadata version 0.3.0 or later and the installed CLI reports the same intended version.",
+      "A new specification is supplied and planning is not merely resumed from an already-materialized queue.",
+      "The run includes the v0.3.0 planning approvals, ledger materialization, plan validation, and at least one assignment.",
+      "Primary and worker model settings are recorded from runtime turn context."
+    ],
+    "preferred": [
+      "The project reaches Taskledger completion.",
+      "At least three tasks complete in one comparable family; a broader conclusion needs multiple families or roughly 15-20 tasks.",
+      "No model or reasoning-effort changes occur during the sample."
+    ]
+  },
+  "phase_boundaries_for_analysis": {
+    "planning_start": "root task/session start with the new specification",
+    "approval_1": "user accepts outcome, chunks, granularity, dependencies/parallelism, assumptions, and exclusions",
+    "approval_2": "user authorizes exact base, ledger materialization, and first assignment wave after validation",
+    "planning_end": "first ASSIGNMENT_ACTIVATED audit event",
+    "execution_end": "PROJECT_COMPLETED, durable blocker, or explicit user stop",
+    "separate_metrics": [
+      "planning Sol/high input, output, token events, turns, and compactions",
+      "approval count and plan revisions",
+      "execution Sol/high and Terra/medium usage per integrated task",
+      "per-task criteria, requirements, dependencies, files, changed lines, submissions, corrections, and execution windows",
+      "recover, resume, worker-context, and review-context calls",
+      "rejections, corrections, blockers, uncertain operations, and verified requirements"
+    ]
+  },
+  "comparison_controls": {
+    "primary_model": "gpt-5.6-sol",
+    "primary_reasoning_effort": "high",
+    "worker_model": "gpt-5.6-terra",
+    "worker_reasoning_effort": "medium",
+    "auto_review": "report separately and do not attribute a changed approval mode to Taskledger",
+    "model_policy": "Compare exact model/reasoning cohorts; do not extrapolate lower-tier tokens into hypothetical higher-tier behavior.",
+    "task_matching_policy": "Use repeated sibling or same-family tasks as the primary comparison. Architecture-versus-endpoint and raw integrated-task comparisons are context only; do not collapse complexity into one score."
+  },
+  "future_thread_id": null,
+  "future_post_checkpoint": null,
+  "future_comparison": null
+}

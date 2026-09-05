@@ -278,6 +278,22 @@ During initialization Taskledger must:
 
 Project creation must not complete until the branch is confirmed.
 
+If the repository root is already registered, initialization must be idempotent:
+it returns the existing project identity and directs the orchestrator to continue
+that project. It must not require a second confirmation, create a duplicate
+project, or describe the existing project as stale state.
+
+An unborn symbolic branch is a valid initialization base. Taskledger must report
+that the first commit is still required, allow planning and recovery, and reject
+assignment or completion with a specific initial-commit precondition instead of
+surfacing Git's missing-revision error.
+
+The default durable store must be `.taskledger/` under the canonical repository
+root. Discovery must not create it. New-project confirmation must require that
+path to be covered by Git ignore rules before writing the database, credentials,
+or assignment state. An explicit `TASKLEDGER_HOME` remains available for legacy
+or intentionally external stores.
+
 If the repository is in detached-HEAD state or a checked-out branch cannot be determined, initialization must stop and explain that the orchestrator must first select a branch. Taskledger must not substitute `main`, the remote default branch, or any other branch.
 
 ### PS-002 — Preserve one canonical branch
@@ -393,6 +409,11 @@ A revision must invalidate any prior verification of that requirement. A retirem
 
 If a requirement revision affects an active assignment, Taskledger must require the orchestrator to decide whether the assignment remains valid or must be revoked.
 
+When new behavior replaces rather than revises an active requirement, the
+orchestrator may supersede it atomically. Taskledger must create the replacement,
+retire and link the prior requirement, preserve completed tasks as historical
+evidence, and require new current-plan tasks to link to active requirements.
+
 ---
 
 ## 12. Planning and Plan Validation
@@ -400,6 +421,10 @@ If a requirement revision affects an active assignment, Taskledger must require 
 ### PS-030 — Orchestrator-owned plan
 
 The orchestrator creates and revises the requirements, tasks, requirement links, and task dependencies that make up the plan. Taskledger does not generate or prioritize the plan.
+
+Taskledger may accept a batch of new requirements and tasks with request-local
+references. The entire batch must commit or roll back as one ledger transaction;
+the orchestrator must still validate the resulting plan explicitly.
 
 ### PS-031 — Structural validation
 
@@ -444,6 +469,10 @@ Each non-cancelled executable task must include:
 - one or more acceptance criteria;
 - zero or more dependencies; and
 - one or more associated active requirements.
+
+A task may also declare exact deterministic required-check commands. Each
+declared command is part of the immutable task revision and must be represented
+by successful matching evidence before Taskledger records a worker submission.
 
 ### PS-041 — Task lifecycle
 
@@ -523,6 +552,15 @@ Taskledger may list eligible tasks, but it must not select or prioritize one. Th
 
 Taskledger may maintain multiple active assignments for different eligible tasks. It must never assume that tasks are safe to run in parallel based on their descriptions or file scope. The orchestrator makes that decision.
 
+Before launching a parallel wave, the orchestrator must inspect the repository
+and derive a prospective write set for each task. The write set includes explicit
+ownership plus likely shared configuration, registries, generated contracts,
+central exports or cleanup modules, verification scripts, and application entry
+points. Tasks may run together only when their writes and behavioral assumptions
+are independent. A shared surface must have one owner, with consumers sequenced
+after its integration or dependent on a separately integrated foundation.
+Worker complexity and parallel safety are independent decisions.
+
 A task may have at most one active assignment at a time.
 
 ---
@@ -536,6 +574,7 @@ An assignment must be bound to:
 - one task;
 - the exact task revision assigned;
 - one worker identity or scoped worker credential;
+- one explicit worker profile, either `routine` or `complex`;
 - one repository workspace;
 - one starting canonical commit; and
 - one attempt number.
@@ -548,6 +587,8 @@ Taskledger must provide the worker only the ledger information needed for the as
 - implementation scope;
 - acceptance criteria;
 - associated requirement statements and source references;
+- active registered specification identities and repository-relative paths,
+  without embedding their complete contents;
 - the assignment workspace;
 - the assignment identity; and
 - current answers to assignment questions.
@@ -559,6 +600,33 @@ Repository access needed to implement the task is permitted. The authority restr
 ### PS-062 — Assignment revocation
 
 The orchestrator may revoke an assignment. Revocation must invalidate the worker’s authority to submit further ledger actions for that assignment while preserving any repository work for inspection or recovery.
+
+### PS-063 — Orchestrator-selected worker routing
+
+Taskledger must require the orchestrator to select `routine` or `complex` when
+creating an assignment and must preserve that selection in assignment context,
+recovery state, review context, and audit history. Taskledger records the stable
+capability role; the consuming repository maps each role to its chosen model,
+reasoning effort, and worker instructions. Taskledger must not silently select,
+substitute, or downgrade a worker profile.
+
+The orchestrator must prefer `routine` when the task fixes one implementation
+approach, explicitly bounds ownership, provides deterministic acceptance, keeps
+failure local and reversible, and requires no unresolved high-consequence
+judgment. Size, file count, and a mechanical migration do not make a task
+complex. It must use `complex` when the worker still needs to choose architecture
+or state ownership, reconcile shared contracts or implementations, interpret
+product or visual intent, or decide security, authorization, schema/data,
+concurrency, destructive, compatibility, or weakly testable high-impact
+behavior. The orchestrator must first clarify a vague task rather than using the
+complex profile as a substitute for adequate planning.
+
+A mechanically broad rollout remains routine when it repeats a frozen,
+integrated pattern. The orchestrator should separate unresolved semantic or
+state-reconciliation work into a focused complex task and route deterministic
+followers independently. Final integrated verification remains orchestrator
+work rather than an implementation assignment whose purpose is to review other
+workers.
 
 ---
 
@@ -612,7 +680,11 @@ Verification must apply to the exact repository state identified by the submissi
 
 ### PS-083 — Corrected submissions
 
-After rejection, the worker may continue under the active assignment and create a new submission. Prior submissions and verification outcomes must remain available as history.
+After a first rejection, the worker may continue under the active assignment and
+create a corrected submission. Prior submissions and verification outcomes must
+remain available as history. After a task's second routine-worker rejection,
+Taskledger must revoke it, return the task to planned, and require a complex
+worker profile for the next assignment.
 
 ---
 
@@ -647,7 +719,10 @@ Rejection must:
 
 - preserve the rejected submission and verification record;
 - include corrective guidance;
-- return the task to active implementation under the current assignment unless the orchestrator revokes it; and
+- return the task to active implementation after a first routine rejection or a
+  complex-worker rejection unless the orchestrator revokes it;
+- automatically revoke a routine assignment after its second rejection and
+  require a complex replacement assignment; and
 - allow a later corrected submission.
 
 ### PS-094 — Blocked verification behavior
@@ -771,6 +846,29 @@ The complete recovery snapshot and all state-changing command results must be av
 
 A human-readable view may also exist but is not required.
 
+### PS-123 — Compact routine resume
+
+Taskledger must provide a compact, deterministic current-state projection for
+routine polling when the orchestrator retains a trusted project baseline. It
+must be computed from current authoritative tables after repository and
+specification preflight, not reconstructed from audit events. Missing or stale
+baselines and unresolved operations must fail safe to a fresh compact snapshot
+or the complete recovery contract.
+
+### PS-124 — Secret-minimized assignment handoff
+
+Model-visible assignment and credential-rotation results must not contain a
+plaintext worker credential. The credential is delivered through its
+owner-only local path. Assignment creation returns a stable hash of the exact
+persisted assignment snapshot rather than duplicating that snapshot.
+
+### PS-125 — Focused review context
+
+Taskledger must provide an orchestrator-only submission review projection bound
+to the exact base and submitted commit OIDs. It must identify omissions or
+bounds explicitly and must not claim semantic correctness, execute worker
+evidence, or replace independent inspection and testing.
+
 ---
 
 ## 22. Progress Reporting
@@ -854,6 +952,18 @@ On success, Taskledger must record the canonical branch and commit at which comp
 ### PS-144 — Completion invalidation
 
 If later observed state invalidates a completion condition, Taskledger must remove the project’s effective completed state and identify why it is no longer complete.
+
+### PS-145 — Safe post-completion worktree cleanup
+
+After recording successful project completion, Taskledger must attempt to remove
+finalized assignment worktrees that it can prove are its own, are registered to
+the managed repository, are on the recorded assignment branch, contain no local
+changes, and have no Git operation in progress. Cleanup must never force removal
+or delete assignment branches, commits, integration records, or ledger history.
+
+An unsafe worktree must be retained and reported with a reason. The orchestrator
+may retry cleanup explicitly while the project remains completed. Repeated
+cleanup must be safe when a worktree has already been removed.
 
 ---
 

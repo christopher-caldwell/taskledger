@@ -1,0 +1,401 @@
+{
+  "created_at": "2026-08-24T14:16:34Z",
+  "interpretation": {
+    "do_not_use": "Do not treat elapsed time, lines changed, or integrated-task count alone as task complexity.",
+    "overlap": "If task windows overlap, their token totals are not additive and must not be pooled.",
+    "planning": "Planning tokens fall outside assignment-to-integration windows and must be reported separately.",
+    "use": "Compare like task families and inspect each observable complexity dimension before aggregating tokens."
+  },
+  "label": "Financial Tracker v0.4.0 routed tasks thread 01a030bc",
+  "ledger_db": "/Users/christophercaldwell/Code/business/clients/destinations_beyond/db_financial_tracker/.taskledger/taskledger.sqlite3",
+  "repository": "/Users/christophercaldwell/Code/business/clients/destinations_beyond/db_financial_tracker",
+  "schema_version": 1,
+  "source": {
+    "files_matched_to_repo": 109,
+    "files_scanned": 220,
+    "inherited_history": {
+      "compactions_excluded": 69,
+      "forked_files": 43,
+      "token_events_excluded": 11607
+    },
+    "overlapping_task_windows": [
+      [
+        "4a25fbbe-0348-4234-a701-f4ec2d2031cf",
+        "8712c844-0bbe-4417-ac10-3ce31b8118b2"
+      ],
+      [
+        "c3019053-fb35-466d-8c14-2ecd79ab06b1",
+        "69a75569-47be-4d03-ae2e-078b361418e8"
+      ]
+    ],
+    "sessions": "/Users/christophercaldwell/.codex/sessions"
+  },
+  "tasks": [
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T23:03:33.768Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "18a56de68d0dfe939eb9062667f2320497e0315a",
+      "canonical_before_oid": "42afa7bd32f79b07c3b87ba3e8bc85e832bc95d8",
+      "created_at": "2026-08-23T23:01:27.090Z",
+      "dependencies": 0,
+      "execution_seconds": 736.969,
+      "git_diff": {
+        "additions": 138,
+        "binary_files": 0,
+        "deletions": 7,
+        "files_changed": 8,
+        "lines_changed": 145,
+        "top_level_areas": {
+          "web": 8
+        }
+      },
+      "id": "4a25fbbe-0348-4234-a701-f4ec2d2031cf",
+      "implementation_scope": "Own web/src/api/** and web/src/utils/query-keys/** only. Add mock/live fetchers, query options, hooks, invalidation keys, deterministic lookup behavior, and any narrowly required schema aliases for supplier identified reads, context-scoped provider identified reads, all-context provider resolution, and collection-backed destination/category lookup. Do not edit generated api/types.d.ts, routes, shared components, package metadata, server files, or database files.",
+      "integrated_at": "2026-08-23T23:15:50.737Z",
+      "linked_requirements": 3,
+      "objective": "Complete the typed web read boundary needed by supplier, provider, destination, and category detail experiences without changing the server contract.",
+      "rejected_reviews": 1,
+      "submissions": 2,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 50,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 4564352,
+            "input_tokens": 4716434,
+            "output_tokens": 26812,
+            "reasoning_output_tokens": 10743,
+            "total_tokens": 4743246
+          }
+        },
+        "gpt-5.6-sol|xhigh": {
+          "compactions": 0,
+          "token_events": 25,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 4503552,
+            "input_tokens": 4534604,
+            "output_tokens": 6228,
+            "reasoning_output_tokens": 2024,
+            "total_tokens": 4540832
+          }
+        },
+        "gpt-5.6-terra|high": {
+          "compactions": 0,
+          "token_events": 57,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 5903872,
+            "input_tokens": 6074319,
+            "output_tokens": 30766,
+            "reasoning_output_tokens": 5423,
+            "total_tokens": 6105085
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T23:03:38.623Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "49dacc87f8bbab5ecb3a76c948ebe0e001526e61",
+      "canonical_before_oid": "18a56de68d0dfe939eb9062667f2320497e0315a",
+      "created_at": "2026-08-23T23:01:27.490Z",
+      "dependencies": 0,
+      "execution_seconds": 1226.557,
+      "git_diff": {
+        "additions": 355,
+        "binary_files": 0,
+        "deletions": 199,
+        "files_changed": 10,
+        "lines_changed": 554,
+        "top_level_areas": {
+          "web": 10
+        }
+      },
+      "id": "8712c844-0bbe-4417-ac10-3ce31b8118b2",
+      "implementation_scope": "Own web/package.json, web/pnpm-lock.yaml, web/src/components/**, web/src/styles.css, web/src/app-theme.tsx, web/src/routes/dashboard/**, web/src/routes/clients/**, and web/src/routes/trips/**. Recreate the CRM TanStack EntityTable pattern and supporting list/detail primitives; keep financial-domain semantics and existing hooks/mutations. Do not edit web/src/api/**, query-key utilities, router.tsx, AppLayout navigation targets beyond presentation that does not require unregistered routes, server files, database files, or reference-route implementation.",
+      "integrated_at": "2026-08-23T23:24:05.180Z",
+      "linked_requirements": 6,
+      "objective": "Establish the CRM-pattern Financial Tracker design system and redesign the dashboard, client, and trip list/detail experiences around it.",
+      "rejected_reviews": 1,
+      "submissions": 2,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 50,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 4564352,
+            "input_tokens": 4716434,
+            "output_tokens": 26812,
+            "reasoning_output_tokens": 10743,
+            "total_tokens": 4743246
+          }
+        },
+        "gpt-5.6-sol|xhigh": {
+          "compactions": 1,
+          "token_events": 83,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 8657536,
+            "input_tokens": 8815897,
+            "output_tokens": 18419,
+            "reasoning_output_tokens": 4904,
+            "total_tokens": 8853710
+          }
+        },
+        "gpt-5.6-terra|high": {
+          "compactions": 0,
+          "token_events": 70,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 7829376,
+            "input_tokens": 8016250,
+            "output_tokens": 37034,
+            "reasoning_output_tokens": 7566,
+            "total_tokens": 8053284
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T23:24:15.294Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "456dc3867e6b719c69230b3501a8671b1f7c2e0b",
+      "canonical_before_oid": "49dacc87f8bbab5ecb3a76c948ebe0e001526e61",
+      "created_at": "2026-08-23T23:01:43.361Z",
+      "dependencies": 2,
+      "execution_seconds": 1010.53,
+      "git_diff": {
+        "additions": 927,
+        "binary_files": 0,
+        "deletions": 576,
+        "files_changed": 20,
+        "lines_changed": 1503,
+        "top_level_areas": {
+          "web": 20
+        }
+      },
+      "id": "57bf7999-c289-4fef-bf21-9f759a24d2cd",
+      "implementation_scope": "After the API-boundary and shared-design tasks integrate, own new web/src/routes/destinations/**, suppliers/**, providers/**, and categories/**; the route registry; AppLayout navigation configuration; shared reference create/edit form placement; and removal of obsolete web/src/routes/settings/**. Follow the integrated EntityTable, detail-tabs, constant-sidebar, form, state, and styling conventions exactly. Touch shared primitives or api code only through a focused correction request if the established contract is insufficient. Do not edit server, database, generated OpenAPI output, dashboard, client, or trip feature implementations.",
+      "integrated_at": "2026-08-23T23:41:05.824Z",
+      "linked_requirements": 5,
+      "objective": "Add the destination, supplier, provider, and category table/detail routes and finalize the approved route shell using the integrated CRM-pattern primitives.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 1,
+          "token_events": 59,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 7243264,
+            "input_tokens": 7524334,
+            "output_tokens": 40004,
+            "reasoning_output_tokens": 8963,
+            "total_tokens": 7586091
+          }
+        },
+        "gpt-5.6-sol|xhigh": {
+          "compactions": 0,
+          "token_events": 70,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 7113984,
+            "input_tokens": 7206904,
+            "output_tokens": 11867,
+            "reasoning_output_tokens": 3373,
+            "total_tokens": 7218771
+          }
+        },
+        "gpt-5.6-terra|high": {
+          "compactions": 0,
+          "token_events": 3,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 464512,
+            "input_tokens": 482958,
+            "output_tokens": 1506,
+            "reasoning_output_tokens": 666,
+            "total_tokens": 484464
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-24T00:34:35.649Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "90277191d2b0c5ecc74651999b8d38535ea82e1e",
+      "canonical_before_oid": "b58737e1196a705b455667a8a269e6985f036d75",
+      "created_at": "2026-08-24T00:34:22.755Z",
+      "dependencies": 0,
+      "execution_seconds": 1298.626,
+      "git_diff": {
+        "additions": 160,
+        "binary_files": 0,
+        "deletions": 125,
+        "files_changed": 7,
+        "lines_changed": 285,
+        "top_level_areas": {
+          "web": 7
+        }
+      },
+      "id": "d49cfec5-e335-46c0-8939-f244ed8085b8",
+      "implementation_scope": "Extend web/src/components/entity-table for an embedded/tab toolbar presentation without regressing page tables. Refactor the client, trip, reference, and provider detail implementations to define typed TanStack columns and render their relationship, traveler, usage, and add-on datasets through EntityTable. Reuse dataset components between Overview and dedicated tabs. Preserve existing queries, links, right-side cards, forms, confirmations, attach/detach, add/edit/remove mutations, error drafts, payout labels, financial semantics, and responsive styles. Update the UI verifier for the new contract. Do not edit generated OpenAPI types or server code.",
+      "integrated_at": "2026-08-24T00:56:14.275Z",
+      "linked_requirements": 2,
+      "objective": "Adopt the shared EntityTable throughout every current table-shaped detail tab.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-sol|xhigh": {
+          "compactions": 1,
+          "token_events": 105,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 12411520,
+            "input_tokens": 12637489,
+            "output_tokens": 19685,
+            "reasoning_output_tokens": 5989,
+            "total_tokens": 12681229
+          }
+        },
+        "gpt-5.6-terra|high": {
+          "compactions": 1,
+          "token_events": 66,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 7589888,
+            "input_tokens": 8053602,
+            "output_tokens": 42168,
+            "reasoning_output_tokens": 4243,
+            "total_tokens": 8140428
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-24T02:07:39.381Z",
+      "assignment_attempts": 2,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "94c2652bbb2ff507a4f1f759304a4dc417270fde",
+      "canonical_before_oid": "bd5c30821f644a8e389ddd9120d1bb6431a432a7",
+      "created_at": "2026-08-24T02:07:15.069Z",
+      "dependencies": 0,
+      "execution_seconds": 402.985,
+      "git_diff": {
+        "additions": 61,
+        "binary_files": 0,
+        "deletions": 76,
+        "files_changed": 6,
+        "lines_changed": 137,
+        "top_level_areas": {
+          "web": 6
+        }
+      },
+      "id": "c3019053-fb35-466d-8c14-2ecd79ab06b1",
+      "implementation_scope": "web/package.json and lockfile; shared reference-select/form helpers; trip, trip add-on, client, and reference create/edit forms; new-trip route and styles; UI contract verification. Preserve existing API types and TanStack Query hooks/mutations.",
+      "integrated_at": "2026-08-24T02:14:22.366Z",
+      "linked_requirements": 2,
+      "objective": "Refresh new-trip UX and migrate all active create/edit surfaces to TanStack Form.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-sol|xhigh": {
+          "compactions": 0,
+          "token_events": 30,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 5478400,
+            "input_tokens": 5527619,
+            "output_tokens": 6725,
+            "reasoning_output_tokens": 1944,
+            "total_tokens": 5534344
+          }
+        },
+        "gpt-5.6-terra|high": {
+          "compactions": 0,
+          "token_events": 52,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 3946112,
+            "input_tokens": 4117270,
+            "output_tokens": 20938,
+            "reasoning_output_tokens": 5344,
+            "total_tokens": 4138208
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 4,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-24T02:07:30.051Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "baf3451785785efc35da6f2ec4beb996f2b78c08",
+      "canonical_before_oid": "94c2652bbb2ff507a4f1f759304a4dc417270fde",
+      "created_at": "2026-08-24T02:07:02.742Z",
+      "dependencies": 0,
+      "execution_seconds": 1515.507,
+      "git_diff": {
+        "additions": 138,
+        "binary_files": 0,
+        "deletions": 27,
+        "files_changed": 12,
+        "lines_changed": 165,
+        "top_level_areas": {
+          "web": 12
+        }
+      },
+      "id": "69a75569-47be-4d03-ae2e-078b361418e8",
+      "implementation_scope": "Own the shared EditDrawer lifecycle and entity-detail drawer callers, including client/reference/provider/trip detail routes, EditTripDrawer, AddonForm, and the Travelers ClientMembership toolbar. Persistently mount drawers with controlled opened state, reset drafts/fullscreen correctly on close/reopen, replace the native traveler select with an application select, and prove the typed attachment/detachment interaction. Do not change trip creation routing or server/generated API code.",
+      "integrated_at": "2026-08-24T02:32:45.558Z",
+      "linked_requirements": 2,
+      "objective": "Eliminate drawer lifecycle jerkiness across entity details and make the Travelers attachment toolbar styled and functional.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-sol|xhigh": {
+          "compactions": 1,
+          "token_events": 114,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 13845632,
+            "input_tokens": 14065422,
+            "output_tokens": 23619,
+            "reasoning_output_tokens": 7723,
+            "total_tokens": 14115091
+          }
+        },
+        "gpt-5.6-terra|high": {
+          "compactions": 0,
+          "token_events": 113,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 12300160,
+            "input_tokens": 12687730,
+            "output_tokens": 39688,
+            "reasoning_output_tokens": 11223,
+            "total_tokens": 12727418
+          }
+        }
+      }
+    }
+  ]
+}

@@ -22,7 +22,7 @@ def run(repo: str | Path, args: Sequence[str], *, check: bool = True) -> subproc
     return result
 
 
-def inspect(repo: str | Path) -> dict[str, str]:
+def inspect(repo: str | Path) -> dict[str, str | bool | None]:
     root_result = run(repo, ["rev-parse", "--show-toplevel"], check=False)
     if root_result.returncode:
         raise LedgerError("NOT_A_GIT_REPOSITORY", "Path is not an existing Git working repository.")
@@ -34,11 +34,27 @@ def inspect(repo: str | Path) -> dict[str, str]:
     branch = run(root, ["symbolic-ref", "--quiet", "--short", "HEAD"], check=False)
     if branch.returncode:
         raise LedgerError("DETACHED_HEAD", "Repository is detached; check out an explicit branch first.")
-    return {"root": root, "common": common_path, "branch": branch.stdout.strip()}
+    head = run(root, ["rev-parse", "--verify", "HEAD"], check=False)
+    return {
+        "root": root,
+        "common": common_path,
+        "branch": branch.stdout.strip(),
+        "has_commits": head.returncode == 0,
+        "head_oid": head.stdout.strip() if head.returncode == 0 else None,
+    }
 
 
 def oid(repo: str | Path, ref: str = "HEAD") -> str:
     return run(repo, ["rev-parse", "--verify", ref]).stdout.strip()
+
+
+def oid_or_none(repo: str | Path, ref: str = "HEAD") -> str | None:
+    result = run(repo, ["rev-parse", "--verify", ref], check=False)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def ignored(repo: str | Path, relative_path: str) -> bool:
+    return run(repo, ["check-ignore", "--quiet", "--no-index", relative_path], check=False).returncode == 0
 
 
 def ancestor(repo: str | Path, older: str, newer: str) -> bool:
@@ -59,3 +75,12 @@ def operation_in_progress(repo: str | Path) -> bool:
     if not git_dir.is_absolute():
         git_dir = Path(repo) / git_dir
     return any((git_dir / n).exists() for n in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "rebase-merge", "rebase-apply"))
+
+
+def registered_worktrees(repo: str | Path) -> set[str]:
+    """Return normalized paths registered in this repository's worktree set."""
+    paths = set()
+    for line in run(repo, ["worktree", "list", "--porcelain"]).stdout.splitlines():
+        if line.startswith("worktree "):
+            paths.add(str(Path(line.removeprefix("worktree ")).resolve()))
+    return paths

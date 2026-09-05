@@ -1,6 +1,6 @@
 {
   "name": "taskledger",
-  "version": "0.1.0",
+  "version": "0.5.2",
   "description": "Operate a local durable execution ledger for Codex projects",
   "author": {
     "name": "Christopher Caldwell"
@@ -9,14 +9,14 @@
   "interface": {
     "displayName": "Task Ledger",
     "shortDescription": "Track durable Codex project execution.",
-    "longDescription": "Use the local Taskledger CLI to persist requirements, tasks, scoped assignments, submissions, verification, integration, blockers, recovery state, and requirement-based completion across Codex sessions.",
+    "longDescription": "Use the local Taskledger CLI to persist requirements, tasks, scoped assignments, submissions, verification, integration, blockers, interrupted-operation state, and requirement-based completion across Codex sessions.",
     "developerName": "Christopher Caldwell",
     "category": "Productivity",
     "capabilities": ["Interactive", "Write"],
     "defaultPrompt": [
       "Resume this project's Taskledger state and show the next safe action.",
-      "Initialize Taskledger for this repository and help me define the plan.",
-      "Recover this Taskledger project after the previous session ended."
+      "Initialize or continue Taskledger for this repository and guide me through the two default approval gates.",
+      "Resume this Taskledger project after the previous session ended."
     ]
   }
 }

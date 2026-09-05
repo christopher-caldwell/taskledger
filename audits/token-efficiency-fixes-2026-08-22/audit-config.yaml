@@ -1,0 +1,22 @@
+audit_target: Taskledger token-efficiency proposals against the current working tree
+audit_type: general_audit
+reviewer_count: 5
+reviewer_mode: identical_reviewers
+quorum_threshold: 0.60
+reviewer_independence: strict
+implementation_policy: implement only fixes supported by the final consensus audit
+allowed_materials:
+  - current Taskledger source, tests, specifications, and skill instructions
+  - supplied empirical Taskledger command-frequency and token-usage measurements
+  - local Codex state or session logs when used only to verify supplied measurements
+disallowed_materials:
+  - other reviewers' reports or communications
+  - final-consensus-audit.md before root synthesis
+proposals_under_review:
+  - compact or delta project resume, retaining full recovery for uncertain operations
+  - eliminate duplicated assignment context delivery and avoid returning raw worker tokens
+  - add a bounded reviewer-context command
+  - introduce adaptive assurance levels
+  - batch requirement verification and expose ready requirements
+  - reduce default planning gates while preserving full gates for critical work
+  - add token and credit instrumentation with an explicit escalation tipping point

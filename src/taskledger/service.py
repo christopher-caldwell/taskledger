@@ -3,21 +3,23 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
 from . import git
 from .core import (LedgerError, MAX_SPEC, array, atomic_secret, canonical, canonical_bytes,
-                   new_id, now, require_object, sha256, taskledger_home, text, token)
+                   new_id, now, require_object, sha256, text, token)
 from .db import transaction
 
 
 CATEGORIES = {"MISSING_PRODUCT_DECISION", "AMBIGUOUS_REQUIREMENT", "EXTERNAL_DEPENDENCY",
               "REPOSITORY_STATE", "VERIFICATION_FAILURE", "SPECIFICATION_STATE", "INTERRUPTED_OPERATION"}
+WORKER_PROFILES = {"routine", "complex"}
 
 
 class Service:
-    def __init__(self, con): self.con = con
+    def __init__(self, con, home: Path): self.con, self.home = con, home
 
     def audit(self, project: str, principal: str | None, event: str, entity: str, entity_id: str, payload: Any = None) -> None:
         self.con.execute("INSERT INTO audit_events(project_id,principal_id,event_type,entity_type,entity_id,payload_json,created_at) VALUES(?,?,?,?,?,?,?)",
@@ -36,7 +38,7 @@ class Service:
     def authenticate(self, project_id: str | None, supplied: str | None, role: str | None = None):
         # Worker tokens resolve solely to their assignment/project.
         if not supplied and project_id:
-            credential = taskledger_home() / "credentials" / f"{project_id}.orchestrator-token"
+            credential = self.home / "credentials" / f"{project_id}.orchestrator-token"
             if credential.exists(): supplied = credential.read_text(encoding="utf-8").strip()
         if not supplied: raise LedgerError("AUTHENTICATION_FAILED", "A credential token is required.")
         digest = sha256(supplied)
@@ -77,15 +79,34 @@ class Service:
     # ---- project ----
     def init(self, repo: str, confirm: str | None) -> dict[str, Any]:
         info = git.inspect(repo)
+        existing = self.con.execute(
+            "SELECT id,canonical_branch,lifecycle FROM projects WHERE repository_root=?",
+            (info["root"],),
+        ).fetchone()
+        if existing:
+            return {
+                "project_id": existing["id"],
+                "repository_root": info["root"],
+                "canonical_branch": existing["canonical_branch"],
+                "current_branch": info["branch"],
+                "completed": existing["lifecycle"] == "COMPLETED",
+                "already_initialized": True,
+                "confirmation_required": False,
+                "next_action": "project.recover",
+                "message": "Taskledger is already initialized for this repository. Continue with the existing project.",
+            }
         if not confirm:
-            return {"repository_root": info["root"], "detected_branch": info["branch"], "confirmation_required": True}
+            return {
+                "repository_root": info["root"],
+                "detected_branch": info["branch"],
+                "has_commits": info["has_commits"],
+                "confirmation_required": True,
+            }
         if confirm != info["branch"]:
             raise LedgerError("BRANCH_CONFIRMATION_MISMATCH", "Confirmation must exactly match the detected branch.", details={"detected_branch": info["branch"]})
-        if self.con.execute("SELECT 1 FROM projects WHERE repository_root=?", (info["root"],)).fetchone():
-            raise LedgerError("STALE_STATE", "This repository is already registered.")
         pid, principal, raw = new_id(), new_id(), token()
         stamp = now()
-        path = taskledger_home() / "credentials" / f"{pid}.orchestrator-token"
+        path = self.home / "credentials" / f"{pid}.orchestrator-token"
         with transaction(self.con):
             self.con.execute("INSERT INTO projects VALUES(?,?,?,?,?,?,?,?,?,?,?)", (pid, info["root"], info["common"], info["branch"], stamp, "ACTIVE", None, None, None, stamp, stamp))
             self.con.execute("INSERT INTO principals VALUES(?,?,?,?,?,?,?)", (principal, pid, "ORCHESTRATOR", None, 1, stamp, None))
@@ -96,7 +117,18 @@ class Service:
             # Credential file is required; leave no unusable project.
             with transaction(self.con): self.con.execute("DELETE FROM projects WHERE id=?", (pid,))
             raise
-        return {"project_id": pid, "repository_root": info["root"], "canonical_branch": info["branch"], "orchestrator_token_path": str(path)}
+        return {
+            "project_id": pid,
+            "repository_root": info["root"],
+            "canonical_branch": info["branch"],
+            "orchestrator_token_path": str(path),
+            "already_initialized": False,
+            "initial_commit_required": not info["has_commits"],
+            "message": (
+                "Taskledger is initialized. Create the repository's first commit before starting implementation."
+                if not info["has_commits"] else "Taskledger is initialized."
+            ),
+        }
 
     def preflight(self, project):
         self.reconcile_operations(project)
@@ -170,7 +202,7 @@ class Service:
                     self.con.execute("UPDATE operations SET state='UNCERTAIN',finished_at=? WHERE id=?", (now(), op["id"]))
                     self.system_blocker(project["id"], "INTERRUPTED_OPERATION", "OPERATION", op["id"], "Assignment preparation outcome cannot be proven")
             if recovered_token:
-                atomic_secret(taskledger_home() / "projects" / project["id"] / "assignments" / assignment["id"] / "worker-token", recovered_token)
+                atomic_secret(self.home / "projects" / project["id"] / "assignments" / assignment["id"] / "worker-token", recovered_token)
 
     def phase(self, project) -> str:
         if self.con.execute("SELECT 1 FROM specification_reviews WHERE project_id=? AND state='PENDING'", (project["id"],)).fetchone(): return "SPECIFICATION_REVIEW_REQUIRED"
@@ -353,28 +385,131 @@ class Service:
             self.audit(project["id"],principal["id"],"REQUIREMENT_RETIRED" if retire else "REQUIREMENT_UPDATED","REQUIREMENT",row["id"])
         return {"requirement_id":row["id"],"lifecycle":"RETIRED" if retire else "ACTIVE"}
 
+    def supersede_requirement(self,project,principal,data):
+        require_object(data,{"requirement_id","reason","replacement","assignment_dispositions"},{"requirement_id","reason","replacement"})
+        old=self.con.execute("SELECT * FROM requirements WHERE id=? AND project_id=? AND lifecycle='ACTIVE'",(data["requirement_id"],project["id"])).fetchone()
+        if not old:raise LedgerError("REQUIREMENT_NOT_ACTIVE","Requirement is not active.")
+        replacement=data["replacement"]
+        if not isinstance(replacement,dict):raise LedgerError("INVALID_REQUEST","replacement must be an object.")
+        statement,details,required,sources=self.requirement_definition(replacement)
+        for source in sources:
+            if not self.con.execute("SELECT 1 FROM specifications WHERE id=? AND project_id=? AND lifecycle='ACTIVE'",(source["specification_id"],project["id"])).fetchone():raise LedgerError("SPECIFICATION_NOT_FOUND","Replacement requirement source specification is not active.")
+        replacement_id,stamp=new_id(),now();reason=text(data["reason"],"reason")
+        affected=[t["id"] for t in self.current_tasks_for_requirement(old["id"])]
+        with transaction(self.con):
+            self.assignment_dispositions(project,data,affected)
+            self.con.execute("INSERT INTO requirements VALUES(?,?,?,?,?,?,?)",(replacement_id,project["id"],1,"ACTIVE",stamp,stamp,None))
+            self.con.execute("INSERT INTO requirement_revisions VALUES(?,?,?,?,?,?,?)",(replacement_id,1,statement,details,int(required),principal["id"],stamp))
+            for source in sources:self.con.execute("INSERT INTO requirement_source_refs VALUES(?,?,?,?,?)",(replacement_id,1,source["specification_id"],source["locator"],source["excerpt"]))
+            self.con.execute("UPDATE requirements SET lifecycle='RETIRED',retired_at=?,updated_at=? WHERE id=?",(stamp,stamp,old["id"]))
+            self.con.execute("INSERT INTO requirement_supersessions VALUES(?,?,?,?,?)",(old["id"],replacement_id,reason,principal["id"],stamp))
+            self.invalid_requirements([old["id"]],"requirement superseded")
+            self.invalidate_completion(project["id"],"requirement superseded")
+            self.audit(project["id"],principal["id"],"REQUIREMENT_CREATED","REQUIREMENT",replacement_id,{"supersedes":old["id"]})
+            self.audit(project["id"],principal["id"],"REQUIREMENT_SUPERSEDED","REQUIREMENT",old["id"],{"replacement_requirement_id":replacement_id,"reason":reason})
+        return {"superseded_requirement_id":old["id"],"replacement_requirement_id":replacement_id,"lifecycle":"RETIRED"}
+
     def task_definition(self, data):
-        require_object(data,{"objective","implementation_scope","acceptance_criteria","requirement_ids","dependency_task_ids","task_id","assignment_action","reason","submission_action","revoke_assignment"},
+        require_object(data,{"objective","implementation_scope","acceptance_criteria","required_checks","requirement_ids","dependency_task_ids","task_id","assignment_action","reason","submission_action","revoke_assignment"},
                        {"objective","implementation_scope","acceptance_criteria","requirement_ids","dependency_task_ids"})
         criteria=[text(x,"acceptance criterion") for x in array(data["acceptance_criteria"],"acceptance_criteria")]
-        return text(data["objective"],"objective"),text(data["implementation_scope"],"implementation_scope"),criteria,[text(x,"requirement id") for x in array(data["requirement_ids"],"requirement_ids")],[text(x,"dependency task id") for x in array(data["dependency_task_ids"],"dependency_task_ids")]
+        checks=[text(x,"required check") for x in array(data.get("required_checks",[]),"required_checks")]
+        if len(checks)!=len(set(checks)):raise LedgerError("INVALID_REQUEST","required_checks must not contain duplicates.")
+        return text(data["objective"],"objective"),text(data["implementation_scope"],"implementation_scope"),criteria,checks,[text(x,"requirement id") for x in array(data["requirement_ids"],"requirement_ids")],[text(x,"dependency task id") for x in array(data["dependency_task_ids"],"dependency_task_ids")]
 
     def put_task_revision(self, project, principal, tid, revision, definition):
-        objective,scope,criteria,requirements,deps=definition
+        objective,scope,criteria,checks,requirements,deps=definition
         stamp=now(); self.con.execute("INSERT INTO task_revisions VALUES(?,?,?,?,?,?)",(tid,revision,objective,scope,principal["id"],stamp))
         for n,item in enumerate(criteria): self.con.execute("INSERT INTO task_acceptance_criteria VALUES(?,?,?,?,?)",(new_id(),tid,revision,n,item))
+        for n,command in enumerate(checks):self.con.execute("INSERT INTO task_required_checks VALUES(?,?,?,?)",(tid,revision,n,command))
         for rid in requirements: self.con.execute("INSERT INTO task_requirement_links VALUES(?,?,?)",(tid,revision,rid))
         for dep in deps:self.con.execute("INSERT INTO task_dependencies VALUES(?,?,?)",(tid,revision,dep))
 
+    def task_creation_visible(self, project_id, tid, definition):
+        objective,scope,criteria,checks,requirements,deps=definition
+        con=None
+        try:
+            con=sqlite3.connect(self.home/"taskledger.sqlite3",timeout=5)
+            task=con.execute("SELECT project_id,current_revision,state FROM tasks WHERE id=?",(tid,)).fetchone()
+            revision=con.execute("SELECT objective,implementation_scope FROM task_revisions WHERE task_id=? AND revision=1",(tid,)).fetchone()
+            stored_criteria=[r[0] for r in con.execute("SELECT criterion_text FROM task_acceptance_criteria WHERE task_id=? AND task_revision=1 ORDER BY position",(tid,))]
+            stored_checks=[r[0] for r in con.execute("SELECT command FROM task_required_checks WHERE task_id=? AND task_revision=1 ORDER BY position",(tid,))]
+            stored_requirements=[r[0] for r in con.execute("SELECT requirement_id FROM task_requirement_links WHERE task_id=? AND task_revision=1 ORDER BY requirement_id",(tid,))]
+            stored_deps=[r[0] for r in con.execute("SELECT depends_on_task_id FROM task_dependencies WHERE task_id=? AND task_revision=1 ORDER BY depends_on_task_id",(tid,))]
+            audited=con.execute("SELECT 1 FROM audit_events WHERE project_id=? AND event_type='TASK_CREATED' AND entity_type='TASK' AND entity_id=?",(project_id,tid)).fetchone()
+            return task==(project_id,1,"PLANNED") and revision==(objective,scope) and stored_criteria==criteria and stored_checks==checks and stored_requirements==sorted(requirements) and stored_deps==sorted(deps) and bool(audited)
+        except (OSError,sqlite3.Error):
+            return False
+        finally:
+            if con is not None:con.close()
+
     def create_task(self, project, principal, data):
-        require_object(data,{"objective","implementation_scope","acceptance_criteria","requirement_ids","dependency_task_ids"},{"objective","implementation_scope","acceptance_criteria","requirement_ids","dependency_task_ids"})
+        require_object(data,{"objective","implementation_scope","acceptance_criteria","required_checks","requirement_ids","dependency_task_ids"},{"objective","implementation_scope","acceptance_criteria","requirement_ids","dependency_task_ids"})
         definition=self.task_definition(data); tid,stamp=new_id(),now()
-        with transaction(self.con):
-            self.con.execute("INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)",(tid,project["id"],1,"PLANNED",None,stamp,stamp,None,None))
-            self.put_task_revision(project,principal,tid,1,definition)
-            self.con.execute("UPDATE projects SET planning_started_at=COALESCE(planning_started_at,?),updated_at=? WHERE id=?",(stamp,stamp,project["id"]))
-            self.invalidate_completion(project["id"],"task created");self.audit(project["id"],principal["id"],"TASK_CREATED","TASK",tid)
+        try:
+            with transaction(self.con):
+                self.con.execute("INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)",(tid,project["id"],1,"PLANNED",None,stamp,stamp,None,None))
+                self.put_task_revision(project,principal,tid,1,definition)
+                self.con.execute("UPDATE projects SET planning_started_at=COALESCE(planning_started_at,?),updated_at=? WHERE id=?",(stamp,stamp,project["id"]))
+                self.invalidate_completion(project["id"],"task created");self.audit(project["id"],principal["id"],"TASK_CREATED","TASK",tid)
+        except Exception:
+            try:self.con.rollback()
+            except sqlite3.Error:pass
+            if not self.task_creation_visible(project["id"],tid,definition):raise
         return {"task_id":tid,"revision":1,"state":"PLANNED"}
+
+    def apply_plan(self,project,principal,data):
+        require_object(data,{"requirements","tasks"},{"requirements","tasks"})
+        requirement_items=array(data["requirements"],"requirements");task_items=array(data["tasks"],"tasks")
+        if not requirement_items and not task_items:raise LedgerError("INVALID_REQUEST","Plan batch must create at least one requirement or task.")
+        requirement_ids={};requirement_definitions={}
+        for item in requirement_items:
+            require_object(item,{"ref","statement","details","implementation_required","sources"},{"ref","statement","details","implementation_required","sources"})
+            ref=text(item["ref"],"requirement ref")
+            if ref in requirement_ids:raise LedgerError("INVALID_REQUEST","Requirement refs must be unique.")
+            requirement_ids[ref]=new_id();requirement_definitions[ref]=self.requirement_definition({k:v for k,v in item.items() if k!="ref"})
+        task_ids={}
+        for item in task_items:
+            if not isinstance(item,dict):raise LedgerError("INVALID_REQUEST","Each task must be an object.")
+            ref=text(item.get("ref"),"task ref")
+            if ref in task_ids:raise LedgerError("INVALID_REQUEST","Task refs must be unique.")
+            task_ids[ref]=new_id()
+        task_definitions={}
+        allowed_task={"ref","objective","implementation_scope","acceptance_criteria","required_checks","requirement_refs","requirement_ids","dependency_refs","dependency_task_ids"}
+        for item in task_items:
+            require_object(item,allowed_task,{"ref","objective","implementation_scope","acceptance_criteria","requirement_refs","dependency_refs"})
+            ref=item["ref"]
+            requirement_refs=[text(x,"requirement ref") for x in array(item["requirement_refs"],"requirement_refs")]
+            dependency_refs=[text(x,"dependency ref") for x in array(item["dependency_refs"],"dependency_refs")]
+            unknown_requirements=sorted(set(requirement_refs)-set(requirement_ids));unknown_dependencies=sorted(set(dependency_refs)-set(task_ids))
+            if unknown_requirements or unknown_dependencies:raise LedgerError("INVALID_REQUEST","Plan references an unknown local ref.",details={"requirement_refs":unknown_requirements,"dependency_refs":unknown_dependencies})
+            existing_requirements=[text(x,"requirement id") for x in array(item.get("requirement_ids",[]),"requirement_ids")]
+            existing_dependencies=[text(x,"dependency task id") for x in array(item.get("dependency_task_ids",[]),"dependency_task_ids")]
+            for rid in existing_requirements:
+                if not self.con.execute("SELECT 1 FROM requirements WHERE id=? AND project_id=? AND lifecycle='ACTIVE'",(rid,project["id"])).fetchone():raise LedgerError("REQUIREMENT_NOT_ACTIVE","An existing requirement reference is not active.",details={"requirement_id":rid})
+            for tid in existing_dependencies:
+                if not self.con.execute("SELECT 1 FROM tasks WHERE id=? AND project_id=?",(tid,project["id"])).fetchone():raise LedgerError("TASK_NOT_FOUND","An existing dependency task was not found.",details={"task_id":tid})
+            resolved_requirements=existing_requirements+[requirement_ids[x] for x in requirement_refs]
+            resolved_dependencies=existing_dependencies+[task_ids[x] for x in dependency_refs]
+            if len(resolved_requirements)!=len(set(resolved_requirements)):raise LedgerError("INVALID_REQUEST","A task must not repeat a requirement link.",details={"task_ref":ref})
+            if len(resolved_dependencies)!=len(set(resolved_dependencies)):raise LedgerError("INVALID_REQUEST","A task must not repeat a dependency.",details={"task_ref":ref})
+            if task_ids[ref] in resolved_dependencies:raise LedgerError("INVALID_REQUEST","A task must not depend on itself.",details={"task_ref":ref})
+            normalized={"objective":item["objective"],"implementation_scope":item["implementation_scope"],"acceptance_criteria":item["acceptance_criteria"],"required_checks":item.get("required_checks",[]),"requirement_ids":resolved_requirements,"dependency_task_ids":resolved_dependencies}
+            task_definitions[ref]=self.task_definition(normalized)
+        stamp=now()
+        with transaction(self.con):
+            for ref,(statement,details,required,sources) in requirement_definitions.items():
+                rid=requirement_ids[ref]
+                for source in sources:
+                    if not self.con.execute("SELECT 1 FROM specifications WHERE id=? AND project_id=? AND lifecycle='ACTIVE'",(source["specification_id"],project["id"])).fetchone():raise LedgerError("SPECIFICATION_NOT_FOUND","Requirement source specification is not active.")
+                self.con.execute("INSERT INTO requirements VALUES(?,?,?,?,?,?,?)",(rid,project["id"],1,"ACTIVE",stamp,stamp,None));self.con.execute("INSERT INTO requirement_revisions VALUES(?,?,?,?,?,?,?)",(rid,1,statement,details,int(required),principal["id"],stamp))
+                for source in sources:self.con.execute("INSERT INTO requirement_source_refs VALUES(?,?,?,?,?)",(rid,1,source["specification_id"],source["locator"],source["excerpt"]))
+                self.audit(project["id"],principal["id"],"REQUIREMENT_CREATED","REQUIREMENT",rid,{"plan_ref":ref})
+            for ref,tid in task_ids.items():self.con.execute("INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)",(tid,project["id"],1,"PLANNED",None,stamp,stamp,None,None))
+            for ref,definition in task_definitions.items():
+                self.put_task_revision(project,principal,task_ids[ref],1,definition);self.audit(project["id"],principal["id"],"TASK_CREATED","TASK",task_ids[ref],{"plan_ref":ref})
+            self.con.execute("UPDATE projects SET planning_started_at=COALESCE(planning_started_at,?),updated_at=? WHERE id=?",(stamp,stamp,project["id"]));self.invalidate_completion(project["id"],"plan batch applied")
+        return {"requirement_ids":requirement_ids,"task_ids":task_ids,"requirements_created":len(requirement_ids),"tasks_created":len(task_ids)}
 
     def update_task(self, project, principal, data, reopen=False):
         if "task_id" not in data: raise LedgerError("INVALID_REQUEST", "task_id is required.")
@@ -424,15 +559,17 @@ class Service:
         tasks=[]
         for t in self.con.execute("SELECT t.*,v.objective,v.implementation_scope FROM tasks t JOIN task_revisions v ON v.task_id=t.id AND v.revision=t.current_revision WHERE t.project_id=? ORDER BY t.id",(project_id,)):
             criteria=[dict(x) for x in self.con.execute("SELECT id,position,criterion_text FROM task_acceptance_criteria WHERE task_id=? AND task_revision=? ORDER BY position",(t["id"],t["current_revision"]))]
+            checks=[x[0] for x in self.con.execute("SELECT command FROM task_required_checks WHERE task_id=? AND task_revision=? ORDER BY position",(t["id"],t["current_revision"]))]
             links=[x[0] for x in self.con.execute("SELECT requirement_id FROM task_requirement_links WHERE task_id=? AND task_revision=? ORDER BY requirement_id",(t["id"],t["current_revision"]))]
             deps=[x[0] for x in self.con.execute("SELECT depends_on_task_id FROM task_dependencies WHERE task_id=? AND task_revision=? ORDER BY depends_on_task_id",(t["id"],t["current_revision"]))]
-            tasks.append({"id":t["id"],"revision":t["current_revision"],"state":t["state"],"objective":t["objective"],"implementation_scope":t["implementation_scope"],"criteria":criteria,"requirements":links,"dependencies":deps})
+            tasks.append({"id":t["id"],"revision":t["current_revision"],"state":t["state"],"objective":t["objective"],"implementation_scope":t["implementation_scope"],"criteria":criteria,"required_checks":checks,"requirements":links,"dependencies":deps})
         specs=[]
         for s in self.con.execute("SELECT s.id,s.relative_path,s.lifecycle,r.content_hash,r.file_state FROM specifications s LEFT JOIN specification_revisions r ON r.id=s.active_revision_id WHERE s.project_id=? ORDER BY s.id",(project_id,)): specs.append(dict(s))
         return {"requirements":requirements,"tasks":tasks,"specifications":specs}
 
     def validate_plan(self, project, principal):
         obj=self.plan_object(project["id"]); diagnostics=[]; reqs={r["id"]:r for r in obj["requirements"]}; tasks={t["id"]:t for t in obj["tasks"]}
+        current_tasks=[t for t in obj["tasks"] if t["state"]!="CANCELLED" and not (t["state"]=="COMPLETED" and not any(rid in reqs for rid in t["requirements"]))]
         if not reqs: diagnostics.append({"code":"NO_ACTIVE_REQUIREMENTS","message":"At least one active requirement is required."})
         for r in obj["requirements"]:
             if not r["sources"]: diagnostics.append({"code":"REQUIREMENT_SOURCE_MISSING","requirement_id":r["id"]})
@@ -442,18 +579,19 @@ class Service:
             covering=[t for t in obj["tasks"] if t["state"]!="CANCELLED" and r["id"] in t["requirements"]]
             if r["implementation_required"] and not covering: diagnostics.append({"code":"TASK_COVERAGE_MISSING","requirement_id":r["id"]})
             if not r["implementation_required"] and covering: diagnostics.append({"code":"DIRECT_REQUIREMENT_HAS_TASK","requirement_id":r["id"]})
-        for t in obj["tasks"]:
-            if t["state"]=="CANCELLED": continue
+        for t in current_tasks:
+            active_links=[rid for rid in t["requirements"] if rid in reqs]
             if not t["objective"]: diagnostics.append({"code":"TASK_OBJECTIVE_MISSING","task_id":t["id"]})
             if not t["implementation_scope"]: diagnostics.append({"code":"TASK_SCOPE_MISSING","task_id":t["id"]})
             if not t["criteria"] or any(not x["criterion_text"] for x in t["criteria"]):diagnostics.append({"code":"TASK_CRITERIA_MISSING","task_id":t["id"]})
-            if not t["requirements"]:diagnostics.append({"code":"TASK_REQUIREMENT_LINK_MISSING","task_id":t["id"]})
+            if not active_links:diagnostics.append({"code":"TASK_REQUIREMENT_LINK_MISSING","task_id":t["id"]})
             for rid in t["requirements"]:
-                if rid not in reqs:diagnostics.append({"code":"TASK_LINK_INVALID","task_id":t["id"],"requirement_id":rid})
+                if rid not in reqs and t["state"]!="COMPLETED":diagnostics.append({"code":"TASK_LINK_INVALID","task_id":t["id"],"requirement_id":rid})
             for dep in t["dependencies"]:
                 if dep not in tasks or tasks[dep]["state"]=="CANCELLED":diagnostics.append({"code":"DEPENDENCY_INVALID","task_id":t["id"],"depends_on_task_id":dep})
         # Kahn detects all cycle participants deterministically.
-        graph={t["id"]:[d for d in t["dependencies"] if d in tasks] for t in obj["tasks"] if t["state"]!="CANCELLED"}; remaining={k:set(v) for k,v in graph.items()}; ready=sorted(k for k,v in remaining.items() if not v)
+        current_task_ids={t["id"] for t in current_tasks}
+        graph={t["id"]:[d for d in t["dependencies"] if d in current_task_ids] for t in current_tasks}; remaining={k:set(v) for k,v in graph.items()}; ready=sorted(k for k,v in remaining.items() if not v)
         while ready:
             node=ready.pop(0)
             for key in sorted(remaining):
@@ -534,6 +672,7 @@ class Service:
         valid,_,_=self.plan_current(project["id"])
         if not valid:return False,"PLAN_INVALID"
         if task["state"]!="PLANNED":return False,"TASK_STATE_INVALID"
+        if git.oid_or_none(project["repository_root"],f"refs/heads/{project['canonical_branch']}") is None:return False,"INITIAL_COMMIT_REQUIRED"
         if self.ensure_operation_exists(project["id"]):return False,"RECOVERY_REQUIRED"
         if self.blocking_reasons(project["id"],"assign",task_id=task["id"]):return False,"TASK_BLOCKED"
         if self.con.execute("SELECT 1 FROM assignments WHERE task_id=? AND state IN ('PREPARING','ACTIVE')",(task["id"],)).fetchone():return False,"ASSIGNMENT_ALREADY_ACTIVE"
@@ -548,38 +687,66 @@ class Service:
         task=self.con.execute("SELECT * FROM tasks WHERE id=?",(assignment["task_id"],)).fetchone(); revision=task_revision or assignment["task_revision"]
         rev=self.con.execute("SELECT * FROM task_revisions WHERE task_id=? AND revision=?",(task["id"],revision)).fetchone()
         criteria=[r["criterion_text"] for r in self.con.execute("SELECT criterion_text FROM task_acceptance_criteria WHERE task_id=? AND task_revision=? ORDER BY position",(task["id"],revision))]
+        checks=[r["command"] for r in self.con.execute("SELECT command FROM task_required_checks WHERE task_id=? AND task_revision=? ORDER BY position",(task["id"],revision))]
         requirements=[]
         for rid in self.con.execute("SELECT requirement_id FROM task_requirement_links WHERE task_id=? AND task_revision=? ORDER BY requirement_id",(task["id"],revision)):
             r=self.con.execute("SELECT r.*,v.statement,v.details FROM requirements r JOIN requirement_revisions v ON v.requirement_id=r.id AND v.revision=r.current_revision WHERE r.id=?",(rid[0],)).fetchone()
             sources=[dict(x) for x in self.con.execute("SELECT specification_id,locator,excerpt FROM requirement_source_refs WHERE requirement_id=? AND requirement_revision=? ORDER BY specification_id,locator",(r["id"],r["current_revision"]))]
             requirements.append({"id":r["id"],"revision":r["current_revision"],"statement":r["statement"],"details":r["details"],"sources":sources})
+        registered_specifications=[
+            {"id":row["id"],"relative_path":row["relative_path"]}
+            for row in self.con.execute(
+                "SELECT id,relative_path FROM specifications WHERE project_id=? AND lifecycle='ACTIVE' ORDER BY relative_path,id",
+                (assignment["project_id"],),
+            )
+        ]
         questions=[dict(x) for x in self.con.execute("SELECT id,body,is_blocking,state,answer FROM worker_questions WHERE assignment_id=? ORDER BY asked_at,id",(assignment["id"],))]
-        return canonical({"assignment":{"id":assignment["id"],"attempt_number":assignment["attempt_number"],"base_commit_oid":assignment["base_commit_oid"],"branch_name":assignment["branch_name"],"worktree_path":assignment["worktree_path"]},"task":{"id":task["id"],"revision":revision,"objective":rev["objective"],"implementation_scope":rev["implementation_scope"],"acceptance_criteria":criteria},"requirements":requirements,"questions":questions})
+        return canonical({"assignment":{"id":assignment["id"],"attempt_number":assignment["attempt_number"],"worker_profile":assignment["worker_profile"],"base_commit_oid":assignment["base_commit_oid"],"branch_name":assignment["branch_name"],"worktree_path":assignment["worktree_path"]},"task":{"id":task["id"],"revision":revision,"objective":rev["objective"],"implementation_scope":rev["implementation_scope"],"acceptance_criteria":criteria,"required_checks":checks},"requirements":requirements,"registered_specifications":registered_specifications,"questions":questions})
 
     def assignment_create(self,project,principal,data):
-        require_object(data,{"task_id"},{"task_id"}); task=self.con.execute("SELECT * FROM tasks WHERE id=? AND project_id=?",(data["task_id"],project["id"])).fetchone()
+        require_object(data,{"task_id","worker_profile"},{"task_id","worker_profile"})
+        worker_profile=data["worker_profile"]
+        if worker_profile not in WORKER_PROFILES:
+            raise LedgerError("INVALID_REQUEST","worker_profile must be routine or complex.")
+        task=self.con.execute("SELECT * FROM tasks WHERE id=? AND project_id=?",(data["task_id"],project["id"])).fetchone()
         if not task:raise LedgerError("TASK_NOT_FOUND","Task was not found.")
+        if worker_profile=="routine":
+            rejected=self.con.execute("SELECT COUNT(*) FROM submission_verifications sv JOIN submissions s ON s.id=sv.submission_id JOIN assignments a ON a.id=s.assignment_id WHERE a.task_id=? AND a.worker_profile='routine' AND sv.outcome='REJECTED'",(task["id"],)).fetchone()[0]
+            if rejected>=2:raise LedgerError("WORKER_PROFILE_ESCALATION_REQUIRED","This task has reached the routine-worker rejection limit and requires a complex assignment.",details={"task_id":task["id"],"routine_rejections":rejected,"required_worker_profile":"complex"})
         self.preflight(project); allowed,why=self.task_eligible(project,task)
-        if not allowed:raise LedgerError(why,"Task is not eligible for assignment.",details={"task_id":task["id"]})
+        if not allowed:
+            if why == "INITIAL_COMMIT_REQUIRED":
+                raise LedgerError(
+                    why,
+                    "This repository has no commits yet. Create the first commit on the canonical branch before starting implementation.",
+                    details={"canonical_branch": project["canonical_branch"]},
+                )
+            raise LedgerError(why,"Task is not eligible for assignment.",details={"task_id":task["id"]})
         attempt=self.con.execute("SELECT COALESCE(MAX(attempt_number),0)+1 FROM assignments WHERE task_id=?",(task["id"],)).fetchone()[0]
-        aid=new_id();branch=f"taskledger/p-{project['id']}/t-{task['id']}/a-{attempt}";worktree=taskledger_home()/"projects"/project["id"] / "worktrees" / aid;base=git.oid(project["repository_root"],f"refs/heads/{project['canonical_branch']}")
+        aid=new_id();branch=f"taskledger/p-{project['id']}/t-{task['id']}/a-{attempt}";worktree=self.home/"projects"/project["id"] / "worktrees" / aid;base=git.oid_or_none(project["repository_root"],f"refs/heads/{project['canonical_branch']}")
+        if base is None:
+            raise LedgerError(
+                "INITIAL_COMMIT_REQUIRED",
+                "This repository has no commits yet. Create the first commit on the canonical branch before starting implementation.",
+                details={"canonical_branch": project["canonical_branch"]},
+            )
         if worktree.exists() or git.run(project["repository_root"],["show-ref","--verify","--quiet",f"refs/heads/{branch}"],check=False).returncode==0: raise LedgerError("STALE_STATE","Generated assignment branch or worktree already exists.")
         stamp=now()
         with transaction(self.con):
             self.ensure_no_operation(project["id"])
-            self.con.execute("INSERT INTO assignments VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(aid,project["id"],task["id"],task["current_revision"],attempt,"PREPARING",base,branch,str(worktree),"{}",stamp,None,None,None,None))
+            self.con.execute("INSERT INTO assignments(id,project_id,task_id,task_revision,attempt_number,worker_profile,state,base_commit_oid,branch_name,worktree_path,context_json,created_at,activated_at,closed_at,revoked_at,revocation_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(aid,project["id"],task["id"],task["current_revision"],attempt,worker_profile,"PREPARING",base,branch,str(worktree),"{}",stamp,None,None,None,None))
             op=new_id();self.con.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,?,?,?)",(op,project["id"],"ASSIGNMENT_PREPARATION","ASSIGNMENT",aid,"STARTED",canonical({"base":base,"branch":branch,"worktree":str(worktree)}),None,stamp,None))
         try: git.run(project["repository_root"],["worktree","add","-b",branch,str(worktree),base])
         except LedgerError:
             with transaction(self.con):self.con.execute("UPDATE assignments SET state='UNCERTAIN' WHERE id=?",(aid,));self.con.execute("UPDATE operations SET state='UNCERTAIN',finished_at=? WHERE id=?",(now(),op));self.system_blocker(project["id"],"INTERRUPTED_OPERATION","OPERATION",op,"Assignment preparation outcome cannot be proven")
             raise LedgerError("RECOVERY_REQUIRED","Assignment preparation needs recovery.")
         if git.oid(project["repository_root"],f"refs/heads/{branch}")!=base or git.current_branch(worktree)!=branch or git.operation_in_progress(worktree): raise LedgerError("RECOVERY_REQUIRED","Assignment activation proof failed.")
-        raw=token();path=taskledger_home()/"projects"/project["id"] / "assignments" / aid / "worker-token"; worker=new_id()
+        raw=token();path=self.home/"projects"/project["id"] / "assignments" / aid / "worker-token"; worker=new_id()
         assignment=self.con.execute("SELECT * FROM assignments WHERE id=?",(aid,)).fetchone();ctx=self.context(assignment)
         with transaction(self.con):
-            self.con.execute("UPDATE assignments SET state='ACTIVE',activated_at=?,context_json=? WHERE id=?",(now(),ctx,aid));self.con.execute("UPDATE tasks SET state='ASSIGNED',updated_at=? WHERE id=?",(now(),task["id"]));self.con.execute("INSERT INTO principals VALUES(?,?,?,?,?,?,?)",(worker,project["id"],"WORKER",aid,1,now(),None));self.con.execute("INSERT INTO principal_credentials VALUES(?,?,?,?)",(worker,sha256(raw),now(),None));self.con.execute("UPDATE operations SET state='SUCCEEDED',finished_at=? WHERE id=?",(now(),op));self.audit(project["id"],principal["id"],"ASSIGNMENT_ACTIVATED","ASSIGNMENT",aid)
+            self.con.execute("UPDATE assignments SET state='ACTIVE',activated_at=?,context_json=? WHERE id=?",(now(),ctx,aid));self.con.execute("UPDATE tasks SET state='ASSIGNED',updated_at=? WHERE id=?",(now(),task["id"]));self.con.execute("INSERT INTO principals VALUES(?,?,?,?,?,?,?)",(worker,project["id"],"WORKER",aid,1,now(),None));self.con.execute("INSERT INTO principal_credentials VALUES(?,?,?,?)",(worker,sha256(raw),now(),None));self.con.execute("UPDATE operations SET state='SUCCEEDED',finished_at=? WHERE id=?",(now(),op));self.audit(project["id"],principal["id"],"ASSIGNMENT_ACTIVATED","ASSIGNMENT",aid,{"worker_profile":worker_profile})
         atomic_secret(path,raw)
-        return {"assignment_id":aid,"task_id":task["id"],"attempt_number":attempt,"worktree_path":str(worktree),"branch_name":branch,"base_commit_oid":base,"worker_token":raw,"worker_token_path":str(path),"context":json.loads(ctx)}
+        return {"assignment_id":aid,"task_id":task["id"],"attempt_number":attempt,"worker_profile":worker_profile,"worktree_path":str(worktree),"branch_name":branch,"base_commit_oid":base,"worker_token_path":str(path),"context_hash":sha256(ctx)}
 
     def revoke_assignment(self,project,principal,assignment,reason):
         if assignment["state"]=="CLOSED":raise LedgerError("TASK_STATE_INVALID","Closed assignments cannot be revoked.")
@@ -599,19 +766,44 @@ class Service:
         if not a:raise LedgerError("ASSIGNMENT_NOT_ACTIVE","Assignment not found.")
         if a["state"] != "ACTIVE": raise LedgerError("ASSIGNMENT_NOT_ACTIVE", "Worker token rotation is only available for an active assignment.")
         worker=self.con.execute("SELECT * FROM principals WHERE assignment_id=?",(a["id"],)).fetchone()
-        raw=token(); path=taskledger_home()/"projects"/project["id"] / "assignments" / a["id"] / "worker-token"
+        raw=token(); path=self.home/"projects"/project["id"] / "assignments" / a["id"] / "worker-token"
         with transaction(self.con):self.con.execute("UPDATE principals SET active=1,deactivated_at=NULL WHERE id=?",(worker["id"],));self.con.execute("UPDATE principal_credentials SET token_hash=?,rotated_at=? WHERE principal_id=?",(sha256(raw),now(),worker["id"]));self.audit(project["id"],principal["id"],"WORKER_TOKEN_ROTATED","ASSIGNMENT",a["id"])
-        atomic_secret(path,raw);return {"assignment_id":a["id"],"worker_token":raw,"worker_token_path":str(path)}
+        atomic_secret(path,raw);return {"assignment_id":a["id"],"worker_token_path":str(path)}
 
     def worker_assignment(self, principal):
         a=self.con.execute("SELECT * FROM assignments WHERE id=?",(principal["assignment_id"],)).fetchone()
         if not a:raise LedgerError("AUTHORIZATION_DENIED","Worker assignment no longer exists.")
         p=self.con.execute("SELECT * FROM projects WHERE id=?",(a["project_id"],)).fetchone();return p,a
 
-    def worker_context(self, principal):
+    def worker_context(self, principal, data=None):
         project,a=self.worker_assignment(principal)
         self.preflight(project)
-        return {"context":json.loads(self.context(a)),"open_blockers":[dict(x) for x in self.con.execute("SELECT id,category,scope_type,scope_id,description FROM blockers WHERE project_id=? AND state='OPEN' AND (scope_type='PROJECT' OR (scope_type='ASSIGNMENT' AND scope_id=?) OR (scope_type='TASK' AND scope_id=?)) ORDER BY id",(project["id"],a["id"],a["task_id"]))],"submissions":[dict(x) for x in self.con.execute("SELECT id,state,head_commit_oid,submitted_at FROM submissions WHERE assignment_id=? ORDER BY sequence",(a["id"],))]}
+        data=data or {};require_object(data,{"if_none_match","if_dynamic_none_match"})
+        context_json=a["context_json"] or self.context(a); context_hash=sha256(context_json)
+        dynamic={"questions":[dict(x) for x in self.con.execute("SELECT id,body,is_blocking,state,answer FROM worker_questions WHERE assignment_id=? ORDER BY asked_at,id",(a["id"],))],"open_blockers":[dict(x) for x in self.con.execute("SELECT id,category,scope_type,scope_id,description FROM blockers WHERE project_id=? AND state='OPEN' AND (scope_type='PROJECT' OR (scope_type='ASSIGNMENT' AND scope_id=?) OR (scope_type='TASK' AND scope_id=?)) ORDER BY id",(project["id"],a["id"],a["task_id"]))],"submissions":[dict(x) for x in self.con.execute("SELECT id,state,head_commit_oid,submitted_at FROM submissions WHERE assignment_id=? ORDER BY sequence",(a["id"],))]}
+        dynamic_hash=sha256(canonical(dynamic)); result={"assignment_id":a["id"],"context_hash":context_hash,"dynamic_hash":dynamic_hash}
+        if data.get("if_none_match") != context_hash:result["context"]=json.loads(context_json)
+        else:result["context_not_modified"]=True
+        if data.get("if_dynamic_none_match") != dynamic_hash:result["dynamic"]=dynamic
+        else:result["dynamic_not_modified"]=True
+        return result
+
+    def submission_review_context(self,project,submission_id):
+        sub=self.con.execute("SELECT s.*,a.task_id,a.task_revision,a.worker_profile,a.base_commit_oid,a.worktree_path FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=? AND s.project_id=?",(submission_id,project["id"])).fetchone()
+        if not sub:raise LedgerError("SUBMISSION_NOT_FOUND","Submission was not found.")
+        task=self.con.execute("SELECT * FROM tasks WHERE id=?",(sub["task_id"],)).fetchone()
+        criteria=[dict(x) for x in self.con.execute("SELECT id,position,criterion_text FROM task_acceptance_criteria WHERE task_id=? AND task_revision=? ORDER BY position",(task["id"],task["current_revision"]))]
+        required_checks=[x[0] for x in self.con.execute("SELECT command FROM task_required_checks WHERE task_id=? AND task_revision=? ORDER BY position",(task["id"],task["current_revision"]))]
+        requirements=[]
+        for row in self.con.execute("SELECT r.id,r.current_revision,v.statement,v.details FROM requirements r JOIN task_requirement_links l ON l.requirement_id=r.id AND l.task_id=? AND l.task_revision=? JOIN requirement_revisions v ON v.requirement_id=r.id AND v.revision=r.current_revision ORDER BY r.id",(task["id"],task["current_revision"])):requirements.append(dict(row))
+        blockers=[dict(x) for x in self.con.execute("SELECT id,category,scope_type,scope_id,description FROM blockers WHERE project_id=? AND state='OPEN' AND (scope_type='PROJECT' OR (scope_type='TASK' AND scope_id=?) OR (scope_type='ASSIGNMENT' AND scope_id=?) OR (scope_type='SUBMISSION' AND scope_id=?)) ORDER BY id",(project["id"],task["id"],sub["assignment_id"],sub["id"]))]
+        head=sub["head_commit_oid"];base=sub["base_commit_oid"];repo=project["repository_root"]
+        exists=git.run(repo,["cat-file","-e",f"{head}^{{commit}}"],check=False).returncode==0
+        raw_diffstat=git.run(repo,["diff","--stat","--no-renames",base,head]).stdout if exists else None
+        diffstat=raw_diffstat[:16384] if raw_diffstat is not None else None
+        prior=[dict(x) for x in self.con.execute("SELECT id,outcome,notes,created_at FROM submission_verifications WHERE submission_id=? ORDER BY created_at,id",(sub["id"],))]
+        changed=json.loads(sub["changed_files_json"]);page=changed[:500]
+        return {"submission":{"id":sub["id"],"state":sub["state"],"assignment_id":sub["assignment_id"],"worker_profile":sub["worker_profile"],"task_id":task["id"],"assigned_task_revision":sub["task_revision"],"current_task_revision":task["current_revision"],"definition_stale":sub["task_revision"]!=task["current_revision"],"base_commit_oid":base,"head_commit_oid":head,"head_object_exists":exists,"canonical_head_oid":git.oid_or_none(repo,f"refs/heads/{project['canonical_branch']}")},"diff":{"diffstat":diffstat,"diffstat_truncated":raw_diffstat is not None and len(raw_diffstat)>len(diffstat),"changed_files":page,"changed_files_total":len(changed),"changed_files_omitted":len(changed)-len(page),"complete":len(page)==len(changed),"patch_included":False},"criteria":criteria,"required_checks":required_checks,"requirements":requirements,"worker_claims":{"summary":sub["summary"],"evidence":json.loads(sub["evidence_json"]),"risks":json.loads(sub["risks_json"]),"unresolved_questions":json.loads(sub["unresolved_questions_json"]),"follow_up_work":json.loads(sub["follow_up_work_json"])},"open_blockers":blockers,"prior_verifications":prior,"review_required":{"inspect_exact_diff":True,"run_independent_checks":True,"worker_evidence_is_claim_only":True,"accept_from_incomplete_packet":False}}
 
     def worker_question(self,principal,data):
         require_object(data,{"body","blocking"},{"body","blocking"}); project,a=self.worker_assignment(principal)
@@ -651,7 +843,15 @@ class Service:
         if self.ensure_operation_exists(project["id"]):raise LedgerError("RECOVERY_REQUIRED","Submission is blocked while a Git operation is unresolved.")
         evidence=array(data["evidence"],"evidence")
         if not evidence:raise LedgerError("SUBMISSION_EVIDENCE_REQUIRED","At least one evidence item is required.")
-        for item in evidence:require_object(item,{"label","details","command","exit_code","artifact_path"},{"label","details"});text(item["label"],"evidence label");text(item["details"],"evidence details")
+        for item in evidence:
+            require_object(item,{"label","details","command","exit_code","artifact_path"},{"label","details"});text(item["label"],"evidence label");text(item["details"],"evidence details")
+            if "command" in item and item["command"] is not None:text(item["command"],"evidence command")
+            if "exit_code" in item and item["exit_code"] is not None and (not isinstance(item["exit_code"],int) or isinstance(item["exit_code"],bool)):raise LedgerError("INVALID_REQUEST","evidence exit_code must be an integer or null.")
+            if "artifact_path" in item and item["artifact_path"] is not None:text(item["artifact_path"],"evidence artifact_path")
+        required_checks=[x[0] for x in self.con.execute("SELECT command FROM task_required_checks WHERE task_id=? AND task_revision=? ORDER BY position",(task["id"],a["task_revision"]))]
+        successful_commands={item.get("command") for item in evidence if item.get("exit_code")==0}
+        missing_checks=[command for command in required_checks if command not in successful_commands]
+        if missing_checks:raise LedgerError("REQUIRED_CHECK_EVIDENCE_MISSING","Submission evidence is missing a successful required check.",details={"commands":missing_checks})
         risks=array(data["risks"],"risks");questions=array(data["unresolved_questions"],"unresolved_questions");followups=array(data["follow_up_work"],"follow_up_work")
         for item,body in [(i,"description") for i in risks]+[(i,"body") for i in questions]:
             require_object(item,{body,"blocking","blocker_category"},{body,"blocking","blocker_category"});text(item[body],body)
@@ -663,7 +863,7 @@ class Service:
             if git.current_branch(a["worktree_path"])!=a["branch_name"] or git.operation_in_progress(a["worktree_path"]):raise LedgerError("GIT_COMMAND_FAILED","Assignment worktree is not in a safe state.")
             git.run(a["worktree_path"],["add","-A"])
             if git.run(a["worktree_path"],["diff","--cached","--quiet"],check=False).returncode:
-                git.run(a["worktree_path"],["-c","user.name=Taskledger","-c","user.email=taskledger@local","-c","commit.gpgSign=false","commit","-m",f"taskledger: submit {task['id']} attempt {a['attempt_number']}"])
+                git.run(a["worktree_path"],["-c","commit.gpgSign=false","commit","-m",f"taskledger: submit {task['id']} attempt {a['attempt_number']}"])
             if not git.clean(a["worktree_path"]):raise LedgerError("GIT_COMMAND_FAILED","Worktree remains dirty after checkpoint.")
             head=git.oid(a["worktree_path"])
             if not git.ancestor(a["worktree_path"],a["base_commit_oid"],head) or head==a["base_commit_oid"]:raise LedgerError("GIT_COMMAND_FAILED","Submission must contain a non-empty descendant diff.")
@@ -698,7 +898,7 @@ class Service:
     def verify_submission(self,project,principal,data):
         allowed={"submission_id","outcome","criterion_results","behavior_matches_intent","required_evidence_present","blocking_issues_remaining","corrections","notes","blocker_id","blocker"}
         require_object(data,allowed,{"submission_id","outcome","criterion_results","behavior_matches_intent","required_evidence_present","blocking_issues_remaining","corrections","notes"})
-        sub=self.con.execute("SELECT s.*,a.task_id,a.id assignment_id FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=? AND s.project_id=?",(data["submission_id"],project["id"])).fetchone()
+        sub=self.con.execute("SELECT s.*,a.task_id,a.id assignment_id,a.worker_profile FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=? AND s.project_id=?",(data["submission_id"],project["id"])).fetchone()
         if not sub:raise LedgerError("SUBMISSION_NOT_FOUND","Submission was not found.")
         task=self.con.execute("SELECT * FROM tasks WHERE id=?",(sub["task_id"],)).fetchone()
         if task["state"]!="SUBMITTED" or sub["state"] not in {"PENDING","BLOCKED"}:raise LedgerError("SUBMISSION_STATE_INVALID","Submission is not awaiting verification.")
@@ -732,6 +932,10 @@ class Service:
             else:
                 b=data["blocker"];require_object(b,{"category","description"},{"category","description"})
                 if b["category"] not in CATEGORIES:raise LedgerError("INVALID_REQUEST","Unsupported blocker category.")
+        routine_escalation=False
+        if outcome=="REJECTED" and sub["worker_profile"]=="routine":
+            prior_rejections=self.con.execute("SELECT COUNT(*) FROM submission_verifications sv JOIN submissions s ON s.id=sv.submission_id JOIN assignments a ON a.id=s.assignment_id WHERE a.task_id=? AND a.worker_profile='routine' AND sv.outcome='REJECTED'",(task["id"],)).fetchone()[0]
+            routine_escalation=prior_rejections+1>=2
         with transaction(self.con):
             if outcome=="BLOCKED" and not blocker_id:
                 blocker_id=self.system_blocker(project["id"],data["blocker"]["category"],"SUBMISSION",sub["id"],text(data["blocker"]["description"],"blocker description"))
@@ -742,14 +946,19 @@ class Service:
                 self.con.execute("UPDATE principals SET active=0,deactivated_at=? WHERE assignment_id=?",(now(),a["id"]))
                 if a["state"]=="ACTIVE":self.con.execute("UPDATE assignments SET state='CLOSED',closed_at=? WHERE id=?",(now(),a["id"]))
             elif outcome=="REJECTED":
-                self.con.execute("UPDATE submissions SET state='REJECTED',resolved_at=? WHERE id=?",(now(),sub["id"])); a=self.con.execute("SELECT state FROM assignments WHERE id=?",(sub["assignment_id"],)).fetchone()
-                self.con.execute("UPDATE tasks SET state=?,updated_at=? WHERE id=?",("ASSIGNED" if a["state"]=="ACTIVE" else "PLANNED",now(),task["id"]))
+                self.con.execute("UPDATE submissions SET state='REJECTED',resolved_at=? WHERE id=?",(now(),sub["id"])); a=self.con.execute("SELECT * FROM assignments WHERE id=?",(sub["assignment_id"],)).fetchone()
+                if routine_escalation:
+                    self.con.execute("UPDATE assignments SET state='REVOKED',revoked_at=?,revocation_reason=? WHERE id=?",(now(),"routine rejection limit reached",a["id"]))
+                    self.con.execute("UPDATE principals SET active=0,deactivated_at=? WHERE assignment_id=?",(now(),a["id"]))
+                    self.con.execute("UPDATE tasks SET state='PLANNED',updated_at=? WHERE id=?",(now(),task["id"]))
+                    self.audit(project["id"],principal["id"],"ASSIGNMENT_ESCALATION_REQUIRED","ASSIGNMENT",a["id"],{"task_id":task["id"],"required_worker_profile":"complex","routine_rejections":2})
+                else:self.con.execute("UPDATE tasks SET state=?,updated_at=? WHERE id=?",("ASSIGNED" if a["state"]=="ACTIVE" else "PLANNED",now(),task["id"]))
             else:self.con.execute("UPDATE submissions SET state='BLOCKED' WHERE id=?",(sub["id"],))
             self.audit(project["id"],principal["id"],"SUBMISSION_VERIFIED","SUBMISSION",sub["id"],{"outcome":outcome})
         if outcome=="ACCEPTED":
             result=self.integrate_task(project,principal,{"task_id":task["id"]},from_acceptance=True)
             return {"submission_id":sub["id"],"accepted":True,"integrated":result["integrated"],"task_state":result["task_state"],"blocker_id":result.get("blocker_id")}
-        return {"submission_id":sub["id"],"outcome":outcome,"blocker_id":blocker_id,"task_state":task["state"] if outcome=="BLOCKED" else ("ASSIGNED" if self.con.execute("SELECT state FROM assignments WHERE id=?",(sub["assignment_id"],)).fetchone()["state"]=="ACTIVE" else "PLANNED")}
+        return {"submission_id":sub["id"],"outcome":outcome,"blocker_id":blocker_id,"task_state":task["state"] if outcome=="BLOCKED" else ("ASSIGNED" if self.con.execute("SELECT state FROM assignments WHERE id=?",(sub["assignment_id"],)).fetchone()["state"]=="ACTIVE" else "PLANNED"),"escalation_required":routine_escalation,"required_worker_profile":"complex" if routine_escalation else None}
 
     def current_integration(self,project,task_id):
         attempt=self.con.execute("SELECT * FROM integration_attempts WHERE project_id=? AND task_id=? AND state='SUCCEEDED' ORDER BY finished_at DESC,id DESC LIMIT 1",(project["id"],task_id)).fetchone()
@@ -778,7 +987,7 @@ class Service:
         try:
             if git.ancestor(root,sub["head_commit_oid"],f"refs/heads/{branch}"):success=True
             else:
-                r=git.run(root,["-c","user.name=Taskledger","-c","user.email=taskledger@local","-c","commit.gpgSign=false","-c","merge.autoStash=false","merge","--no-ff","--no-edit","--no-gpg-sign",sub["head_commit_oid"]],check=False)
+                r=git.run(root,["-c","commit.gpgSign=false","-c","merge.autoStash=false","merge","--no-ff","--no-edit","--no-gpg-sign",sub["head_commit_oid"]],check=False)
                 if r.returncode: error=r.stderr[-2000:];
                 else:success=True
             after=git.oid(root)
@@ -867,8 +1076,24 @@ class Service:
             verification=self.requirement_current(project,r);tasks=self.current_tasks_for_requirement(r["id"])
             reasons=self.blocking_reasons(project["id"],"verify_requirement",requirement_id=r["id"])
             status="COMPLETE" if verification else ("BLOCKED" if reasons or self.phase(project)=="SPECIFICATION_REVIEW_REQUIRED" else "REMAINING")
-            result.append({"id":r["id"],"revision":r["current_revision"],"statement":r["statement"],"details":r["details"],"implementation_required":bool(r["implementation_required"]),"status":status,"task_ids":[t["id"] for t in tasks],"verification_id":verification["id"] if verification else None})
+            ready,ready_reasons=self.requirement_ready(project,r,tasks,verification)
+            result.append({"id":r["id"],"revision":r["current_revision"],"statement":r["statement"],"details":r["details"],"implementation_required":bool(r["implementation_required"]),"status":status,"ready_for_verification":ready,"readiness_reasons":ready_reasons,"task_ids":[t["id"] for t in tasks],"verification_id":verification["id"] if verification else None})
         return result
+
+    def requirement_ready(self,project,requirement,tasks=None,verification=None):
+        reasons=[];tasks=self.current_tasks_for_requirement(requirement["id"]) if tasks is None else tasks
+        if verification is None:verification=self.requirement_current(project,requirement)
+        if verification:reasons.append("ALREADY_COMPLETE")
+        if self.phase(project)=="SPECIFICATION_REVIEW_REQUIRED":reasons.append("SPECIFICATION_REVIEW_REQUIRED")
+        if not self.plan_current(project["id"])[0]:reasons.append("PLAN_INVALID")
+        if self.blocking_reasons(project["id"],"verify_requirement",requirement_id=requirement["id"]):reasons.append("BLOCKER_OPEN")
+        definition=self.con.execute("SELECT implementation_required FROM requirement_revisions WHERE requirement_id=? AND revision=?",(requirement["id"],requirement["current_revision"])).fetchone()
+        if definition[0]:
+            if not tasks:reasons.append("NO_COVERING_TASKS")
+            for task in tasks:
+                if task["state"]!="COMPLETED" or not self.current_integration(project,task["id"]):reasons.append("TASKS_NOT_INTEGRATED");break
+        elif tasks:reasons.append("DIRECT_REQUIREMENT_HAS_TASKS")
+        return not reasons,reasons
 
     def progress(self,project):
         reqs=self.requirement_rows(project);tasks=self.con.execute("SELECT * FROM tasks WHERE project_id=?",(project["id"],)).fetchall()
@@ -876,6 +1101,7 @@ class Service:
 
     def completion_reasons(self,project):
         self.preflight(project);reasons=[];reqs=self.requirement_rows(project);valid,_,_=self.plan_current(project["id"])
+        if git.oid_or_none(project["repository_root"],f"refs/heads/{project['canonical_branch']}") is None:reasons.append({"code":"INITIAL_COMMIT_REQUIRED","canonical_branch":project["canonical_branch"]})
         if not reqs:reasons.append({"code":"NO_ACTIVE_REQUIREMENTS"})
         if self.con.execute("SELECT 1 FROM specification_reviews WHERE project_id=? AND state='PENDING'",(project["id"],)).fetchone():reasons.append({"code":"SPECIFICATION_REVIEW_REQUIRED"})
         if not valid:reasons.append({"code":"PLAN_INVALID"})
@@ -883,23 +1109,84 @@ class Service:
             if r["status"]!="COMPLETE":reasons.append({"code":"REQUIREMENT_INCOMPLETE","requirement_id":r["id"]})
         for task in self.con.execute("SELECT * FROM tasks WHERE project_id=?",(project["id"],)):
             if task["state"] in {"ASSIGNED","SUBMITTED","ACCEPTED"}:reasons.append({"code":"TASK_NOT_FINAL","task_id":task["id"],"state":task["state"]})
+        for assignment in self.con.execute("SELECT id,state FROM assignments WHERE project_id=? AND state IN ('PREPARING','ACTIVE','UNCERTAIN')",(project["id"],)):
+            reasons.append({"code":"ASSIGNMENT_NOT_FINAL","assignment_id":assignment["id"],"state":assignment["state"]})
         for b in self.con.execute("SELECT id FROM blockers WHERE project_id=? AND state='OPEN'",(project["id"],)):reasons.append({"code":"BLOCKER_OPEN","blocker_id":b[0]})
         if self.ensure_operation_exists(project["id"]):reasons.append({"code":"RECOVERY_REQUIRED"})
         return reasons
 
     def complete_project(self,project,principal):
+        head=git.oid_or_none(project["repository_root"],f"refs/heads/{project['canonical_branch']}")
+        if head is None:
+            raise LedgerError(
+                "INITIAL_COMMIT_REQUIRED",
+                "This repository has no commits yet. Create the first commit on the canonical branch before completing the project.",
+                details={"canonical_branch": project["canonical_branch"]},
+            )
         reasons=self.completion_reasons(project)
         if reasons:raise LedgerError("PROJECT_NOT_READY_FOR_COMPLETION","Project cannot be completed.",details={"reasons":reasons})
-        head=git.oid(project["repository_root"],f"refs/heads/{project['canonical_branch']}")
         with transaction(self.con):
             existing=self.con.execute("SELECT * FROM projects WHERE id=?",(project["id"],)).fetchone()
             if existing["lifecycle"]!="COMPLETED":self.con.execute("UPDATE projects SET lifecycle='COMPLETED',completed_at=?,completion_head_oid=?,updated_at=? WHERE id=?",(now(),head,now(),project["id"]));self.audit(project["id"],principal["id"],"PROJECT_COMPLETED","PROJECT",project["id"],{"head":head})
-        return {"project_id":project["id"],"completed":True,"completion_head_oid":head}
+        cleanup=self.cleanup_worktrees(project,principal)
+        return {"project_id":project["id"],"completed":True,"completion_head_oid":head,"worktree_cleanup":cleanup}
+
+    def cleanup_worktrees(self,project,principal):
+        current=self.con.execute("SELECT lifecycle FROM projects WHERE id=?",(project["id"],)).fetchone()
+        if not current or current["lifecycle"]!="COMPLETED":
+            raise LedgerError("PROJECT_NOT_COMPLETED","Assignment worktrees may be cleaned only after project completion.")
+        self.ensure_no_operation(project["id"])
+        managed_root=(self.home/"projects"/project["id"]/"worktrees").resolve()
+        removed=[];already_absent=[];skipped=[]
+        rows=self.con.execute("SELECT id,state,branch_name,worktree_path FROM assignments WHERE project_id=? ORDER BY created_at,id",(project["id"],)).fetchall()
+        try:registered=git.registered_worktrees(project["repository_root"])
+        except LedgerError:
+            registered=None
+        for assignment in rows:
+            path=Path(assignment["worktree_path"])
+            resolved=path.resolve()
+            item={"assignment_id":assignment["id"],"worktree_path":str(path),"branch_name":assignment["branch_name"]}
+            if assignment["state"] in {"PREPARING","ACTIVE","UNCERTAIN"}:
+                skipped.append({**item,"reason":"ASSIGNMENT_NOT_FINAL"});continue
+            if not resolved.is_relative_to(managed_root):
+                skipped.append({**item,"reason":"PATH_OUTSIDE_MANAGED_ROOT"});continue
+            if not path.exists():
+                already_absent.append(item);continue
+            if registered is None:
+                skipped.append({**item,"reason":"GIT_WORKTREE_LIST_FAILED"});continue
+            if str(resolved) not in registered:
+                skipped.append({**item,"reason":"WORKTREE_NOT_REGISTERED"});continue
+            try:
+                if git.current_branch(path)!=assignment["branch_name"]:
+                    skipped.append({**item,"reason":"BRANCH_MISMATCH"});continue
+                if git.operation_in_progress(path):
+                    skipped.append({**item,"reason":"GIT_OPERATION_IN_PROGRESS"});continue
+                if not git.clean(path):
+                    skipped.append({**item,"reason":"WORKTREE_DIRTY"});continue
+                git.run(project["repository_root"],["worktree","remove",str(path)])
+                removed.append(item)
+            except LedgerError:
+                skipped.append({**item,"reason":"GIT_REFUSED_REMOVAL"})
+        result={"removed_count":len(removed),"already_absent_count":len(already_absent),"skipped_count":len(skipped),"removed":removed,"already_absent":already_absent,"skipped":skipped,"branches_retained":True}
+        if removed or skipped:
+            with transaction(self.con):self.audit(project["id"],principal["id"],"ASSIGNMENT_WORKTREES_CLEANED","PROJECT",project["id"],{"removed_assignment_ids":[x["assignment_id"] for x in removed],"skipped":[{"assignment_id":x["assignment_id"],"reason":x["reason"]} for x in skipped]})
+        return result
+
+    def resume(self,project,data):
+        require_object(data,{"cursor"});valid,fingerprint,diagnostics=self.plan_current(project["id"]);reqs=self.requirement_rows(project)
+        latest=self.con.execute("SELECT COALESCE(MAX(sequence),0) FROM audit_events WHERE project_id=?",(project["id"],)).fetchone()[0]
+        operations=[dict(x) for x in self.con.execute("SELECT id,kind,entity_type,entity_id,state,started_at,finished_at FROM operations WHERE project_id=? AND state IN ('STARTED','UNCERTAIN') ORDER BY started_at,id",(project["id"],))]
+        snapshot={"schema_version":2,"project_id":project["id"],"phase":self.phase(project),"canonical_branch":project["canonical_branch"],"canonical_head_oid":git.oid_or_none(project["repository_root"],f"refs/heads/{project['canonical_branch']}"),"plan":{"valid":valid,"fingerprint":fingerprint,"diagnostics":diagnostics},"progress":self.progress(project),"pending_review_ids":[x[0] for x in self.con.execute("SELECT id FROM specification_reviews WHERE project_id=? AND state='PENDING' ORDER BY id",(project["id"],))],"eligible_task_ids":[t["id"] for t in self.con.execute("SELECT * FROM tasks WHERE project_id=? ORDER BY id",(project["id"],)) if self.task_eligible(project,t)[0]],"active_assignments":[dict(x) for x in self.con.execute("SELECT id,task_id,worker_profile,state,worktree_path,base_commit_oid FROM assignments WHERE project_id=? AND state IN ('PREPARING','ACTIVE') ORDER BY id",(project["id"],))],"pending_submissions":[dict(x) for x in self.con.execute("SELECT s.id,s.assignment_id,s.state,s.head_commit_oid FROM submissions s WHERE s.project_id=? AND s.state IN ('PENDING','BLOCKED') ORDER BY s.id",(project["id"],))],"ready_requirement_ids":[r["id"] for r in reqs if r["ready_for_verification"]],"open_blockers":[dict(x) for x in self.con.execute("SELECT id,category,scope_type,scope_id,description FROM blockers WHERE project_id=? AND state='OPEN' ORDER BY id",(project["id"],))],"open_questions":[dict(x) for x in self.con.execute("SELECT q.id,q.assignment_id,q.body,q.is_blocking FROM worker_questions q JOIN assignments a ON a.id=q.assignment_id WHERE a.project_id=? AND q.state='OPEN' ORDER BY q.id",(project["id"],))],"operations":operations,"full_recovery_required":bool(operations),"latest_event_sequence":latest}
+        cursor=sha256(canonical(snapshot)); supplied=data.get("cursor")
+        if supplied==cursor:return {"project_id":project["id"],"cursor":cursor,"not_modified":True,"full_recovery_required":bool(operations),"operations":operations}
+        snapshot.update({"cursor":cursor,"not_modified":False,"baseline_status":"NEW" if supplied is None else "REFRESHED"})
+        return snapshot
 
     def recover(self,project):
         self.preflight(project);valid,fingerprint,diagnostics=self.plan_current(project["id"]);reqs=self.requirement_rows(project); tasks=[dict(x) for x in self.con.execute("SELECT * FROM tasks WHERE project_id=? ORDER BY created_at,id",(project["id"],))]
         assignments=[dict(x) for x in self.con.execute("SELECT * FROM assignments WHERE project_id=? ORDER BY created_at,id",(project["id"],))]
-        return {"project":{"id":project["id"],"repository_root":project["repository_root"],"canonical_branch":project["canonical_branch"],"canonical_head_oid":git.oid(project["repository_root"],f"refs/heads/{project['canonical_branch']}"),"effective_phase":self.phase(project),"completed":project["lifecycle"]=="COMPLETED"},"specifications":{"active":[dict(x) for x in self.con.execute("SELECT * FROM specifications WHERE project_id=? AND lifecycle='ACTIVE' ORDER BY id",(project["id"],))],"pending_reviews":[dict(x) for x in self.con.execute("SELECT * FROM specification_reviews WHERE project_id=? AND state='PENDING' ORDER BY id",(project["id"],))]},"plan":{"valid":valid,"fingerprint":fingerprint,"diagnostics":diagnostics},"progress":self.progress(project),"requirements":{"complete":[r for r in reqs if r["status"]=="COMPLETE"],"remaining":[r for r in reqs if r["status"]=="REMAINING"],"blocked":[r for r in reqs if r["status"]=="BLOCKED"],"awaiting_verification":[r for r in reqs if r["status"]!="COMPLETE"]},"tasks":{"all":tasks,"assignments":assignments,"eligible":[t["id"] for t in tasks if self.task_eligible(project,t)[0]]},"questions":{"open":[dict(x) for x in self.con.execute("SELECT q.* FROM worker_questions q JOIN assignments a ON a.id=q.assignment_id WHERE a.project_id=? AND q.state='OPEN' ORDER BY q.asked_at,q.id",(project["id"],))]},"follow_up_proposals":{"unreviewed":[dict(x) for x in self.con.execute("SELECT f.* FROM follow_up_proposals f JOIN assignments a ON a.id=f.assignment_id WHERE a.project_id=? AND f.state='PROPOSED' ORDER BY f.created_at,f.id",(project["id"],))]},"blockers":{"open":[dict(x) for x in self.con.execute("SELECT * FROM blockers WHERE project_id=? AND state='OPEN' ORDER BY id",(project["id"],))]},"operations":{"started_or_uncertain":[dict(x) for x in self.con.execute("SELECT * FROM operations WHERE project_id=? AND state IN ('STARTED','UNCERTAIN') ORDER BY started_at,id",(project["id"],))]},"completion":{"eligible":not self.completion_reasons(project),"blocking_reasons":self.completion_reasons(project)},"allowed_next_actions":["spec.review" if self.phase(project)=="SPECIFICATION_REVIEW_REQUIRED" else "plan.validate"]}
+        canonical_head=git.oid_or_none(project["repository_root"],f"refs/heads/{project['canonical_branch']}")
+        return {"project":{"id":project["id"],"repository_root":project["repository_root"],"canonical_branch":project["canonical_branch"],"canonical_head_oid":canonical_head,"initial_commit_required":canonical_head is None,"effective_phase":self.phase(project),"completed":project["lifecycle"]=="COMPLETED"},"specifications":{"active":[dict(x) for x in self.con.execute("SELECT * FROM specifications WHERE project_id=? AND lifecycle='ACTIVE' ORDER BY id",(project["id"],))],"pending_reviews":[dict(x) for x in self.con.execute("SELECT * FROM specification_reviews WHERE project_id=? AND state='PENDING' ORDER BY id",(project["id"],))]},"plan":{"valid":valid,"fingerprint":fingerprint,"diagnostics":diagnostics},"progress":self.progress(project),"requirements":{"complete":[r for r in reqs if r["status"]=="COMPLETE"],"remaining":[r for r in reqs if r["status"]=="REMAINING"],"blocked":[r for r in reqs if r["status"]=="BLOCKED"],"awaiting_verification":[r for r in reqs if r["status"]!="COMPLETE"]},"tasks":{"all":tasks,"assignments":assignments,"eligible":[t["id"] for t in tasks if self.task_eligible(project,t)[0]]},"questions":{"open":[dict(x) for x in self.con.execute("SELECT q.* FROM worker_questions q JOIN assignments a ON a.id=q.assignment_id WHERE a.project_id=? AND q.state='OPEN' ORDER BY q.asked_at,q.id",(project["id"],))]},"follow_up_proposals":{"unreviewed":[dict(x) for x in self.con.execute("SELECT f.* FROM follow_up_proposals f JOIN assignments a ON a.id=f.assignment_id WHERE a.project_id=? AND f.state='PROPOSED' ORDER BY f.created_at,f.id",(project["id"],))]},"blockers":{"open":[dict(x) for x in self.con.execute("SELECT * FROM blockers WHERE project_id=? AND state='OPEN' ORDER BY id",(project["id"],))]},"operations":{"started_or_uncertain":[dict(x) for x in self.con.execute("SELECT * FROM operations WHERE project_id=? AND state IN ('STARTED','UNCERTAIN') ORDER BY started_at,id",(project["id"],))]},"completion":{"eligible":not self.completion_reasons(project),"blocking_reasons":self.completion_reasons(project)},"allowed_next_actions":["spec.review" if self.phase(project)=="SPECIFICATION_REVIEW_REQUIRED" else "plan.validate"]}
 
     def recover_operation(self, project, principal, data, adopt: bool):
         require_object(data,{"operation_id","current_oid"},{"operation_id","current_oid"})
@@ -915,9 +1202,11 @@ class Service:
                 if attempt:
                     self.con.execute("UPDATE integration_attempts SET state='SUCCEEDED',canonical_after_oid=?,finished_at=? WHERE id=?",(actual,now(),attempt["id"]))
                     self.con.execute("UPDATE tasks SET state='COMPLETED',completed_at=?,updated_at=? WHERE id=?",(now(),now(),attempt["task_id"]))
+                self.con.execute("UPDATE blockers SET state='RESOLVED',resolution=?,resolved_by_principal_id=?,resolved_at=? WHERE project_id=? AND scope_type='OPERATION' AND scope_id=? AND state='OPEN'",("Operation success adopted from repository proof",principal["id"],now(),project["id"],op["id"]))
                 self.audit(project["id"],principal["id"],"OPERATION_SUCCESS_ADOPTED","OPERATION",op["id"])
         else:
-            if actual!=expected.get("before",expected.get("head")):raise LedgerError("RECOVERY_REQUIRED","Repository is not restored to the expected pre-operation OID.")
+            pre_operation_oid={"INTEGRATION":expected.get("before"),"SUBMISSION_CHECKPOINT":expected.get("head"),"ASSIGNMENT_PREPARATION":expected.get("base")}.get(op["kind"])
+            if pre_operation_oid is None or actual!=pre_operation_oid:raise LedgerError("RECOVERY_REQUIRED","Repository is not restored to the expected pre-operation OID.")
             with transaction(self.con):
                 self.con.execute("UPDATE operations SET state='FAILED',finished_at=? WHERE id=?",(now(),op["id"]))
                 if op["kind"] == "INTEGRATION": self.con.execute("UPDATE integration_attempts SET state='FAILED',finished_at=? WHERE project_id=? AND task_id=? AND state IN ('STARTED','UNCERTAIN')",(now(),project["id"],op["entity_id"]))
@@ -926,5 +1215,6 @@ class Service:
                     if assignment:
                         self.con.execute("UPDATE assignments SET state='REVOKED',revoked_at=?,revocation_reason=? WHERE id=?",(now(),"operation marked failed",assignment["id"]))
                         self.con.execute("UPDATE tasks SET state='PLANNED',updated_at=? WHERE id=? AND state='ASSIGNED'",(now(),assignment["task_id"]))
+                self.con.execute("UPDATE blockers SET state='RESOLVED',resolution=?,resolved_by_principal_id=?,resolved_at=? WHERE project_id=? AND scope_type='OPERATION' AND scope_id=? AND state='OPEN'",("Operation marked failed from restored repository proof",principal["id"],now(),project["id"],op["id"]))
                 self.audit(project["id"],principal["id"],"OPERATION_MARKED_FAILED","OPERATION",op["id"])
         return {"operation_id":op["id"],"state":"SUCCEEDED" if adopt else "FAILED"}

@@ -1,0 +1,196 @@
+{
+  "created_at": "2026-08-24T14:20:25Z",
+  "interpretation": {
+    "do_not_use": "Do not treat elapsed time, lines changed, or integrated-task count alone as task complexity.",
+    "overlap": "If task windows overlap, their token totals are not additive and must not be pooled.",
+    "planning": "Planning tokens fall outside assignment-to-integration windows and must be reported separately.",
+    "use": "Compare like task families and inspect each observable complexity dimension before aggregating tokens."
+  },
+  "label": "rust-but-verify-v0.3.0-new-spec-task-complexity",
+  "ledger_db": "/Users/christophercaldwell/Code/oss/rust_but_verify/.taskledger/taskledger.sqlite3",
+  "repository": "/Users/christophercaldwell/Code/oss/rust_but_verify",
+  "schema_version": 1,
+  "source": {
+    "files_matched_to_repo": 19,
+    "files_scanned": 220,
+    "inherited_history": {
+      "compactions_excluded": 0,
+      "forked_files": 3,
+      "token_events_excluded": 113
+    },
+    "overlapping_task_windows": [],
+    "sessions": "/Users/christophercaldwell/.codex/sessions"
+  },
+  "tasks": [
+    {
+      "acceptance_criteria": 7,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T20:05:41.193Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "a5130d93631cd32c24b408849350c3db0bd28c8f",
+      "canonical_before_oid": "7e8fde9dad4bd62869c375b38b185b9078083215",
+      "created_at": "2026-08-22T20:03:44.287Z",
+      "dependencies": 0,
+      "execution_seconds": 542.804,
+      "git_diff": {
+        "additions": 450,
+        "binary_files": 0,
+        "deletions": 387,
+        "files_changed": 9,
+        "lines_changed": 837,
+        "top_level_areas": {
+          "README.md": 1,
+          "src": 4,
+          "tests": 4
+        }
+      },
+      "id": "22dd9513-b8c7-4802-8836-3e8b268448b5",
+      "implementation_scope": "Core library code and focused unit, integration, compile-fail, provenance-order, equivalence, and concurrency-regression tests. This task owns src/ and tests/ changes required by the API. It may adapt the dedicated snapshot regression harness only when necessary for correctness coverage, but does not run or report the final benchmark matrix. Broader storage, identifier, synchronization, release, and publishing redesign is excluded.",
+      "integrated_at": "2026-08-22T20:14:43.997Z",
+      "linked_requirements": 3,
+      "objective": "Implement the bool-first authorization API, opt-in provenance API, snapshot-correct multi-target evaluation, Targets<A>, sealed exactly-two tuple input, and tightened Policy boundary.",
+      "rejected_reviews": 1,
+      "submissions": 2,
+      "usage_by_model_effort": {
+        "gpt-5.6-sol|high": {
+          "compactions": 0,
+          "token_events": 21,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1417984,
+            "input_tokens": 1461777,
+            "output_tokens": 5320,
+            "reasoning_output_tokens": 903,
+            "total_tokens": 1467097
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 36,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2055168,
+            "input_tokens": 2171368,
+            "output_tokens": 19639,
+            "reasoning_output_tokens": 2765,
+            "total_tokens": 2191007
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T20:14:51.125Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "cf61007097e88deebcf55881143cff11dd07be38",
+      "canonical_before_oid": "a5130d93631cd32c24b408849350c3db0bd28c8f",
+      "created_at": "2026-08-22T20:03:44.451Z",
+      "dependencies": 1,
+      "execution_seconds": 303.366,
+      "git_diff": {
+        "additions": 158,
+        "binary_files": 0,
+        "deletions": 56,
+        "files_changed": 11,
+        "lines_changed": 214,
+        "top_level_areas": {
+          "README.md": 1,
+          "examples": 8,
+          "src": 2
+        }
+      },
+      "id": "4f31978d-70a0-4059-8a7c-c73da41b22ea",
+      "implementation_scope": "README, public rustdoc, Knowledge Base tutorial binaries and README, and without_macros examples and README. This task owns documentation/example compatibility after the core API task and must keep the existing tutorial progression and target vocabulary. It does not broaden into relationship discovery, policy language, release work, or a second tutorial suite.",
+      "integrated_at": "2026-08-22T20:19:54.491Z",
+      "linked_requirements": 3,
+      "objective": "Update public documentation and examples to teach the finalized bool-first and multi-target API.",
+      "rejected_reviews": 1,
+      "submissions": 2,
+      "usage_by_model_effort": {
+        "gpt-5.6-sol|high": {
+          "compactions": 0,
+          "token_events": 14,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1334784,
+            "input_tokens": 1358419,
+            "output_tokens": 4045,
+            "reasoning_output_tokens": 929,
+            "total_tokens": 1362464
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 17,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 720640,
+            "input_tokens": 771079,
+            "output_tokens": 9238,
+            "reasoning_output_tokens": 834,
+            "total_tokens": 780317
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T20:19:59.495Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "8bc430ebaa8508f3fb9af96ab44c0f821e13572a",
+      "canonical_before_oid": "cf61007097e88deebcf55881143cff11dd07be38",
+      "created_at": "2026-08-22T20:03:44.613Z",
+      "dependencies": 2,
+      "execution_seconds": 1771.025,
+      "git_diff": {
+        "additions": 217,
+        "binary_files": 0,
+        "deletions": 56,
+        "files_changed": 6,
+        "lines_changed": 273,
+        "top_level_areas": {
+          "benches": 5,
+          "docs": 1
+        }
+      },
+      "id": "a678afce-9718-4bf1-a09a-e5582aeb7c76",
+      "implementation_scope": "Benchmark harness compatibility and focused scenarios in benches/, durable targeted result reporting without replacing the exhaustive baseline, and execution of normal root/example/package dry checks. This task may make only mechanically necessary compatibility changes outside benchmark files. Publishing, version bumps, tags, releases, broad benchmark reruns, and architecture optimization are excluded.",
+      "integrated_at": "2026-08-22T20:49:30.520Z",
+      "linked_requirements": 4,
+      "objective": "Adapt and run only the locked targeted benchmark, allocation, snapshot-stress, and repository validation suite, preserving the established exhaustive baseline.",
+      "rejected_reviews": 1,
+      "submissions": 2,
+      "usage_by_model_effort": {
+        "gpt-5.6-sol|high": {
+          "compactions": 0,
+          "token_events": 35,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 4118784,
+            "input_tokens": 4172987,
+            "output_tokens": 6013,
+            "reasoning_output_tokens": 1595,
+            "total_tokens": 4179000
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 83,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 7570688,
+            "input_tokens": 7735269,
+            "output_tokens": 31542,
+            "reasoning_output_tokens": 5230,
+            "total_tokens": 7766811
+          }
+        }
+      }
+    }
+  ]
+}

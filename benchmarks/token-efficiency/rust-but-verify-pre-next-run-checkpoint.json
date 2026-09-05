@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "checkpoint": "rust-but-verify-before-next-taskledger-run",
+  "created_at": "2026-08-22T19:55:31Z",
+  "taskledger_version": "0.3.0",
+  "repository": "/Users/christophercaldwell/Code/oss/rust_but_verify",
+  "intended_sample": {
+    "scope_class": "small",
+    "purpose": "Measure a deliberately small but still appropriate Taskledger planning-and-execution run.",
+    "interpretation": "Do not directly compare its raw totals or per-task average with the financial-tracker server-architecture portfolio. Treat it as a new small-scope family and compare workflow overhead, planning structure, and any defensibly matched task families separately."
+  },
+  "git_baseline": {
+    "branch": "main",
+    "head_oid": "261997d6b4b8d4a9b330d890682a4f806d9120a9",
+    "head_subject": "Merge commit '05e603239c90f7f8d7651c319ebb18155c2f473e'",
+    "head_committed_at": "2026-08-22T01:42:43-04:00",
+    "clean": false,
+    "porcelain_status_sha256": "c5a9fcde025d8c3473961b051f453407c9aa805067ab261112dc296efb07d510",
+    "status_counts": {
+      "modified": 7,
+      "deleted": 5,
+      "untracked": 14,
+      "other": 0
+    },
+    "taskledger_directory_ignored": true,
+    "note": "The status fingerprint and category counts identify the pre-run working-tree state without copying file contents into the benchmark. Recompute and explain any difference before assigning work."
+  },
+  "existing_ledger_baseline": {
+    "project_id": "20f2fc7d-df6f-4764-99cb-e3027f4a39a0",
+    "lifecycle": "COMPLETED",
+    "canonical_branch": "main",
+    "completed_at": "2026-08-22T05:44:19.099Z",
+    "completion_head_oid": "261997d6b4b8d4a9b330d890682a4f806d9120a9",
+    "specifications": 3,
+    "requirements": 13,
+    "tasks": 10,
+    "completed_tasks": 10,
+    "interpretation": "The next approved specification should be additive to this completed durable history. New-run progress is the delta after this checkpoint, not the lifetime project total."
+  },
+  "repository_model_configuration": {
+    "primary_model": "gpt-5.6-terra",
+    "primary_reasoning_effort": "high",
+    "taskledger_worker_model": "gpt-5.6-luna",
+    "taskledger_worker_reasoning_effort": "medium",
+    "differs_from_financial_tracker_control": true,
+    "financial_tracker_control": {
+      "primary_model": "gpt-5.6-sol",
+      "primary_reasoning_effort": "high",
+      "taskledger_worker_model": "gpt-5.6-terra",
+      "taskledger_worker_reasoning_effort": "medium"
+    },
+    "interpretation": "This model change prevents a fair direct token-reduction comparison with the financial-tracker matched cohorts. Keep observed cohorts separate. The run remains useful for small-scope Taskledger overhead and becomes a baseline for later Terra/Luna runs. For the strongest v0.3.0 efficiency proof, restore Sol/high plus Terra/medium before the run begins."
+  },
+  "qualification_requirements": [
+    "The root Taskledger task starts after this checkpoint timestamp.",
+    "The injected Taskledger skill and installed CLI are verified as version 0.3.0 or a deliberately documented successor.",
+    "The new specification and its scope are identified rather than resuming an already-materialized queue.",
+    "Planning and execution phase boundaries are captured separately.",
+    "Exact primary and worker model/reasoning-effort cohorts are retained and are not extrapolated into the former higher tiers.",
+    "The pre-existing dirty working tree is reconciled explicitly before Taskledger creates assignments; unrelated user changes are not attributed to the run.",
+    "New requirements, tasks, criteria, dependencies, submissions, corrections, integrations, Git diffs, and token events are measured as checkpoint deltas."
+  ],
+  "comparison_policy": {
+    "primary": "Evaluate workflow overhead and within-run task-family consistency for this small-scope sample.",
+    "cross_project": "Use financial-tracker only for model-matched workflow mechanisms such as recovery/resume frequency, context replay, compactions, approval cycles, and review corrections. Do not use raw tokens per task as a cross-project effectiveness estimate.",
+    "future_value": "This run establishes a small-scope v0.3.0 baseline. A later similar rust_but_verify task family can provide the clean comparison that the architecture-heavy financial-tracker history cannot.",
+    "methodology": "task-complexity-methodology.md"
+  },
+  "future_thread_id": "01a02b0d-c48c-78e3-8950-684336d16f4f",
+  "future_run_started_at": "2026-08-22T19:58:37Z",
+  "future_run_ended_at": "2026-08-22T20:50:01.272Z",
+  "future_usage_checkpoint": "rust-but-verify-post-v0.3.0-thread-01a02b0d.json",
+  "future_task_complexity_checkpoint": "rust-but-verify-post-v0.3.0-task-complexity.json",
+  "future_comparison": "comparison-rust-but-verify-v0.3.0-thread-01a02b0d.md"
+}

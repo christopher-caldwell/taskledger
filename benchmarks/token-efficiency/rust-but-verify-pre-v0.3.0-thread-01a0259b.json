@@ -1,0 +1,116 @@
+{
+  "cohorts": {
+    "codex-auto-review|low": {
+      "agent_roles": {
+        "none": 3
+      },
+      "compactions": 0,
+      "files": 3,
+      "taskledger_commands": {},
+      "thread_sources": {
+        "subagent": 3
+      },
+      "token_events": 63,
+      "tokens": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 2148608,
+        "input_tokens": 2369982,
+        "output_tokens": 5062,
+        "reasoning_output_tokens": 1496,
+        "total_tokens": 2375044
+      }
+    },
+    "gpt-5.6-sol|medium": {
+      "agent_roles": {
+        "none": 1
+      },
+      "compactions": 0,
+      "files": 1,
+      "taskledger_commands": {
+        "assignment create": 4,
+        "plan validate": 1,
+        "project complete": 1,
+        "project init": 4,
+        "project recover": 9,
+        "project show": 2,
+        "requirement create": 1,
+        "requirement verify": 4,
+        "spec register": 1,
+        "submission verify": 4,
+        "task create": 1,
+        "task list": 1,
+        "worker submit": 4
+      },
+      "thread_sources": {
+        "user": 1
+      },
+      "token_events": 81,
+      "tokens": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 5586688,
+        "input_tokens": 5857337,
+        "output_tokens": 49658,
+        "reasoning_output_tokens": 9752,
+        "total_tokens": 5906995
+      }
+    }
+  },
+  "durable_progress": {
+    "available": true,
+    "event_counts": {
+      "ASSIGNMENT_ACTIVATED": 4,
+      "PLAN_VALIDATED": 1,
+      "PROJECT_COMPLETED": 1,
+      "PROJECT_INITIALIZED": 1,
+      "REQUIREMENT_CREATED": 7,
+      "REQUIREMENT_VERIFIED": 7,
+      "SPECIFICATION_REGISTERED": 1,
+      "SUBMISSION_RECORDED": 4,
+      "SUBMISSION_VERIFIED": 4,
+      "TASK_CREATED": 4,
+      "TASK_INTEGRATED": 4
+    },
+    "planning_structure": {
+      "acceptance_criteria_created": 24,
+      "plan_validations": 1,
+      "requirements_created": 7,
+      "specification_reviews_created": 0,
+      "specification_revisions_approved": 1,
+      "specification_revisions_observed": 1,
+      "specifications_created": 1,
+      "successful_plan_validations": 1,
+      "task_dependencies_created": 3,
+      "task_requirement_links_created": 7,
+      "tasks_created": 4
+    },
+    "project_id": "20f2fc7d-df6f-4764-99cb-e3027f4a39a0"
+  },
+  "interpretation": {
+    "credits": "Use observed provider credits/rate versions only; this collector does not invent prices.",
+    "cross_model_fallback": "Report each model separately; optionally weight within-model post/pre ratios by the baseline model mix.",
+    "do_not_do": "Do not convert lower-tier token counts into hypothetical higher-tier behavior.",
+    "primary_comparison": "Compare identical model and reasoning-effort cohorts per durable progress event."
+  },
+  "label": "rust-but-verify-initial-v0-pre-v0.3-thread-01a0259b",
+  "repository": "/Users/christophercaldwell/Code/oss/rust_but_verify",
+  "schema_version": 1,
+  "source": {
+    "codex_cli_versions": {
+      "0.148.0-alpha.15": 4
+    },
+    "files_matched": 4,
+    "files_scanned": 220,
+    "inherited_history": {
+      "compactions_excluded": 0,
+      "forked_files": 0,
+      "token_events_excluded": 0
+    },
+    "session_id": "01a0259b-15b4-7a71-9f4a-6fcf3f7b0f08",
+    "sessions": "/Users/christophercaldwell/.codex/sessions"
+  },
+  "taskledger_version": "pre-v0.3.0-v0.1-planning-v0.2-execution",
+  "window": {
+    "since": "2026-08-21T18:35:39.000Z",
+    "until": "2026-08-22T02:10:30.000Z"
+  }
+}

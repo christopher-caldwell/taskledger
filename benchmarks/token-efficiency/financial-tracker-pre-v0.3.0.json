@@ -1,0 +1,195 @@
+{
+  "cohorts": {
+    "codex-auto-review|low": {
+      "agent_roles": {
+        "none": 43
+      },
+      "compactions": 3,
+      "files": 43,
+      "taskledger_commands": {},
+      "thread_sources": {
+        "subagent": 43
+      },
+      "token_events": 1344,
+      "tokens": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 102552320,
+        "input_tokens": 112551150,
+        "output_tokens": 114212,
+        "reasoning_output_tokens": 38568,
+        "total_tokens": 112907902
+      }
+    },
+    "gpt-5.6-sol|high": {
+      "agent_roles": {
+        "none": 4
+      },
+      "compactions": 11,
+      "files": 4,
+      "taskledger_commands": {
+        "assignment create": 35,
+        "assignment revoke": 1,
+        "blocker create": 2,
+        "blocker resolve": 14,
+        "follow-up review": 3,
+        "operation mark-failed": 3,
+        "plan validate": 78,
+        "project complete": 2,
+        "project init": 8,
+        "project recover": 108,
+        "project show": 2,
+        "question answer": 4,
+        "requirement create": 3,
+        "requirement list": 3,
+        "requirement update": 9,
+        "requirement verify": 20,
+        "spec check": 9,
+        "spec register": 2,
+        "spec review": 10,
+        "submission verify": 55,
+        "task create": 6,
+        "task integrate": 6,
+        "task list": 25,
+        "task update": 32,
+        "worker context": 1,
+        "worker submit": 4
+      },
+      "thread_sources": {
+        "user": 4
+      },
+      "token_events": 1647,
+      "tokens": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 196252160,
+        "input_tokens": 201497352,
+        "output_tokens": 534671,
+        "reasoning_output_tokens": 145981,
+        "total_tokens": 202301394
+      }
+    },
+    "gpt-5.6-sol|medium": {
+      "agent_roles": {
+        "none": 1
+      },
+      "compactions": 0,
+      "files": 1,
+      "taskledger_commands": {},
+      "thread_sources": {
+        "user": 1
+      },
+      "token_events": 75,
+      "tokens": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 8575232,
+        "input_tokens": 8807940,
+        "output_tokens": 39868,
+        "reasoning_output_tokens": 13509,
+        "total_tokens": 8847808
+      }
+    },
+    "gpt-5.6-terra|medium": {
+      "agent_roles": {
+        "taskledger_worker": 32
+      },
+      "compactions": 0,
+      "files": 32,
+      "taskledger_commands": {
+        "plan validate": 1,
+        "project recover": 2,
+        "task list": 4,
+        "task show": 3,
+        "worker blocker": 14,
+        "worker context": 109,
+        "worker follow-up": 4,
+        "worker question": 4,
+        "worker submit": 69
+      },
+      "thread_sources": {
+        "subagent": 32
+      },
+      "token_events": 1614,
+      "tokens": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 142444032,
+        "input_tokens": 146756667,
+        "output_tokens": 791553,
+        "reasoning_output_tokens": 124977,
+        "total_tokens": 147548220
+      }
+    }
+  },
+  "durable_progress": {
+    "available": true,
+    "event_counts": {
+      "ASSIGNMENT_ACTIVATED": 34,
+      "ASSIGNMENT_REVOKED": 1,
+      "BLOCKER_CREATED": 13,
+      "BLOCKER_RESOLVED": 13,
+      "COMPLETION_INVALIDATED": 2,
+      "FOLLOW_UP_PROPOSED": 3,
+      "FOLLOW_UP_REVIEWED": 5,
+      "INTEGRATION_FAILED": 5,
+      "OPERATION_MARKED_FAILED": 1,
+      "PLAN_VALIDATED": 84,
+      "PROJECT_COMPLETED": 2,
+      "PROJECT_INITIALIZED": 1,
+      "QUESTION_ANSWERED": 4,
+      "REQUIREMENT_CREATED": 31,
+      "REQUIREMENT_UPDATED": 12,
+      "REQUIREMENT_VERIFIED": 20,
+      "SPECIFICATION_OBSERVED": 6,
+      "SPECIFICATION_REGISTERED": 4,
+      "SPECIFICATION_REVIEW_COMPLETED": 7,
+      "SPECIFICATION_REVIEW_RETARGETED": 1,
+      "SUBMISSION_RECORDED": 46,
+      "SUBMISSION_VERIFIED": 47,
+      "TASK_CREATED": 33,
+      "TASK_INTEGRATED": 27,
+      "TASK_UPDATED": 34,
+      "WORKER_QUESTION_CREATED": 4
+    },
+    "planning_structure": {
+      "acceptance_criteria_created": 410,
+      "plan_validations": 84,
+      "requirements_created": 31,
+      "specification_reviews_created": 7,
+      "specification_revisions_approved": 2,
+      "specification_revisions_observed": 10,
+      "specifications_created": 4,
+      "successful_plan_validations": 84,
+      "task_dependencies_created": 67,
+      "task_requirement_links_created": 74,
+      "tasks_created": 33
+    },
+    "project_id": "402ddaf7-9249-4074-9f1e-cb56cecbecbe"
+  },
+  "interpretation": {
+    "credits": "Use observed provider credits/rate versions only; this collector does not invent prices.",
+    "cross_model_fallback": "Report each model separately; optionally weight within-model post/pre ratios by the baseline model mix.",
+    "do_not_do": "Do not convert lower-tier token counts into hypothetical higher-tier behavior.",
+    "primary_comparison": "Compare identical model and reasoning-effort cohorts per durable progress event."
+  },
+  "label": "financial-tracker-pre-v0.3.0",
+  "repository": "/Users/christophercaldwell/Code/business/clients/destinations_beyond/db_financial_tracker",
+  "schema_version": 1,
+  "source": {
+    "codex_cli_versions": {
+      "0.147.0-alpha.1.2": 1,
+      "0.148.0-alpha.15": 108
+    },
+    "files_matched": 109,
+    "files_scanned": 220,
+    "inherited_history": {
+      "compactions_excluded": 50,
+      "forked_files": 43,
+      "token_events_excluded": 7960
+    },
+    "session_id": null,
+    "sessions": "/Users/christophercaldwell/.codex/sessions"
+  },
+  "taskledger_version": "0.2.3",
+  "window": {
+    "since": "2026-08-18T00:00:00.000Z",
+    "until": "2026-08-22T17:56:26.000Z"
+  }
+}

@@ -8,7 +8,7 @@
 2. `taskledger-technical-spec.md` defines implementation and incorporates the resolved v1 decisions below.
 3. This handoff controls build order and verification discipline. It does not override either specification.
 
-The product specification contains 66 numbered requirements and 12 mandatory end-to-end scenarios. The architecture is appropriate for the product: a short-lived Python CLI, SQLite, real Git worktrees, scoped local credentials, and a durable Git-operation journal. The design should remain local and standard-library-only.
+The product specification contains 71 numbered requirements and 12 mandatory end-to-end scenarios. The architecture is appropriate for the product: a short-lived Python CLI, SQLite, real Git worktrees, scoped local credentials, and a durable Git-operation journal. The design should remain local and standard-library-only.
 
 ## 1. Gate result
 
@@ -103,17 +103,21 @@ The design returns an existing submission whenever the assignment HEAD already h
 
 Submission supplies an identity, but merge does not. User settings can enable GPG signing or merge autostash, which can cause prompts or violate the no-stash rule. Safe rollback checks only HEAD and merge markers, not the index/worktree.
 
-**V1 decision:** Run Taskledger-created commits/merges with explicit local command configuration:
+**V1 decision:** Run Taskledger-created commits/merges with explicit signing and
+autostash controls while inheriting the consuming repository's normal Git
+author and committer identity:
 
 ```text
-git -c user.name=Taskledger \
-    -c user.email=taskledger@local \
-    -c commit.gpgSign=false \
+git -c commit.gpgSign=false \
     -c merge.autoStash=false \
     merge --no-ff --no-edit --no-gpg-sign <accepted_oid>
 ```
 
-Apply `commit.gpgSign=false` to checkpoint commits too. A known-safe rollback requires all of: canonical HEAD equals the before OID, no Git operation marker exists, the index has no staged delta, and the canonical worktree is clean. Otherwise mark the operation uncertain.
+Apply `commit.gpgSign=false` to checkpoint commits too. If Git has no usable
+identity, let the ordinary Git command fail; do not substitute a Taskledger
+identity. A known-safe rollback requires all of: canonical HEAD equals the
+before OID, no Git operation marker exists, the index has no staged delta, and
+the canonical worktree is clean. Otherwise mark the operation uncertain.
 
 ### Resolved supporting ambiguities
 
@@ -142,9 +146,13 @@ V1 treats `MISSING` as the observed file state/change kind and removes `REMOVED`
 
 Permit `task update` only from `PLANNED` or `ASSIGNED`. `ASSIGNED` requires `CONTINUE` or `REVOKE`. Require `reopen` for `COMPLETED` or `CANCELLED`. A `SUBMITTED` task first needs verification or cancellation disposition; an `ACCEPTED` task first needs integration or explicit cancellation.
 
-#### G-14 — Worktree cleanup recovery is unspecified
+#### G-14 — Worktree cleanup recovery
 
-V1 does not automatically remove a successful assignment worktree. It reports the retained worktree path. A later version can add cleanup after specifying its recovery proof cases.
+Taskledger now removes clean finalized assignment worktrees only after project
+completion is durably recorded. It uses non-forced `git worktree remove`, keeps
+all assignment branches and ledger history, treats missing paths as idempotent
+success, and retains dirty, locked, mismatched, out-of-root, or unregistered paths
+for inspection. `project cleanup` retries skipped worktrees while completed.
 
 #### G-15 — Orchestrator token rotation lacks a command
 
@@ -180,7 +188,11 @@ V1 uses full project and task UUIDs in generated branch names. Before worktree c
 
 ## 2. Resolved v1 posture
 
-V1 deliberately chooses the smaller behavior at every fork: scoped verification, one latest pending specification review, preserved immutable submissions after revocation, deterministic submission-scoped blockers, no Git mutation during recovery, evidence-only corrected submissions when the claim changes, retained worktrees, and POSIX/Git 2.20+ support. These are implementation decisions, not new product features.
+The implementation deliberately chooses the smaller behavior at every fork:
+scoped verification, one latest pending specification review, preserved immutable
+submissions after revocation, deterministic submission-scoped blockers, no Git
+mutation during recovery, evidence-only corrected submissions, retained assignment
+branches with safe post-completion worktree cleanup, and POSIX/Git 2.20+ support.
 
 ## 3. Instructions to the implementation model
 
@@ -197,7 +209,8 @@ Section 2 is resolved and its decisions are incorporated into the technical spec
 7. Every ledger-only mutation is one `BEGIN IMMEDIATE` transaction containing entity changes and an audit event.
 8. Never hold a SQLite transaction open while Git runs. Every Git mutation uses the operation journal.
 9. Never silently infer product meaning, affected requirements, conflict resolution, task priority, or assignment parallelism.
-10. Do not continue to the next slice until the slice’s tests pass.
+10. Treat worker routing and parallel safety as separate decisions. Prefer a routine worker for a frozen approach with explicit ownership and deterministic checks, but sequence any tasks whose prospective write sets or behavioral assumptions overlap.
+11. Do not continue to the next slice until the slice’s tests pass.
 
 ### 3.2 Build method
 
@@ -409,7 +422,7 @@ Deliver:
 - safe abort proof and uncertain fallback;
 - successful task completion and downstream eligibility;
 - integration reachability reconciliation and scoped invalidation;
-- no automatic worktree cleanup under G-14.
+- automatic post-completion cleanup and explicit idempotent retry under G-14.
 
 Tests:
 
@@ -526,6 +539,6 @@ The implementation model must not claim completion until all are true:
 - specification changes gate execution and never infer affected items;
 - all blockers require explicit orchestrator resolution;
 - external canonical rewrites remove current completion credit;
-- all 66 numbered product requirements have traceable automated coverage;
+- all 71 numbered product requirements have traceable automated coverage;
 - Scenarios A through L pass solely through the installed CLI;
 - no Section 30 excluded feature exists.

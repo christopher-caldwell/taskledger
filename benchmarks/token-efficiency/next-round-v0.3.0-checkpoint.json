@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "checkpoint": "taskledger-v0.3.0-installed",
+  "installed_at": "2026-08-22T17:57:37Z",
+  "baseline": "financial-tracker-pre-v0.3.0.json",
+  "post_window_starts_at": "2026-08-22T17:57:37Z",
+  "completed_sample": {
+    "thread_id": "01a02aa8-4b53-7f11-ad60-e514a1f21dca",
+    "checkpoint": "financial-tracker-post-v0.3.0-thread-01a02aa8.json",
+    "comparison": "comparison-v0.3.0-thread-01a02aa8.md",
+    "version_verified": true,
+    "classification": "strong directional confirmation"
+  },
+  "installation": {
+    "taskledger_version": "0.3.0",
+    "cli": "/Users/christophercaldwell/.local/bin/taskledger",
+    "skill": "/Users/christophercaldwell/.codex/skills/taskledger/SKILL.md",
+    "installer": "scripts/install-local.sh"
+  },
+  "comparison_controls": {
+    "primary_model": "gpt-5.6-sol",
+    "primary_reasoning_effort": "high",
+    "worker_model": "gpt-5.6-terra",
+    "worker_reasoning_effort": "medium",
+    "keep_constant": [
+      "Codex version when practical",
+      "task risk and approximate task size",
+      "review authority and acceptance criteria",
+      "number and role of implementation workers"
+    ]
+  },
+  "success_rule": {
+    "minimum_directional_sample": "one comparable project round",
+    "preferred_sample": "at least 20 completed tasks",
+    "material_reduction": "at least 20% fewer input tokens per durable progress event within matched model cohorts",
+    "quality_guardrails": [
+      "no higher rejection or correction rate",
+      "no higher blocker or recovery rate",
+      "no skipped exact-OID or criterion-level verification",
+      "fewer broad recover/context calls and no more compactions"
+    ]
+  },
+  "notes": [
+    "Session logs expose exact models but did not expose reasoning effort in the baseline, so keep the configured efforts pinned and record any change manually.",
+    "Do not convert Terra tokens into hypothetical Sol tokens. Compare Terra-to-Terra and Sol-to-Sol, then optionally create a baseline-mix-weighted standardized index.",
+    "Use observed credits only when the host supplies them with a rate/version; never infer missing auto-review pricing."
+  ]
+}

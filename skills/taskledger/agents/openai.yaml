@@ -1,4 +1,4 @@
 interface:
   display_name: "Task Ledger"
   short_description: "Track durable multi-agent project execution"
-  default_prompt: "Use $taskledger to initialize or continue the execution ledger for this project."
+  default_prompt: "Use $taskledger to initialize or continue this project's ledger with brief approval gates, routine-preferred routing, staged checks, and an orchestrator-owned final audit."

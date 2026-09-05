@@ -1,0 +1,654 @@
+{
+  "created_at": "2026-08-24T14:16:36Z",
+  "interpretation": {
+    "do_not_use": "Do not treat elapsed time, lines changed, or integrated-task count alone as task complexity.",
+    "overlap": "If task windows overlap, their token totals are not additive and must not be pooled.",
+    "planning": "Planning tokens fall outside assignment-to-integration windows and must be reported separately.",
+    "use": "Compare like task families and inspect each observable complexity dimension before aggregating tokens."
+  },
+  "label": "financial-tracker-ui-terra-xhigh-completed-ledger-tasks-interim",
+  "ledger_db": "/Users/christophercaldwell/Code/business/clients/destinations_beyond/db_financial_tracker/.taskledger/taskledger.sqlite3",
+  "repository": "/Users/christophercaldwell/Code/business/clients/destinations_beyond/db_financial_tracker",
+  "schema_version": 1,
+  "source": {
+    "files_matched_to_repo": 109,
+    "files_scanned": 220,
+    "inherited_history": {
+      "compactions_excluded": 69,
+      "forked_files": 43,
+      "token_events_excluded": 11607
+    },
+    "overlapping_task_windows": [
+      [
+        "6e37e812-9c8d-4463-92e9-e2480b8d9fed",
+        "1a3006b4-7c58-41d8-98f7-b8056f7397d0"
+      ],
+      [
+        "6e37e812-9c8d-4463-92e9-e2480b8d9fed",
+        "c971f08f-7230-4e79-af47-14a62b5cee09"
+      ],
+      [
+        "1a3006b4-7c58-41d8-98f7-b8056f7397d0",
+        "e46d9862-928f-4c5f-a8b7-46a1b38912be"
+      ],
+      [
+        "1a3006b4-7c58-41d8-98f7-b8056f7397d0",
+        "c971f08f-7230-4e79-af47-14a62b5cee09"
+      ],
+      [
+        "e46d9862-928f-4c5f-a8b7-46a1b38912be",
+        "c971f08f-7230-4e79-af47-14a62b5cee09"
+      ],
+      [
+        "e5f105b4-28dc-40b3-a282-feb6aada3a22",
+        "e5ab61d8-6f69-4dc0-b1c6-178a22a12bb1"
+      ]
+    ],
+    "sessions": "/Users/christophercaldwell/.codex/sessions"
+  },
+  "tasks": [
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T14:41:42.643Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "803bedee546e7a18ebee784deeaacaecd5d9ecbc",
+      "canonical_before_oid": "30c991d93cf51504527191b7e1a0e7020e706f3c",
+      "created_at": "2026-08-23T14:40:40.504Z",
+      "dependencies": 0,
+      "execution_seconds": 1616.5,
+      "git_diff": {
+        "additions": 7581,
+        "binary_files": 0,
+        "deletions": 0,
+        "files_changed": 54,
+        "lines_changed": 7581,
+        "top_level_areas": {
+          "web": 54
+        }
+      },
+      "id": "1bce79a6-6faf-4e26-b9d8-ca26456825a5",
+      "implementation_scope": "Own the initial web/ package: Vite/React configuration, generated-OpenAPI workflow and types, typed client/fetcher boundary, deterministic mock store, shared query/date/decimal utilities, authenticated application shell, and shared error/empty-state components. Do not implement dashboard, resource pages, or server changes.",
+      "integrated_at": "2026-08-23T15:08:39.143Z",
+      "linked_requirements": 1,
+      "objective": "Create the web foundation and OpenAPI-shaped mock data boundary.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 126,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 13698560,
+            "input_tokens": 13935032,
+            "output_tokens": 67113,
+            "reasoning_output_tokens": 16678,
+            "total_tokens": 14002145
+          }
+        },
+        "gpt-5.6-terra|xhigh": {
+          "compactions": 0,
+          "token_events": 43,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 6744320,
+            "input_tokens": 6958728,
+            "output_tokens": 7286,
+            "reasoning_output_tokens": 2199,
+            "total_tokens": 6966014
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 4,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T15:17:23.166Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "8af622bac99f67fe4a4d59fe181e625f2cc99916",
+      "canonical_before_oid": "803bedee546e7a18ebee784deeaacaecd5d9ecbc",
+      "created_at": "2026-08-23T14:41:18.272Z",
+      "dependencies": 1,
+      "execution_seconds": 1028.328,
+      "git_diff": {
+        "additions": 415,
+        "binary_files": 0,
+        "deletions": 7,
+        "files_changed": 10,
+        "lines_changed": 422,
+        "top_level_areas": {
+          "web": 10
+        }
+      },
+      "id": "6e37e812-9c8d-4463-92e9-e2480b8d9fed",
+      "implementation_scope": "Own /clients and /clients/$clientUuid route-local features, client table, create/edit forms, and associated-trip view. Exclude reference-data settings and trip mutations.",
+      "integrated_at": "2026-08-23T15:34:31.494Z",
+      "linked_requirements": 1,
+      "objective": "Implement reusable client directory and client detail workflows.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 116,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 8577024,
+            "input_tokens": 9000374,
+            "output_tokens": 69233,
+            "reasoning_output_tokens": 21913,
+            "total_tokens": 9069607
+          }
+        },
+        "gpt-5.6-terra|xhigh": {
+          "compactions": 1,
+          "token_events": 36,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 6360576,
+            "input_tokens": 6419644,
+            "output_tokens": 11131,
+            "reasoning_output_tokens": 3700,
+            "total_tokens": 6465381
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 4,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T15:17:21.517Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "571df02f1af374ed773bad574b423a9ecfbdd3b4",
+      "canonical_before_oid": "8af622bac99f67fe4a4d59fe181e625f2cc99916",
+      "created_at": "2026-08-23T14:40:57.002Z",
+      "dependencies": 1,
+      "execution_seconds": 1412.064,
+      "git_diff": {
+        "additions": 911,
+        "binary_files": 0,
+        "deletions": 20,
+        "files_changed": 3,
+        "lines_changed": 931,
+        "top_level_areas": {
+          "web": 3
+        }
+      },
+      "id": "1a3006b4-7c58-41d8-98f7-b8056f7397d0",
+      "implementation_scope": "Own dashboard route-local files and dashboard-specific reusable components. Consume the typed dashboard query through the shared API boundary; do not change API contracts or build unrelated routes.",
+      "integrated_at": "2026-08-23T15:40:53.581Z",
+      "linked_requirements": 1,
+      "objective": "Implement the financial dashboard read experience.",
+      "rejected_reviews": 1,
+      "submissions": 2,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 149,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 10771200,
+            "input_tokens": 11429628,
+            "output_tokens": 95486,
+            "reasoning_output_tokens": 30276,
+            "total_tokens": 11525114
+          }
+        },
+        "gpt-5.6-terra|xhigh": {
+          "compactions": 1,
+          "token_events": 62,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 8070144,
+            "input_tokens": 8212909,
+            "output_tokens": 20841,
+            "reasoning_output_tokens": 6652,
+            "total_tokens": 8268356
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 4,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T15:34:47.056Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "0c75ed36f98075c2ec4444db947053dc80c12aee",
+      "canonical_before_oid": "571df02f1af374ed773bad574b423a9ecfbdd3b4",
+      "created_at": "2026-08-23T14:41:25.636Z",
+      "dependencies": 1,
+      "execution_seconds": 754.662,
+      "git_diff": {
+        "additions": 929,
+        "binary_files": 0,
+        "deletions": 13,
+        "files_changed": 13,
+        "lines_changed": 942,
+        "top_level_areas": {
+          "web": 13
+        }
+      },
+      "id": "e46d9862-928f-4c5f-a8b7-46a1b38912be",
+      "implementation_scope": "Own /settings and its route-local supplier, provider, destination, and category maintenance features, including typed query/mutation modules and edit drawers. Exclude client and trip pages.",
+      "integrated_at": "2026-08-23T15:47:21.718Z",
+      "linked_requirements": 1,
+      "objective": "Implement the consolidated reference-data Settings experience.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 68,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 5257216,
+            "input_tokens": 5559004,
+            "output_tokens": 42057,
+            "reasoning_output_tokens": 12720,
+            "total_tokens": 5601061
+          }
+        },
+        "gpt-5.6-terra|xhigh": {
+          "compactions": 0,
+          "token_events": 38,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 3218944,
+            "input_tokens": 3334381,
+            "output_tokens": 12692,
+            "reasoning_output_tokens": 3932,
+            "total_tokens": 3347073
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 4,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T15:17:22.314Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "986fb27cbe8c51786ad75223949842e7d50fea6e",
+      "canonical_before_oid": "986fb27cbe8c51786ad75223949842e7d50fea6e",
+      "created_at": "2026-08-23T14:41:04.205Z",
+      "dependencies": 1,
+      "execution_seconds": 2540.253,
+      "git_diff": {
+        "additions": 0,
+        "binary_files": 0,
+        "deletions": 0,
+        "files_changed": 0,
+        "lines_changed": 0,
+        "top_level_areas": {}
+      },
+      "id": "c971f08f-7230-4e79-af47-14a62b5cee09",
+      "implementation_scope": "Own /trips and /trips/$tripUuid route-local read features, including validated URL filters, tables, complete trip display, and navigation. Exclude all create/update/delete actions.",
+      "integrated_at": "2026-08-23T15:59:42.567Z",
+      "linked_requirements": 1,
+      "objective": "Implement trip history and read-only trip detail.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 184,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 13834240,
+            "input_tokens": 14559378,
+            "output_tokens": 111290,
+            "reasoning_output_tokens": 34633,
+            "total_tokens": 14670668
+          }
+        },
+        "gpt-5.6-terra|xhigh": {
+          "compactions": 1,
+          "token_events": 86,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 10848256,
+            "input_tokens": 11056483,
+            "output_tokens": 29983,
+            "reasoning_output_tokens": 9889,
+            "total_tokens": 11121072
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 4,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T15:59:56.483Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "f0c9ad7f6ba3ca5206f2a2075a7fef6ecbb9da20",
+      "canonical_before_oid": "986fb27cbe8c51786ad75223949842e7d50fea6e",
+      "created_at": "2026-08-23T14:41:10.880Z",
+      "dependencies": 1,
+      "execution_seconds": 1782.096,
+      "git_diff": {
+        "additions": 1342,
+        "binary_files": 0,
+        "deletions": 166,
+        "files_changed": 12,
+        "lines_changed": 1508,
+        "top_level_areas": {
+          "web": 12
+        }
+      },
+      "id": "27f91d3c-6664-4a6b-8d84-9a7135e1bc07",
+      "implementation_scope": "Own /trips/new and mutation features under /trips/$tripUuid for full trip updates, client membership, and all four add-on create/update/remove flows. Use existing documented endpoints only; do not modify server contracts.",
+      "integrated_at": "2026-08-23T16:29:38.579Z",
+      "linked_requirements": 1,
+      "objective": "Implement trip creation and trip-detail maintenance workflows.",
+      "rejected_reviews": 1,
+      "submissions": 2,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 104,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 12998656,
+            "input_tokens": 13252377,
+            "output_tokens": 72801,
+            "reasoning_output_tokens": 18930,
+            "total_tokens": 13325178
+          }
+        },
+        "gpt-5.6-terra|xhigh": {
+          "compactions": 1,
+          "token_events": 61,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 8847360,
+            "input_tokens": 9006899,
+            "output_tokens": 12813,
+            "reasoning_output_tokens": 4132,
+            "total_tokens": 9035853
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 4,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T16:29:51.864Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "241d22cc80dcd9739051155f59ad10cc64b8054c",
+      "canonical_before_oid": "f0c9ad7f6ba3ca5206f2a2075a7fef6ecbb9da20",
+      "created_at": "2026-08-23T14:41:35.475Z",
+      "dependencies": 5,
+      "execution_seconds": 1715.896,
+      "git_diff": {
+        "additions": 382,
+        "binary_files": 0,
+        "deletions": 88,
+        "files_changed": 20,
+        "lines_changed": 470,
+        "top_level_areas": {
+          "web": 20
+        }
+      },
+      "id": "a6569762-0359-4bf1-828d-521293806bff",
+      "implementation_scope": "Own cross-cutting verification, live-mode/Clerk behavior, responsive and accessibility hardening, and documented quality gates. Do not introduce new product pages or server API features.",
+      "integrated_at": "2026-08-23T16:58:27.760Z",
+      "linked_requirements": 1,
+      "objective": "Harden the web application and validate mock/live contract behavior.",
+      "rejected_reviews": 3,
+      "submissions": 4,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 107,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 13532416,
+            "input_tokens": 13927603,
+            "output_tokens": 52591,
+            "reasoning_output_tokens": 21877,
+            "total_tokens": 13980194
+          }
+        },
+        "gpt-5.6-terra|xhigh": {
+          "compactions": 0,
+          "token_events": 97,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 11299584,
+            "input_tokens": 11468653,
+            "output_tokens": 23498,
+            "reasoning_output_tokens": 6882,
+            "total_tokens": 11492151
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 4,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T19:13:00.675Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "f8a55dfa0277eb7a98d73f11168ab1e5ea2817ad",
+      "canonical_before_oid": "815825fff37c701e972ae0a1c9a8896af73b7e95",
+      "created_at": "2026-08-23T19:12:21.570Z",
+      "dependencies": 0,
+      "execution_seconds": 853.261,
+      "git_diff": {
+        "additions": 543,
+        "binary_files": 0,
+        "deletions": 0,
+        "files_changed": 4,
+        "lines_changed": 543,
+        "top_level_areas": {
+          "web": 4
+        }
+      },
+      "id": "c0b52d3b-054e-4a6f-81f8-dcb85dfc1f8e",
+      "implementation_scope": "Own web/src/components/edit-drawer/**, web/src/components/entity-table/**, web/src/components/filter-drawer/**, and only the shared CSS necessary for those components. Do not modify route features, API fetchers/hooks, generated types, or router configuration.",
+      "integrated_at": "2026-08-23T19:27:13.936Z",
+      "linked_requirements": 1,
+      "objective": "Add shared CRM-pattern drawer, list table, and filtering primitives.",
+      "rejected_reviews": 1,
+      "submissions": 2,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 38,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2812416,
+            "input_tokens": 2928462,
+            "output_tokens": 29168,
+            "reasoning_output_tokens": 11705,
+            "total_tokens": 2957630
+          }
+        },
+        "gpt-5.6-terra|xhigh": {
+          "compactions": 1,
+          "token_events": 36,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 3553536,
+            "input_tokens": 3612520,
+            "output_tokens": 6773,
+            "reasoning_output_tokens": 1245,
+            "total_tokens": 3637573
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 4,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T19:27:40.153Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "b1c43fedc67641761ba5c5c65bd882bb2e888ced",
+      "canonical_before_oid": "f8a55dfa0277eb7a98d73f11168ab1e5ea2817ad",
+      "created_at": "2026-08-23T19:12:43.146Z",
+      "dependencies": 1,
+      "execution_seconds": 492.96,
+      "git_diff": {
+        "additions": 234,
+        "binary_files": 0,
+        "deletions": 202,
+        "files_changed": 4,
+        "lines_changed": 436,
+        "top_level_areas": {
+          "web": 4
+        }
+      },
+      "id": "e5f105b4-28dc-40b3-a282-feb6aada3a22",
+      "implementation_scope": "Own web/src/routes/clients/** and web/src/routes/settings/**. Consume shared components created by the foundation task. Do not modify shared component implementations, API fetchers/hooks, mock database, generated types, router configuration, or global CSS outside client/settings-specific existing selectors.",
+      "integrated_at": "2026-08-23T19:35:53.113Z",
+      "linked_requirements": 1,
+      "objective": "Refactor Clients and Settings creation/list controls to the shared CRM-pattern drawers and table/filter surface.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 66,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 4334080,
+            "input_tokens": 4547734,
+            "output_tokens": 41504,
+            "reasoning_output_tokens": 15490,
+            "total_tokens": 4589238
+          }
+        },
+        "gpt-5.6-terra|xhigh": {
+          "compactions": 0,
+          "token_events": 19,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 871680,
+            "input_tokens": 901850,
+            "output_tokens": 3089,
+            "reasoning_output_tokens": 607,
+            "total_tokens": 904939
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 4,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T19:27:39.368Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "446b858c5c95d81051e96e785fd0d54cf8c3dd37",
+      "canonical_before_oid": "b1c43fedc67641761ba5c5c65bd882bb2e888ced",
+      "created_at": "2026-08-23T19:12:42.825Z",
+      "dependencies": 1,
+      "execution_seconds": 757.794,
+      "git_diff": {
+        "additions": 310,
+        "binary_files": 0,
+        "deletions": 260,
+        "files_changed": 7,
+        "lines_changed": 570,
+        "top_level_areas": {
+          "web": 7
+        }
+      },
+      "id": "e5ab61d8-6f69-4dc0-b1c6-178a22a12bb1",
+      "implementation_scope": "Own web/src/routes/trips/**, web/src/router.tsx, and trip-specific feature folders. Consume shared components created by the foundation task. Do not modify shared component implementations, API fetchers/hooks, mock database, generated types, or global CSS outside trip-specific existing CSS selectors.",
+      "integrated_at": "2026-08-23T19:40:17.162Z",
+      "linked_requirements": 1,
+      "objective": "Refactor Trips creation and list controls to the shared CRM-pattern drawers and table/filter surface.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 90,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 7242240,
+            "input_tokens": 7488644,
+            "output_tokens": 52769,
+            "reasoning_output_tokens": 17948,
+            "total_tokens": 7541413
+          }
+        },
+        "gpt-5.6-terra|xhigh": {
+          "compactions": 0,
+          "token_events": 30,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1565184,
+            "input_tokens": 1619070,
+            "output_tokens": 5910,
+            "reasoning_output_tokens": 1420,
+            "total_tokens": 1624980
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 3,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-23T19:40:32.839Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "3f9433e1fe9cde19f3966f2a49a5ee908ea00b54",
+      "canonical_before_oid": "446b858c5c95d81051e96e785fd0d54cf8c3dd37",
+      "created_at": "2026-08-23T19:12:54.217Z",
+      "dependencies": 2,
+      "execution_seconds": 457.056,
+      "git_diff": {
+        "additions": 188,
+        "binary_files": 0,
+        "deletions": 24,
+        "files_changed": 2,
+        "lines_changed": 212,
+        "top_level_areas": {
+          "web": 2
+        }
+      },
+      "id": "8a774eff-076a-4c4f-9bc4-5947f08ed3db",
+      "implementation_scope": "Own web/scripts/verify-ui.mjs, web/QUALITY.md, and only test/documentation artifacts needed for this feature. Do not modify application route or component code unless a test-only defect is found and recorded through Taskledger.",
+      "integrated_at": "2026-08-23T19:48:09.895Z",
+      "linked_requirements": 1,
+      "objective": "Extend CRM-alignment quality coverage and independently exercise every new drawer/list path.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "gpt-5.6-luna|max": {
+          "compactions": 0,
+          "token_events": 25,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1548032,
+            "input_tokens": 1638534,
+            "output_tokens": 18995,
+            "reasoning_output_tokens": 6302,
+            "total_tokens": 1657529
+          }
+        },
+        "gpt-5.6-terra|xhigh": {
+          "compactions": 0,
+          "token_events": 28,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2707456,
+            "input_tokens": 2756652,
+            "output_tokens": 5261,
+            "reasoning_output_tokens": 1328,
+            "total_tokens": 2761913
+          }
+        }
+      }
+    }
+  ]
+}

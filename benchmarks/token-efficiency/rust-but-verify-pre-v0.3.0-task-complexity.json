@@ -1,0 +1,628 @@
+{
+  "created_at": "2026-08-24T14:20:25Z",
+  "interpretation": {
+    "do_not_use": "Do not treat elapsed time, lines changed, or integrated-task count alone as task complexity.",
+    "overlap": "If task windows overlap, their token totals are not additive and must not be pooled.",
+    "planning": "Planning tokens fall outside assignment-to-integration windows and must be reported separately.",
+    "use": "Compare like task families and inspect each observable complexity dimension before aggregating tokens."
+  },
+  "label": "rust-but-verify-pre-v0.3.0-completed-task-complexity",
+  "ledger_db": "/Users/christophercaldwell/Code/oss/rust_but_verify/.taskledger/taskledger.sqlite3",
+  "repository": "/Users/christophercaldwell/Code/oss/rust_but_verify",
+  "schema_version": 1,
+  "source": {
+    "files_matched_to_repo": 19,
+    "files_scanned": 220,
+    "inherited_history": {
+      "compactions_excluded": 0,
+      "forked_files": 3,
+      "token_events_excluded": 113
+    },
+    "overlapping_task_windows": [],
+    "sessions": "/Users/christophercaldwell/.codex/sessions"
+  },
+  "tasks": [
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-21T20:57:43.972Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "608125d93f235ca12bfea2da76715cade20d4362",
+      "canonical_before_oid": "e1225521f1f3075c4e50dbf30c5e65fe64b9dd8b",
+      "created_at": "2026-08-21T18:44:55.434Z",
+      "dependencies": 0,
+      "execution_seconds": 294.065,
+      "git_diff": {
+        "additions": 349,
+        "binary_files": 0,
+        "deletions": 13,
+        "files_changed": 3,
+        "lines_changed": 362,
+        "top_level_areas": {
+          "src": 3
+        }
+      },
+      "id": "1a1d1c2a-3034-494e-96b8-35a0a871cc12",
+      "implementation_scope": "Runtime role, action, scope, and assignment values; immutable role-to-action grants; source-agnostic model construction through runtime keys and typed-action inputs; validation errors; and optional known-action validation. Authorization evaluation, typed scope compatibility, model refresh, and consumer documentation are outside this task.",
+      "integrated_at": "2026-08-21T21:02:38.037Z",
+      "linked_requirements": 2,
+      "objective": "Deliver the normalized runtime policy model and its validation boundary.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 8,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 195584,
+            "input_tokens": 229590,
+            "output_tokens": 775,
+            "reasoning_output_tokens": 306,
+            "total_tokens": 230365
+          }
+        },
+        "gpt-5.6-sol|medium": {
+          "compactions": 0,
+          "token_events": 11,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 715008,
+            "input_tokens": 739910,
+            "output_tokens": 11333,
+            "reasoning_output_tokens": 1541,
+            "total_tokens": 751243
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T02:00:50.530Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "c7a0d4787e7821839673ccf313f5514d437046d3",
+      "canonical_before_oid": "608125d93f235ca12bfea2da76715cade20d4362",
+      "created_at": "2026-08-21T18:44:58.553Z",
+      "dependencies": 1,
+      "execution_seconds": 121.727,
+      "git_diff": {
+        "additions": 182,
+        "binary_files": 0,
+        "deletions": 0,
+        "files_changed": 3,
+        "lines_changed": 182,
+        "top_level_areas": {
+          "src": 2,
+          "tests": 1
+        }
+      },
+      "id": "029e6c45-71be-4ce5-adb5-ec88bfb18533",
+      "implementation_scope": "Consumer-implemented action and scope traits, typed target construction with consumer-controlled identifiers, erasure into runtime keys, and the action/scope compatibility mechanism. Runtime policy storage and authorization semantics are consumed as established contracts rather than redesigned.",
+      "integrated_at": "2026-08-22T02:02:52.257Z",
+      "linked_requirements": 1,
+      "objective": "Deliver the typed application boundary for actions, scope namespaces, and compatible targets.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 6,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 126464,
+            "input_tokens": 165982,
+            "output_tokens": 424,
+            "reasoning_output_tokens": 102,
+            "total_tokens": 166406
+          }
+        },
+        "gpt-5.6-sol|medium": {
+          "compactions": 0,
+          "token_events": 6,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 514560,
+            "input_tokens": 527535,
+            "output_tokens": 4280,
+            "reasoning_output_tokens": 516,
+            "total_tokens": 531815
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 7,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T02:03:19.540Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "0492adfb1390178a320bb2f3a21268cad4207fa4",
+      "canonical_before_oid": "c7a0d4787e7821839673ccf313f5514d437046d3",
+      "created_at": "2026-08-21T18:45:02.824Z",
+      "dependencies": 1,
+      "execution_seconds": 162.571,
+      "git_diff": {
+        "additions": 289,
+        "binary_files": 0,
+        "deletions": 0,
+        "files_changed": 3,
+        "lines_changed": 289,
+        "top_level_areas": {
+          "src": 2,
+          "tests": 1
+        }
+      },
+      "id": "d882cd9d-cfd8-42d5-8072-654f040a74c3",
+      "implementation_scope": "Authorization over supplied assignments, deterministic decision values, typed call integration, and safe all-or-nothing replacement of the active immutable model. Relationship resolution, configuration refresh transport, persistence, and framework-specific enforcement are excluded.",
+      "integrated_at": "2026-08-22T02:06:02.111Z",
+      "linked_requirements": 3,
+      "objective": "Deliver exact-scope authorization decisions and atomic active-model replacement.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 7,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 289024,
+            "input_tokens": 306972,
+            "output_tokens": 492,
+            "reasoning_output_tokens": 102,
+            "total_tokens": 307464
+          }
+        },
+        "gpt-5.6-sol|medium": {
+          "compactions": 0,
+          "token_events": 7,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 693504,
+            "input_tokens": 706952,
+            "output_tokens": 6383,
+            "reasoning_output_tokens": 944,
+            "total_tokens": 713335
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T02:06:37.921Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "f1a836a94fc514c81df62b4c94a6b610de02bee9",
+      "canonical_before_oid": "0492adfb1390178a320bb2f3a21268cad4207fa4",
+      "created_at": "2026-08-21T18:45:07.175Z",
+      "dependencies": 1,
+      "execution_seconds": 196.123,
+      "git_diff": {
+        "additions": 286,
+        "binary_files": 0,
+        "deletions": 0,
+        "files_changed": 4,
+        "lines_changed": 286,
+        "top_level_areas": {
+          "README.md": 1,
+          "examples": 1,
+          "src": 1,
+          "tests": 1
+        }
+      },
+      "id": "9edf70cb-f3f7-4a9e-abe2-51a25baf172b",
+      "implementation_scope": "Representative action and scope declarations, runtime-style policy loading, scoped assignments, multiple authorization paths, optional action validation, model replacement, focused end-to-end tests, and concise usage documentation. Only evidence-driven refinements within the approved v0 boundary are included.",
+      "integrated_at": "2026-08-22T02:09:54.044Z",
+      "linked_requirements": 1,
+      "objective": "Exercise the complete v0 as a representative consumer and validate its behavior and developer experience.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 10,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 606720,
+            "input_tokens": 633155,
+            "output_tokens": 603,
+            "reasoning_output_tokens": 68,
+            "total_tokens": 633758
+          }
+        },
+        "gpt-5.6-sol|medium": {
+          "compactions": 0,
+          "token_events": 10,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1160704,
+            "input_tokens": 1180601,
+            "output_tokens": 7306,
+            "reasoning_output_tokens": 1165,
+            "total_tokens": 1187907
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T03:39:48.790Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "6d4eaaded1a216d45b6c873a632482d9e39bab31",
+      "canonical_before_oid": "e6ff5aadd8fec89b4fb257e8be9ec30bd0e28a08",
+      "created_at": "2026-08-22T03:36:08.746Z",
+      "dependencies": 0,
+      "execution_seconds": 257.471,
+      "git_diff": {
+        "additions": 301,
+        "binary_files": 0,
+        "deletions": 236,
+        "files_changed": 13,
+        "lines_changed": 537,
+        "top_level_areas": {
+          "README.md": 1,
+          "examples": 4,
+          "src": 5,
+          "tests": 3
+        }
+      },
+      "id": "3f3d6752-684a-4a3f-8eb1-4307abdd40d3",
+      "implementation_scope": "Runtime action identity, target-key semantics, role assignments, authorizer/model integration, and focused behavioral tests. Macro declarations and consumer documentation migration are excluded.",
+      "integrated_at": "2026-08-22T03:44:06.261Z",
+      "linked_requirements": 2,
+      "objective": "Deliver opaque action identifiers and ergonomic typed role-assignment construction while preserving collision-safe target identity and authorization behavior.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 3,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 125184,
+            "input_tokens": 145003,
+            "output_tokens": 316,
+            "reasoning_output_tokens": 134,
+            "total_tokens": 145319
+          }
+        },
+        "gpt-5.6-terra|high": {
+          "compactions": 0,
+          "token_events": 24,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2843648,
+            "input_tokens": 2896712,
+            "output_tokens": 12328,
+            "reasoning_output_tokens": 4123,
+            "total_tokens": 2909040
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T03:44:45.114Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "57e46fc24f2e9435dd88bd3dd6c6e0b99ec6589d",
+      "canonical_before_oid": "6d4eaaded1a216d45b6c873a632482d9e39bab31",
+      "created_at": "2026-08-22T03:36:21.756Z",
+      "dependencies": 1,
+      "execution_seconds": 140.635,
+      "git_diff": {
+        "additions": 175,
+        "binary_files": 0,
+        "deletions": 0,
+        "files_changed": 2,
+        "lines_changed": 175,
+        "top_level_areas": {
+          "src": 1,
+          "tests": 1
+        }
+      },
+      "id": "6988b20a-6b47-486f-a4c5-ad3eb82749e3",
+      "implementation_scope": "Exported declarative macro, generated target/action declarations, multi-target compatibility, compile-time coverage, and retained non-macro declarations. Runtime identity redesign and documentation migration are excluded.",
+      "integrated_at": "2026-08-22T03:47:05.749Z",
+      "linked_requirements": 1,
+      "objective": "Deliver the typed declaration surface in both macro and ordinary-Rust forms.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 3,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 172288,
+            "input_tokens": 185730,
+            "output_tokens": 225,
+            "reasoning_output_tokens": 48,
+            "total_tokens": 185955
+          }
+        },
+        "gpt-5.6-terra|high": {
+          "compactions": 0,
+          "token_events": 13,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1840896,
+            "input_tokens": 1859494,
+            "output_tokens": 6685,
+            "reasoning_output_tokens": 1706,
+            "total_tokens": 1866179
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 5,
+      "accepted_reviews": 2,
+      "activated_at": "2026-08-22T03:47:15.965Z",
+      "assignment_attempts": 2,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "432fab6461260f6c2afb0018d0769c73f610febe",
+      "canonical_before_oid": "8d4668532ae658918554956c4a654936544d226b",
+      "created_at": "2026-08-22T03:36:29.337Z",
+      "dependencies": 0,
+      "execution_seconds": 1335.312,
+      "git_diff": {
+        "additions": 253,
+        "binary_files": 0,
+        "deletions": 307,
+        "files_changed": 5,
+        "lines_changed": 560,
+        "top_level_areas": {
+          "README.md": 1,
+          "examples": 4
+        }
+      },
+      "id": "52aadf32-aa35-4dfe-9a3b-be03816c4596",
+      "implementation_scope": "Convert examples 02 through 04 to define_authorization! declarations; add a separately named, fully manual copy of Example 01; update README example guidance. Do not change runtime library behavior.",
+      "integrated_at": "2026-08-22T04:09:31.277Z",
+      "linked_requirements": 1,
+      "objective": "Refactor the representative examples to make macro declarations the default while preserving a behaviorally identical manual alternative.",
+      "rejected_reviews": 0,
+      "submissions": 2,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 9,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 585472,
+            "input_tokens": 783778,
+            "output_tokens": 689,
+            "reasoning_output_tokens": 156,
+            "total_tokens": 784467
+          }
+        },
+        "gpt-5.6-terra|high": {
+          "compactions": 1,
+          "token_events": 50,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 5147392,
+            "input_tokens": 5284381,
+            "output_tokens": 20246,
+            "reasoning_output_tokens": 3736,
+            "total_tokens": 5326270
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T05:19:59.851Z",
+      "assignment_attempts": 2,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "55a1666e2823838e632fb913d00f386fe4bf3ac5",
+      "canonical_before_oid": "3781ccdc840a2e3fe5045690899f875de602a83c",
+      "created_at": "2026-08-22T05:04:25.709Z",
+      "dependencies": 0,
+      "execution_seconds": 479.555,
+      "git_diff": {
+        "additions": 303,
+        "binary_files": 0,
+        "deletions": 256,
+        "files_changed": 15,
+        "lines_changed": 559,
+        "top_level_areas": {
+          "README.md": 1,
+          "examples": 5,
+          "src": 5,
+          "tests": 4
+        }
+      },
+      "id": "53a9ad17-555e-4acc-bc40-22766e094019",
+      "implementation_scope": "Rename the long-lived model surface to Policy/PolicyBuilder/PolicyError and grant to allow; replace public Scope vocabulary with one target-oriented vocabulary in manual and macro declarations; make typed RoleAssignment construction the ordinary path with an explicit runtime-key escape hatch; preserve ergonomic Access construction and mutation. Update focused unit and compile-time tests for this API. Authorization decision metadata, can_any evaluation, broad narrative documentation, and scenario examples are outside this task.",
+      "integrated_at": "2026-08-22T05:27:59.406Z",
+      "linked_requirements": 6,
+      "objective": "Deliver the refined Policy, target, role-assignment, and Access public API.",
+      "rejected_reviews": 0,
+      "submissions": 1,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 2,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 9728,
+            "input_tokens": 64733,
+            "output_tokens": 397,
+            "reasoning_output_tokens": 266,
+            "total_tokens": 65130
+          }
+        },
+        "gpt-5.6-sol|medium": {
+          "compactions": 0,
+          "token_events": 21,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 2560768,
+            "input_tokens": 2607165,
+            "output_tokens": 5492,
+            "reasoning_output_tokens": 1746,
+            "total_tokens": 2612657
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 29,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1552128,
+            "input_tokens": 1642580,
+            "output_tokens": 16975,
+            "reasoning_output_tokens": 1757,
+            "total_tokens": 1659555
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T05:28:19.620Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "d162bf4354b59a87af94f555ef73ea0ade509cf4",
+      "canonical_before_oid": "55a1666e2823838e632fb913d00f386fe4bf3ac5",
+      "created_at": "2026-08-22T05:04:49.524Z",
+      "dependencies": 1,
+      "execution_seconds": 305.326,
+      "git_diff": {
+        "additions": 204,
+        "binary_files": 0,
+        "deletions": 5,
+        "files_changed": 3,
+        "lines_changed": 209,
+        "top_level_areas": {
+          "src": 2,
+          "tests": 1
+        }
+      },
+      "id": "a940fac6-fef6-43ee-8017-5497d8edca70",
+      "implementation_scope": "On top of the refined public types, extend Decision allow metadata with the actual matching target; preserve ordinary can and runtime evaluation; add a small typed heterogeneous can_any tuple surface for two through four candidates; preserve atomic whole-Policy replacement. Documentation scenarios and broad example rewrites are outside this task.",
+      "integrated_at": "2026-08-22T05:33:24.946Z",
+      "linked_requirements": 5,
+      "objective": "Deliver deterministic exact-match single- and multi-target authorization decisions.",
+      "rejected_reviews": 1,
+      "submissions": 2,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 3,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 14592,
+            "input_tokens": 124817,
+            "output_tokens": 287,
+            "reasoning_output_tokens": 94,
+            "total_tokens": 125104
+          }
+        },
+        "gpt-5.6-sol|medium": {
+          "compactions": 0,
+          "token_events": 12,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1773568,
+            "input_tokens": 1796829,
+            "output_tokens": 5071,
+            "reasoning_output_tokens": 1257,
+            "total_tokens": 1801900
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 20,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 1899520,
+            "input_tokens": 1937507,
+            "output_tokens": 7612,
+            "reasoning_output_tokens": 1006,
+            "total_tokens": 1945119
+          }
+        }
+      }
+    },
+    {
+      "acceptance_criteria": 6,
+      "accepted_reviews": 1,
+      "activated_at": "2026-08-22T05:33:38.455Z",
+      "assignment_attempts": 1,
+      "blocked_reviews": 0,
+      "canonical_after_oid": "261997d6b4b8d4a9b330d890682a4f806d9120a9",
+      "canonical_before_oid": "d162bf4354b59a87af94f555ef73ea0ade509cf4",
+      "created_at": "2026-08-22T05:04:59.589Z",
+      "dependencies": 1,
+      "execution_seconds": 545.47,
+      "git_diff": {
+        "additions": 151,
+        "binary_files": 0,
+        "deletions": 287,
+        "files_changed": 7,
+        "lines_changed": 438,
+        "top_level_areas": {
+          "README.md": 1,
+          "docs": 1,
+          "examples": 5
+        }
+      },
+      "id": "8297c867-f61c-4eba-9a5d-099f6b8bd533",
+      "implementation_scope": "Update README, API-friction documentation, macro and manual examples, and end-to-end tests to use the finalized API. Center the knowledge-base example on Wiki-wide and Article-specific access, caller-derived facts, can_any, global role definitions, and no leaf materialization. Perform repository-wide stale-terminology and validation checks. New authorization abstractions are outside this task.",
+      "integrated_at": "2026-08-22T05:42:43.925Z",
+      "linked_requirements": 3,
+      "objective": "Teach and validate the refined policy/access lifecycle and its scaling boundary.",
+      "rejected_reviews": 3,
+      "submissions": 4,
+      "usage_by_model_effort": {
+        "codex-auto-review|low": {
+          "compactions": 0,
+          "token_events": 5,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 159488,
+            "input_tokens": 284444,
+            "output_tokens": 383,
+            "reasoning_output_tokens": 64,
+            "total_tokens": 284827
+          }
+        },
+        "gpt-5.6-sol|medium": {
+          "compactions": 0,
+          "token_events": 20,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 3477504,
+            "input_tokens": 3525342,
+            "output_tokens": 9433,
+            "reasoning_output_tokens": 1151,
+            "total_tokens": 3534775
+          }
+        },
+        "gpt-5.6-terra|medium": {
+          "compactions": 0,
+          "token_events": 27,
+          "tokens": {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 3315968,
+            "input_tokens": 3361334,
+            "output_tokens": 12476,
+            "reasoning_output_tokens": 662,
+            "total_tokens": 3373810
+          }
+        }
+      }
+    }
+  ]
+}

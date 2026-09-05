@@ -60,7 +60,7 @@ When more than one implementation could satisfy the product specification, v1 us
 - worker authority closes at submission acceptance, independently of later integration success;
 - all blocker effects are calculated by one shared domain function rather than repeated service-specific queries;
 - no Git-mutating operation starts while any project operation is `STARTED` or `UNCERTAIN`;
-- successful assignment worktrees and branches are retained in v1; Taskledger does not automatically clean them up; and
+- assignment branches are retained, while clean finalized worktrees are removed after project completion; and
 - Taskledger does not add convenience recovery, cleanup, or automation features that are not required by the product specification.
 
 ---
@@ -102,10 +102,18 @@ The worker principal is permanently scoped to its assignment. Deactivating or re
 
 ## 4. Filesystem Layout
 
-The root directory defaults to `~/.taskledger` and can be overridden with `TASKLEDGER_HOME`.
+The root directory defaults to `<canonical-repository>/.taskledger` and can be
+overridden explicitly with `TASKLEDGER_HOME` for legacy v0.1 or intentionally
+external stores.
+
+When no repository-local database exists, the CLI may continue a matching
+accessible v0.1 shared-home project. Failure to access that optional legacy
+location must not block discovery of a genuinely new repository or imply an
+interrupted operation. `TASKLEDGER_HOME` remains the explicit compatibility
+path when sandbox or filesystem policy prevents automatic lookup.
 
 ```text
-~/.taskledger/
+<repository>/.taskledger/
 ├── taskledger.sqlite3
 ├── credentials/
 │   └── <project-id>.orchestrator-token
@@ -121,11 +129,11 @@ The root directory defaults to `~/.taskledger` and can be overridden with `TASKL
 
 Requirements:
 
-- `~/.taskledger`, `credentials`, and assignment credential directories use owner-only permissions where supported.
+- `.taskledger`, `credentials`, and assignment credential directories use owner-only permissions where supported.
 - Token files use mode `0600` where supported.
-- Worktrees are outside the source repository, so Taskledger state and worker credentials cannot be accidentally committed.
-- The SQLite database is not stored in any worker worktree.
-- Taskledger does not add a tracked `.taskledger` directory or edit the repository’s `.gitignore`.
+- `.taskledger/` must be ignored before initialization. Discovery does not create it, and confirmation fails safely when it is not ignored.
+- Assignment worktrees are nested under the ignored directory. The SQLite database remains outside every assignment worktree root.
+- Taskledger does not edit the repository’s ignore rules; the orchestrator presents that change at the working-base gate.
 
 The database stores canonical absolute repository paths. Symlinks are resolved at registration time. Registered specification paths are stored relative to the repository root.
 
@@ -385,6 +393,19 @@ FOREIGN KEY(requirement_id, requirement_revision)
 
 `locator` is an orchestrator-provided section name, line range, heading path, or other stable human-readable pointer. Taskledger does not interpret it.
 
+### 7.10a `requirement_supersessions`
+
+```text
+superseded_requirement_id TEXT PRIMARY KEY REFERENCES requirements(id)
+replacement_requirement_id TEXT NOT NULL REFERENCES requirements(id)
+reason                    TEXT NOT NULL
+created_by_principal_id   TEXT NOT NULL REFERENCES principals(id)
+created_at                TEXT NOT NULL
+```
+
+The mapping records an explicit replacement relationship without rewriting the
+prior requirement or its completed-task history.
+
 ### 7.11 `tasks`
 
 ```text
@@ -424,6 +445,22 @@ FOREIGN KEY(task_id, task_revision)
   REFERENCES task_revisions(task_id, revision)
 UNIQUE(task_id, task_revision, position)
 ```
+
+### 7.13a `task_required_checks`
+
+```text
+task_id             TEXT NOT NULL
+task_revision       INTEGER NOT NULL
+position            INTEGER NOT NULL
+command             TEXT NOT NULL
+PRIMARY KEY(task_id, task_revision, position)
+UNIQUE(task_id, task_revision, command)
+FOREIGN KEY(task_id, task_revision)
+  REFERENCES task_revisions(task_id, revision)
+```
+
+Commands are exact strings. A worker submission must contain evidence with the
+same command and `exit_code=0` for every required check in the assigned revision.
 
 ### 7.14 `task_requirement_links`
 
@@ -473,6 +510,7 @@ project_id          TEXT NOT NULL REFERENCES projects(id)
 task_id             TEXT NOT NULL REFERENCES tasks(id)
 task_revision       INTEGER NOT NULL
 attempt_number      INTEGER NOT NULL
+worker_profile      TEXT NOT NULL CHECK (worker_profile IN ('routine','complex'))
 state               TEXT NOT NULL CHECK (state IN (
                       'PREPARING','ACTIVE','CLOSED','REVOKED','UNCERTAIN'))
 base_commit_oid     TEXT NOT NULL
@@ -679,7 +717,7 @@ Tokens are 32 cryptographically random bytes generated with `secrets.token_bytes
 Project initialization creates the orchestrator principal and credential. The plaintext token is written to:
 
 ```text
-~/.taskledger/credentials/<project-id>.orchestrator-token
+<repository>/.taskledger/credentials/<project-id>.orchestrator-token
 ```
 
 The CLI automatically uses this file when an orchestrator command resolves the project. `--token` and `TASKLEDGER_TOKEN` may override it for automation.
@@ -688,7 +726,7 @@ V1 does not provide orchestrator-token rotation. Protect and back up this file a
 
 ### 8.3 Worker credential
 
-Assignment creation generates a worker principal and token scoped to that assignment. The token is returned once in the command result and written to the assignment credential file. The orchestrator passes only this token to the worker.
+Assignment creation generates a worker principal and token scoped to that assignment. The plaintext token is written only to the owner-only assignment credential file; model-visible command results return the path, never the secret. The orchestrator passes only the path to the worker execution context.
 
 Worker authentication resolves the project and assignment entirely from the principal record. A worker cannot use `--project` to broaden its scope.
 
@@ -796,15 +834,32 @@ Without `--confirm-branch`, performs read-only detection and returns:
 {
   "repository_root": "/absolute/path",
   "detected_branch": "feat/new-feature",
+  "has_commits": true,
+  "ledger_directory": "/absolute/repository/.taskledger",
+  "ledger_directory_ignored": true,
   "confirmation_required": true
 }
 ```
 
-It creates no project.
+It creates no project or ledger directory.
+
+If the repository root is already registered, either invocation form succeeds
+idempotently and returns the existing `project_id`, canonical branch,
+`already_initialized: true`, and `next_action: "project.recover"`. The caller
+continues that project rather than creating a second ledger or ledger home.
 
 #### `taskledger project init --repo <path> --confirm-branch <exact-name>`
 
 Repeats detection. The provided value must exactly equal the current symbolic branch. It creates the project, registers the canonical branch, generates the orchestrator credential, and returns project identity and credential location.
+
+For the repository-local default, confirmation also requires `.taskledger/` to
+be covered by Git ignore rules. Failure returns
+`LEDGER_DIRECTORY_NOT_IGNORED` without creating the directory.
+
+An unborn symbolic branch may be confirmed. Initialization reports
+`initial_commit_required: true`; project state loading and planning remain available,
+while assignment and completion return `INITIAL_COMMIT_REQUIRED` until the first
+commit exists on the canonical branch.
 
 Detached HEAD, bare repository, missing Git, or mismatch fails without partial project creation.
 
@@ -814,7 +869,20 @@ Returns project identity, effective phase, canonical branch/ref, current plan va
 
 #### `taskledger project recover`
 
-Returns the complete recovery document described in Section 21.
+Loads and reconciles the complete project document described in Section 21.
+Its command name does not itself mean that damage or an interrupted operation
+exists; actual recovery work is present only when the returned unresolved
+operations list is non-empty.
+
+#### `taskledger project resume`
+
+Returns a compact, preflighted projection of current authoritative state for
+routine same-session use. Input is `{}` or `{"cursor":"sha256"}`. A matching
+cursor returns a minimal `not_modified` response; a missing or nonmatching
+cursor returns a fresh compact snapshot. The cursor is an optimization hint,
+not an event-sourcing contract. Any unresolved operation sets
+`full_recovery_required: true`. New sessions and callers that lost their
+baseline use `project recover`.
 
 #### `taskledger project set-canonical-branch`
 
@@ -839,7 +907,16 @@ On success, changes the branch and invalidates project completion. A requirement
 
 #### `taskledger project complete`
 
-Runs all Section 19 completion checks. On success records current canonical HEAD. On failure returns every known unmet condition.
+Runs all Section 19 completion checks. On success records current canonical HEAD,
+then performs the safe best-effort cleanup in Section 16.4. On failure returns
+every known unmet condition.
+
+#### `taskledger project cleanup`
+
+Input is `{}`. Requires a currently completed project and no unresolved Git
+operation. Idempotently retries the safe assignment-worktree cleanup in Section
+16.4 and returns removed, already-absent, and skipped worktrees. It never deletes
+assignment branches.
 
 ### 10.2 Specification commands
 
@@ -936,11 +1013,20 @@ Current requirement verification is invalidated.
 
 #### `taskledger requirement retire`
 
-Requires a reason and dispositions for affected active assignments, using the same `CONTINUE` and state-specific `REVOKE` behavior as requirement update. The historical requirement remains. Current verification is invalidated. Tasks linked only to retired requirements will cause plan validation errors until revised or cancelled.
+Requires a reason and dispositions for affected active assignments, using the same `CONTINUE` and state-specific `REVOKE` behavior as requirement update. The historical requirement remains. Current verification is invalidated. Unfinished tasks linked only to retired requirements will cause plan validation errors until revised or cancelled; completed tasks remain historical evidence.
+
+#### `taskledger requirement supersede`
+
+Atomically creates a replacement requirement, retires the named active
+requirement, and records the replacement relationship and reason. Active
+assignments require the same explicit dispositions as update and retire.
+Completed tasks linked only to the superseded requirement remain historical and
+are excluded from current-plan validation; unfinished tasks must be revised or
+cancelled.
 
 #### `taskledger requirement list`
 
-Supports filters `complete`, `remaining`, `blocked`, and `all`. It returns source and task traceability.
+Supports filters `complete`, `remaining`, `blocked`, `ready`, and `all`. It returns source and task traceability. `ready` is derived from the same plan, blocker, task, and integration preconditions used by verification; it is not a persisted fourth status.
 
 #### `taskledger requirement verify`
 
@@ -973,12 +1059,16 @@ Input is one complete task definition:
   "objective": "Implement bounded behavior",
   "implementation_scope": "Files and behavior in scope; exclusions where relevant",
   "acceptance_criteria": ["Criterion one", "Criterion two"],
+  "required_checks": ["python -m unittest"],
   "requirement_ids": ["uuid"],
   "dependency_task_ids": ["uuid"]
 }
 ```
 
 Creation is atomic with criteria, links, and dependencies. It creates revision 1, state `PLANNED`, and starts planning if necessary.
+
+`required_checks` is optional. Its unique, non-empty command strings become part
+of the task revision and submission evidence contract.
 
 #### `taskledger task update`
 
@@ -1013,6 +1103,14 @@ Supports `all`, `eligible`, `active`, `submitted`, `accepted`, `completed`, `blo
 
 Runs the validation algorithm in Section 12, stores success or failure with all diagnostics, and returns the new fingerprint. Only the orchestrator may invoke it.
 
+#### `taskledger plan apply`
+
+Creates a non-empty batch of new requirements and tasks in one transaction.
+Request-local `ref`, `requirement_refs`, and `dependency_refs` values allow tasks
+to link to entities created in the same request; existing IDs may also be used.
+Unknown, duplicate, and self references reject the whole batch. The result maps
+local refs to durable IDs. Validation remains a separate explicit operation.
+
 ### 10.5 Assignment commands
 
 #### `taskledger assignment create`
@@ -1020,8 +1118,13 @@ Runs the validation algorithm in Section 12, stores success or failure with all 
 Input:
 
 ```json
-{"task_id": "uuid"}
+{"task_id": "uuid", "worker_profile": "routine"}
 ```
+
+`worker_profile` is required and accepts only `routine` or `complex`. It records
+the orchestrator's capability-routing decision; Taskledger does not resolve the
+profile to a model. The consuming repository's named-agent configuration owns
+that mapping.
 
 The service re-evaluates eligibility in the same operation; a stale eligible-list result is never trusted. On success it prepares a Git worktree, creates the worker principal/credential, activates the assignment, sets task state `ASSIGNED`, and returns:
 
@@ -1030,16 +1133,59 @@ The service re-evaluates eligibility in the same operation; a stale eligible-lis
   "assignment_id": "uuid",
   "task_id": "uuid",
   "attempt_number": 1,
+  "worker_profile": "routine",
   "worktree_path": "/...",
   "branch_name": "taskledger/p-<project-uuid>/t-<task-uuid>/a-1",
   "base_commit_oid": "...",
-  "worker_token": "returned-secret",
   "worker_token_path": "/.../worker-token",
-  "context": {}
+  "context_hash": "sha256"
 }
 ```
 
-The orchestrator selects the task. Taskledger does not select one automatically.
+The plaintext credential and full assignment snapshot are intentionally absent
+from model-visible output. The worker reads the owner-only credential file and
+retrieves the persisted assignment snapshot with `worker context`. Conditional
+refreshes independently validate the immutable context hash and the dynamic
+questions/blockers/submissions hash.
+
+The immutable snapshot also includes active registered specifications as stable
+IDs and repository-relative paths. It does not duplicate their contents. Worker
+instructions treat these files as frozen unless the task scope explicitly owns
+the exact specification edit, preventing incidental documentation maintenance
+from repeatedly invalidating an otherwise unchanged execution plan.
+
+The orchestrator selects the task and worker profile. Taskledger does not select
+or substitute either one automatically. The profile is included in worker
+context, compact/full recovery projections, submission review context, and the
+assignment-activation audit event.
+
+After two rejected verifications produced by routine assignments for a task,
+assignment creation rejects `routine` and requires `complex`.
+
+Routing uses a routine-preferred capability gate. A task is routine when one
+approach is frozen, ownership is explicit, acceptance is deterministic, failure
+is local and reversible, and no unresolved product, visual, security,
+data-integrity, concurrency, destructive, or compatibility judgment remains.
+Task size, file count, and mechanical migration are not complexity signals.
+Complex is required when the worker must choose architecture or state ownership,
+reconcile shared contracts or implementations, interpret intent, or decide
+high-consequence or weakly testable behavior. Vague tasks are clarified before
+routing.
+
+Cross-file contracts, sibling-entity rollouts, and generated-client consumer
+migrations remain routine when the approach, ownership, and executable checks
+are frozen. Plans separate a complex semantic core from mechanical followers.
+Manual cache/state reconciliation remains complex unless an executable behavior
+matrix removes the judgment. The primary performs the final integrated audit;
+it creates correction assignments only for defects that audit actually finds.
+
+Before creating concurrent assignments, the orchestrator derives prospective
+write sets from the task scopes and current repository. Shared configuration,
+registries, generated contracts, central exports or cleanup, verification
+scripts, and application entry points are included even when not the task's
+primary output. Parallel tasks must have independent writes and behavioral
+assumptions; otherwise one task owns the shared surface and the others are
+sequenced after integration. Profile selection does not imply parallel safety.
 
 #### `taskledger assignment revoke`
 
@@ -1052,9 +1198,18 @@ Revokes worker credentials, preserves the branch/worktree, and records the reaso
 
 #### `taskledger assignment rotate-token`
 
-Orchestrator-only recovery command. Deactivates the old hash and writes/returns a new scoped token without changing assignment state.
+Orchestrator-only recovery command. Deactivates the old hash and writes a new scoped token to the returned owner-only path without exposing plaintext in JSON or changing assignment state.
 
 ### 10.6 Orchestrator verification and integration commands
+
+#### `taskledger submission review-context`
+
+Input is `{"submission_id":"uuid"}`. This orchestrator-only read model returns
+the exact base/submitted/canonical OIDs, object-existence status, bounded
+diffstat and complete changed-file metadata, current criterion IDs/text, linked
+requirements, immutable worker claims, relevant blockers, and prior outcomes.
+It never includes an unbounded patch, executes worker evidence, or substitutes
+for independent exact-OID inspection and testing.
 
 #### `taskledger submission verify`
 
@@ -1119,7 +1274,10 @@ All worker commands require a worker token and operate only on its assignment.
 
 #### `taskledger worker context`
 
-Returns the assignment context, current task/requirement revisions, answers, open blockers, and submission state. It exposes no unrelated plan state.
+Returns the assignment context, current task/requirement revisions, active
+registered specification IDs and repository-relative paths, answers, open
+blockers, and submission state. It exposes no unrelated plan state or complete
+specification contents.
 
 #### `taskledger worker question`
 
@@ -1169,6 +1327,10 @@ Input:
 ```
 
 `blocker_category` must be one of the supported product blocker categories when `blocking=true` and must be null when `blocking=false`. Taskledger creates one durable `SUBMISSION`-scoped blocker for each blocking item. Each follow-up item also creates a durable `follow_up_proposals` row; neither action changes the plan.
+
+Before checkpointing repository state, the service verifies that evidence names
+every required-check command from the assigned task revision with `exit_code=0`.
+Worker evidence remains a claim; the orchestrator independently reruns checks.
 
 The exact submission procedure is in Section 14.
 
@@ -1233,7 +1395,7 @@ Validation returns all diagnostics that can be found in one pass.
    - require each source specification active and approved;
    - if implementation is required, require at least one current non-cancelled task link;
    - if implementation is not required, reject any current task link as contradictory.
-3. For each non-cancelled task:
+3. For each non-cancelled current-plan task (excluding completed historical tasks linked only to retired requirements):
    - require non-empty objective and scope;
    - require at least one non-empty criterion;
    - require at least one linked active requirement;
@@ -1410,13 +1572,14 @@ At least one evidence item is required.
 8. If the index contains changes, create a checkpoint commit:
 
    ```text
-   git -c user.name=Taskledger \
-       -c user.email=taskledger@local \
-       -c commit.gpgSign=false \
+   git -c commit.gpgSign=false \
        commit -m "taskledger: submit <task-id> attempt <n>"
    ```
 
-   Normal repository hooks run. A hook failure leaves the assignment active and returns a known Git error.
+   The commit inherits the consuming repository's normal Git author and
+   committer identity. Taskledger does not substitute a synthetic identity.
+   Normal repository hooks run. Missing Git identity or a hook failure leaves
+   the assignment active and returns a known Git error.
 9. Require a clean worktree after the checkpoint.
 10. Resolve the branch HEAD OID.
 11. Require the recorded assignment base to be an ancestor of HEAD, require HEAD to differ from that base, and require a non-empty tree diff. Rebased or unrelated history is rejected rather than interpreted.
@@ -1486,7 +1649,12 @@ Effects:
 
 - insert rejected verification;
 - set submission state `REJECTED`;
-- set task state `ASSIGNED` and leave the worker credential active when the assignment is still `ACTIVE`;
+- after the first rejection of a routine assignment, set task state `ASSIGNED`
+  and leave the worker credential active;
+- after the task's second routine-worker rejection, revoke the current routine assignment, deactivate its
+  worker credential, set the task to `PLANNED`, and require `complex` next;
+- for a complex assignment, set task state `ASSIGNED` and leave the worker
+  credential active unless the assignment was already revoked;
 - otherwise, for a revoked assignment, set task state `PLANNED` so a new assignment is required; and
 - preserve all prior submissions.
 
@@ -1541,12 +1709,14 @@ If true, record a successful integration adopting the current canonical HEAD. Th
 3. Run in repository root:
 
    ```text
-   git -c user.name=Taskledger \
-       -c user.email=taskledger@local \
-       -c commit.gpgSign=false \
+   git -c commit.gpgSign=false \
        -c merge.autoStash=false \
        merge --no-ff --no-edit --no-gpg-sign <accepted_oid>
    ```
+
+   The merge commit inherits the consuming repository's normal Git author and
+   committer identity. Taskledger provenance remains in the commit message and
+   durable ledger rather than a synthetic Git identity.
 
 4. On success:
    - resolve canonical after OID;
@@ -1566,9 +1736,30 @@ If true, record a successful integration adopting the current canonical HEAD. Th
 
 Taskledger never resolves conflicts or edits files during integration.
 
-### 16.4 Retained assignment worktree
+### 16.4 Finalized assignment worktree cleanup
 
-V1 retains the assignment worktree and branch after successful integration and reports their paths in project recovery output. It does not automatically remove worktrees or delete branches. This avoids a fourth Git recovery protocol and preserves worker state for inspection. Cleanup is an explicit manual repository-administration action outside Taskledger v1.
+Assignment worktrees remain available through implementation, submission review,
+integration, and requirement verification. After project completion is durably
+recorded, Taskledger attempts cleanup for every assignment whose state is final.
+For each worktree it proves that:
+
+- the stored path resolves beneath that project's Taskledger-managed worktree directory;
+- Git still registers the path to the managed repository;
+- the checked-out branch is the assignment's recorded branch;
+- the worktree is clean; and
+- no merge, rebase, cherry-pick, revert, or bisect operation is in progress.
+
+It then runs ordinary `git worktree remove <path>` without `--force`. Failure or
+any failed proof leaves the worktree intact and returns a typed skip reason.
+Missing paths are treated as already absent, so completion cleanup and explicit
+`project cleanup` retries are idempotent. Taskledger never deletes the assignment
+branch or its commits; accepted/integrated history therefore remains reachable,
+inspectable, and revertible after the duplicate checkout is removed.
+
+Cleanup does not require an operation-journal row because it does not alter the
+retained ref or ledger authority and its post-interruption states are safe to
+reinspect: registered existing worktrees can be retried, missing paths are done,
+and existing unregistered paths are retained for manual inspection.
 
 ### 16.5 Integration validity reconciliation
 
@@ -1741,6 +1932,10 @@ On success, in one transaction:
 - record `completion_head_oid` equal to current canonical HEAD; and
 - insert audit event.
 
+After that transaction commits, run Section 16.4 cleanup. Cleanup failures do not
+roll back or misreport project completion; they are returned as skipped worktrees
+that can be retried explicitly.
+
 Before any later command reports the project as completed, it rechecks:
 
 - specification hashes;
@@ -1873,7 +2068,10 @@ No generic “force continue” command exists.
 ```
 
 The snapshot must include enough task and requirement text to act without conversation history, while worker-scoped `worker context` remains limited.
-Completed, accepted, submitted, and revoked task entries include their latest assignment branch and retained worktree path so later inspection never depends on conversation history.
+Completed, accepted, submitted, and revoked task entries include their latest
+assignment branch and recorded worktree path. The path remains historical context
+even when post-completion cleanup has removed that checkout; the retained branch
+is the durable inspection and recovery reference.
 
 ---
 
@@ -1947,6 +2145,9 @@ BRANCH_CONFIRMATION_MISMATCH
 CANONICAL_BRANCH_NOT_FOUND
 CANONICAL_BRANCH_NOT_CHECKED_OUT
 CANONICAL_WORKTREE_DIRTY
+LEDGER_DIRECTORY_NOT_IGNORED
+LEDGER_STORAGE_UNAVAILABLE
+INITIAL_COMMIT_REQUIRED
 SPECIFICATION_NOT_FOUND
 SPECIFICATION_OUTSIDE_REPOSITORY
 SPECIFICATION_REVIEW_REQUIRED
@@ -1996,7 +2197,7 @@ Errors must include entity IDs and allowed corrective actions when known.
 9. Bound input sizes: individual text fields 1 MiB, specification files 50 MiB, JSON payload 10 MiB. These are safety limits, not product quotas; exceeding them returns an actionable error and does not truncate.
 10. Use deterministic Git timeouts and return command/stdout/stderr excerpts with secrets redacted.
 11. Never run worker-supplied command strings as part of Taskledger verification. Evidence commands are stored as text only.
-12. Never auto-stash, auto-reset, force-push, delete branches, discard worktrees with changes, or resolve conflicts.
+12. Never auto-stash, auto-reset, force-push, delete assignment branches, discard worktrees with changes, force worktree removal, or resolve conflicts.
 13. Back up the SQLite file before applying a schema migration that changes existing tables. Initial v1 migrations are additive.
 
 The Git command timeout is configurable and defaults to 120 seconds. Migration backups use SQLite's backup API so a live WAL database is copied consistently. V1 is tested and supported on POSIX hosts with Git 2.20 or later; permission-setting calls remain conditional and must fail safely on unsupported filesystems.

@@ -79,7 +79,7 @@ At minimum, implement:
 - Git tests for initialization, detached HEAD, arbitrary canonical branches, worktrees, checkpoint commits, rejection and correction, merge success, safe merge failure, dirty repositories, idempotent adoption, external rewrites, and operation recovery
 - failure injection at every operation journal boundary named in the technical specification
 - public CLI acceptance tests for Product Specification Scenarios A through L
-- a traceability table proving that all 66 numbered product requirements have automated coverage
+- a traceability table proving that all 71 numbered product requirements have automated coverage
 
 Use golden fixtures for plan fingerprint bytes and the complete recovery JSON shape. Stable output must not depend on database row order.
 

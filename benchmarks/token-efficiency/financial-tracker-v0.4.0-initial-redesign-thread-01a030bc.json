@@ -1,0 +1,141 @@
+{
+  "cohorts": {
+    "gpt-5.6-luna|max": {
+      "agent_roles": {
+        "taskledger_worker_routine": 1
+      },
+      "compactions": 1,
+      "files": 1,
+      "taskledger_commands": {
+        "worker context": 1,
+        "worker submit": 1
+      },
+      "thread_sources": {
+        "subagent": 1
+      },
+      "token_events": 109,
+      "tokens": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 11807616,
+        "input_tokens": 12240768,
+        "output_tokens": 66816,
+        "reasoning_output_tokens": 19706,
+        "total_tokens": 12329337
+      }
+    },
+    "gpt-5.6-sol|xhigh": {
+      "agent_roles": {
+        "none": 1
+      },
+      "compactions": 1,
+      "files": 1,
+      "taskledger_commands": {
+        "assignment create": 3,
+        "plan validate": 1,
+        "project recover": 1,
+        "project resume": 1,
+        "requirement create": 1,
+        "spec check": 1,
+        "spec register": 1,
+        "spec review": 1,
+        "submission review-context": 4,
+        "submission verify": 4,
+        "task create": 2,
+        "task list": 1
+      },
+      "thread_sources": {
+        "user": 1
+      },
+      "token_events": 215,
+      "tokens": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 23131904,
+        "input_tokens": 23602057,
+        "output_tokens": 62048,
+        "reasoning_output_tokens": 22330,
+        "total_tokens": 23683499
+      }
+    },
+    "gpt-5.6-terra|high": {
+      "agent_roles": {
+        "taskledger_worker_complex": 1
+      },
+      "compactions": 0,
+      "files": 1,
+      "taskledger_commands": {
+        "worker submit": 1
+      },
+      "thread_sources": {
+        "subagent": 1
+      },
+      "token_events": 73,
+      "tokens": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 8293888,
+        "input_tokens": 8499208,
+        "output_tokens": 38540,
+        "reasoning_output_tokens": 8232,
+        "total_tokens": 8537748
+      }
+    }
+  },
+  "durable_progress": {
+    "available": true,
+    "event_counts": {
+      "ASSIGNMENT_ACTIVATED": 3,
+      "COMPLETION_INVALIDATED": 1,
+      "PLAN_VALIDATED": 1,
+      "PROJECT_COMPLETED": 1,
+      "REQUIREMENT_CREATED": 6,
+      "REQUIREMENT_VERIFIED": 6,
+      "SPECIFICATION_REGISTERED": 1,
+      "SPECIFICATION_REVIEW_COMPLETED": 1,
+      "SUBMISSION_RECORDED": 5,
+      "SUBMISSION_VERIFIED": 5,
+      "TASK_CREATED": 3,
+      "TASK_INTEGRATED": 3
+    },
+    "planning_structure": {
+      "acceptance_criteria_created": 17,
+      "plan_validations": 1,
+      "requirements_created": 6,
+      "specification_reviews_created": 1,
+      "specification_revisions_approved": 0,
+      "specification_revisions_observed": 1,
+      "specifications_created": 1,
+      "successful_plan_validations": 1,
+      "task_dependencies_created": 2,
+      "task_requirement_links_created": 14,
+      "tasks_created": 3
+    },
+    "project_id": "402ddaf7-9249-4074-9f1e-cb56cecbecbe"
+  },
+  "interpretation": {
+    "credits": "Use observed provider credits/rate versions only; this collector does not invent prices.",
+    "cross_model_fallback": "Report each model separately; optionally weight within-model post/pre ratios by the baseline model mix.",
+    "do_not_do": "Do not convert lower-tier token counts into hypothetical higher-tier behavior.",
+    "primary_comparison": "Compare identical model and reasoning-effort cohorts per durable progress event."
+  },
+  "label": "Financial Tracker v0.4.0 routed initial redesign thread 01a030bc",
+  "repository": "/Users/christophercaldwell/Code/business/clients/destinations_beyond/db_financial_tracker",
+  "schema_version": 1,
+  "source": {
+    "codex_cli_versions": {
+      "0.148.0-alpha.15": 5
+    },
+    "files_matched": 5,
+    "files_scanned": 220,
+    "inherited_history": {
+      "compactions_excluded": 0,
+      "forked_files": 4,
+      "token_events_excluded": 99
+    },
+    "session_id": "01a030bc-c6b0-7ea0-837b-0b283b179064",
+    "sessions": "/Users/christophercaldwell/.codex/sessions"
+  },
+  "taskledger_version": "0.4.0",
+  "window": {
+    "since": "2026-08-23T22:27:53.000Z",
+    "until": "2026-08-23T23:43:02.000Z"
+  }
+}
