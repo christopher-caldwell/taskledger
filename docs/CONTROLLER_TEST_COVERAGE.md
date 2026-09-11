@@ -9,9 +9,9 @@ the final section.
 
 | Environment | PASSING | IMPLEMENTED | PLANNED | DEFERRED | NOT_APPLICABLE | Total |
 |---|---:|---:|---:|---:|---:|---:|
-| No Codex (`NC`) | 132 | 64 | 28 | 0 | 0 | 224 |
-| Live Codex (`CX`) | 20 | 67 | 6 | 27 | 0 | 120 |
-| **All cases** | **152** | **131** | **34** | **27** | **0** | **344** |
+| No Codex (`NC`) | 147 | 69 | 28 | 0 | 0 | 244 |
+| Live Codex (`CX`) | 15 | 72 | 6 | 31 | 0 | 124 |
+| **All cases** | **162** | **141** | **34** | **31** | **0** | **368** |
 
 `PASSING` means the required result is exercised by the current automated
 suite. A broad test may cover several adjacent cases. `IMPLEMENTED` means the
@@ -22,7 +22,7 @@ runs, benchmarks, and upgrade checks.
 
 ## No Codex cases
 
-The following 132 cases are passing:
+The following 147 cases are passing:
 
 - NC-001 through NC-006
 - NC-010 through NC-012
@@ -42,6 +42,8 @@ The following 132 cases are passing:
 - NC-168 through NC-177
 - NC-180 through NC-182
 - NC-191 through NC-224
+- NC-225 through NC-234
+- NC-236, NC-238, NC-242 through NC-244
 
 Coverage is supplied by `tests/test_controller.py`,
 `tests/test_project_controller.py`, and the real Taskledger disposable Git
@@ -61,15 +63,17 @@ performance thresholds:
 All other NC cases are implemented but do not yet have exact attributable
 coverage. This includes several crash windows whose fail-closed behavior is
 covered at a neighboring boundary but not at the exact process kill point.
+For the benchmark-readiness additions, NC-235, NC-237, and NC-239 through
+NC-241 are `IMPLEMENTED`; their exact historical-revision and disposable
+sentinel fixtures remain outstanding.
 
 ## Live Codex cases
 
-The bounded opt-in suite directly passed these 20 cases on 2026-09-11:
+The latest bounded opt-in suite directly passed these 15 cases on 2026-09-11:
 
 - CX-001, CX-008 through CX-010, CX-012
 - CX-028, CX-035, CX-041, CX-082
-- CX-099, CX-103
-- CX-112 through CX-120
+- CX-112 through CX-117
 
 CX-011, CX-049, and CX-094 have live coverage for neighboring behavior but
 remain `implemented`: restart was exercised with a fresh app-server client in
@@ -78,17 +82,17 @@ the intended worker worktree without an adversarial write attempt against the
 canonical checkout or ledger secrets; and the lifecycle completed in one
 worker turn rather than proving forced early-stop continuation.
 
-The 67 implemented live cases are CX-011, CX-013 through CX-019, CX-023
+The 72 implemented live cases are CX-011, CX-013 through CX-019, CX-023
 through CX-027, CX-029 through CX-034, CX-036 through CX-040, CX-042 through
 CX-046, CX-048 through CX-053, CX-055 through CX-057, CX-060 through CX-069,
 CX-072 through CX-079, CX-083, CX-090, CX-091, CX-094 through CX-098, and
-CX-100 through CX-102.
+CX-099 through CX-103, and CX-118 through CX-120.
 
 CX-002 through CX-007 remain planned. They require isolated authentication,
 missing executable, unavailable model, and invalid effort fixtures that do not
 disturb the user's normal Codex installation.
 
-The following 27 cases are deferred:
+The following 31 cases are deferred:
 
 - CX-020 through CX-022: context compaction and fork experiments are not part
   of correctness.
@@ -102,14 +106,22 @@ The following 27 cases are deferred:
   explicit user authorization before model spend.
 - CX-109 through CX-111: runtime upgrade compatibility is run when evaluating
   a specific new Codex version.
+- CX-121 through CX-124: the bounded readiness live sweep and its non-model
+  comparison remain opt-in validation; no Equipment Lending run is authorized.
 
 ## Latest execution
 
-The release-candidate default suite passed 113 tests and skipped the eight
-explicitly opt-in live methods in 80.94 seconds. The dedicated NC-191 through NC-224 module
-passed all 34 tests. The final bounded live sweep used `gpt-5.6-luna` at `low`
-effort and passed all eight methods in 165.285 seconds; those methods directly
-cover the 20 CX cases listed above.
+The benchmark-readiness default suite passed 124 non-live methods and skipped
+the eight explicitly opt-in live methods (132 discovered total) in 79.865
+seconds. The bounded live sweep used `gpt-5.6-luna` at `low` effort and passed
+seven of eight methods in 160.622 seconds. The two-task project completed, but
+its CX-123 predecessor assertion did not observe a worker turn overlapping a
+reviewer turn, so CX-099, CX-103, and CX-118 through CX-120 are not marked
+passing in this snapshot.
+
+The following table is the prior successful baseline sweep retained as
+historical provenance; it is not the accounting total for the latest partially
+reported validation run.
 
 | Live case group | Turns | Input | Cached input | Cache-write input | Output | Reasoning |
 |---|---:|---:|---:|---:|---:|---:|

@@ -570,7 +570,7 @@ class ProjectController:
                 except Exception as exc:
                     inspection = await self.runtime.inspect_turn(handle) if handle is not None else None
                     if inspection and inspection.state == "FAILED":
-                        self.journal.fail_turn(local_id, inspection.error or str(exc), uncertain=False)
+                        self.journal.fail_turn(local_id, inspection.error or str(exc), uncertain=False, result=inspection.result)
                         self.journal.consume_turn(local_id)
                         continue
                     self.journal.fail_turn(local_id, str(exc), uncertain=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -81,6 +82,27 @@ class TaskledgerAcceptance(unittest.TestCase):
         self.assertEqual(output["data"]["version"],"0.6.0")
         manifest=json.loads((ROOT/".codex-plugin"/"plugin.json").read_text())
         self.assertEqual(manifest["version"],"0.6.0")
+
+    def test_nc_cli_controller_report_succeeds_without_codex_executable(self):
+        from taskledger.controller.journal import Journal
+        from taskledger.db import connect
+
+        project_id = self.init()
+        con = connect(self.home)
+        journal = Journal(con, self.home)
+        run_id = journal.create_run(project_id, mode="PROJECT", config={"manifest": {"scope": "POST_APPROVAL_EXECUTION"}})
+        journal.finish_run(run_id, "COMPLETED")
+        con.close()
+        env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "PATH": str(Path(shutil.which("git")).parent)}
+        result = subprocess.run(
+            [sys.executable, "-m", "taskledger", "controller", "report", "--input", "-", "--project", project_id],
+            input=json.dumps({"run_id": run_id}), text=True, capture_output=True, env=env, cwd=self.root,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stderr, "")
+        report = json.loads(result.stdout)["data"]
+        self.assertEqual(report["identity"]["run_id"], run_id)
+        self.assertEqual(report["quality"]["provider_detail"]["status"], "UNAVAILABLE")
 
     def test_skill_declares_context_free_worker_spawn_contract(self):
         skill=(ROOT/"skills"/"taskledger"/"SKILL.md").read_text()

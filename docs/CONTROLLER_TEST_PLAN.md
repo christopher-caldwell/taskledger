@@ -3,7 +3,7 @@
 **Status:** current acceptance backlog
 **Date:** 2026-09-10
 **Scope:** deterministic Task Ledger assignment supervisor, project controller, and Codex app-server adapter
-**Inventory:** **224 no-Codex cases + 120 live-Codex cases = 344 total cases**
+**Inventory:** **244 no-Codex cases + 124 live-Codex cases = 368 total cases**
 
 This plan is intended to be exhaustive against the current supervisor design and the failure surfaces already identified. It is a living verification document: cases may be split into more granular tests as implementation reveals new boundaries, but a case should not be removed unless its invariant is deliberately retired.
 
@@ -26,9 +26,9 @@ Current inventory by priority:
 
 | Category | P0 | P1 | P2 | Total |
 |---|---:|---:|---:|---:|
-| No Codex | 133 | 74 | 17 | 224 |
-| With Codex | 44 | 61 | 15 | 120 |
-| **Total** | **177** | **135** | **32** | **344** |
+| No Codex | 140 | 83 | 21 | 244 |
+| With Codex | 47 | 62 | 15 | 124 |
+| **Total** | **187** | **145** | **36** | **368** |
 
 ## Architectural invariants under test
 
@@ -371,6 +371,26 @@ These tests should be run continuously in CI/local development. They should cons
 | **NC-222** | P1 | Reporting | Existing domain facts reused | Routing, review, check, blocker, and integration metrics query authoritative tables. |
 | **NC-223** | P0 | Storage | Sensitive content exclusion | New telemetry contains no prompts, command output, patches, reasoning, credentials, or tool bodies. |
 | **NC-224** | P0 | Reporting | Architecture-invariant reporting | Collaboration calls and subagent activity produce explicit nonzero violations. |
+| **NC-225** | P0 | Runtime/journal | Failed execution with attributable final cumulative snapshot | Persist the complete delta on the failed turn allocation. |
+| **NC-226** | P0 | Admission | Terminal or uncertain unaccounted execution | Keep known subtotal visible and block token-budget admission. |
+| **NC-227** | P0 | Reconciliation | Partial observation later receives final usage | Update the same allocation idempotently without double counting. |
+| **NC-228** | P0 | Accounting | Completed A, failed B, completed retry C numerical oracle | Totals are input 2,000, cached 1,000, output 150, reasoning 35, admission 2,150, non-cached input 1,000. |
+| **NC-229** | P1 | Reporting | Mixed semantic outcomes and accounting classes | All observed spend is included and uncertainty remains explicit. |
+| **NC-230** | P1 | Reporting | Model/role/reason/outcome reconciliation | Counts and every token dimension reconcile to the same subtotal. |
+| **NC-231** | P1 | Reporting | Continuation classification | Active continuation, correction, checkpoint continuation, answered question, and schema retry remain distinct. |
+| **NC-232** | P1 | Timing | Fixed 20-minute run with 10-minute pause and overlapping workers | Gross, non-paused, summed, union, and two-slot 50% utilization match the oracle. |
+| **NC-233** | P1 | Timing | Task Creator interval outside workers | Task Creator does not increase reviewer occupancy. |
+| **NC-234** | P1 | Waiting | Open wait at report cutoff and distinct capacity reasons | Clip entity-time to cutoff and retain the exact wait reason. |
+| **NC-235** | P0 | Historical reporting | Task/blocker revision after run cutoff | Repeated historical reports remain stable or explicitly mark unavailable facts. |
+| **NC-236** | P1 | Reporting | Outcome dimension includes unsuccessful terminal work | Failed final attempts retain their observed usage and count. |
+| **NC-237** | P1 | Final review | Final findings identify requirements without tasks | Report requirement-level defects without guessed task allocation. |
+| **NC-238** | P0 | Data quality | Cached input exceeds inclusive input | Surface a data-quality error; comparison input validation rejects the vector. |
+| **NC-239** | P2 | Context measurement | Session instruction and dynamic-tool measurements | Persist counts/bytes and hashes only, never instruction or schema bodies. |
+| **NC-240** | P0 | Capabilities | Disposable ambient MCP/app/plugin/hook sentinels on start/resume | Effective restriction prevents execution while worker coding and reviewer read-only behavior remain. |
+| **NC-241** | P2 | Identity/privacy | Equivalent capability policies and secret-bearing ambient config | Equivalent policies hash equally; relevant changes differ; secrets do not persist. |
+| **NC-242** | P2 | Historical stability | Identical inputs and cutoff | Reports and normalized comparisons are structurally identical. |
+| **NC-243** | P2 | Comparison | Matched synthetic measurements and unavailable valuation | Raw deltas are deterministic and monetary comparison is unavailable. |
+| **NC-244** | P1 | Comparison | Incomplete cheap run or mismatched complete runs | Differences and confounders are explicit; no unsupported winner is declared. |
 
 ## No-Codex destructive/fault-injection matrix
 
@@ -598,6 +618,10 @@ with every session.
 | **CX-118** | P1 | Reviewer | Generic Reviewer submission and final jobs | One configured Reviewer profile completes both bounded job types. |
 | **CX-119** | P0 | Scheduler | Worker/reviewer pipeline concurrency | Independent worker work overlaps another target's review within both limits. |
 | **CX-120** | P1 | Reporting | Deterministic report over bounded live run | History joins by IDs, quality/invariants are explicit, repeat output matches, and reporting starts no turn. |
+| **CX-121** | P0 | Accounting | Unsuccessful terminal execution after usage | Persist live observed spend; disclose controlled interruption if provider FAILED is not reproducible. |
+| **CX-122** | P0 | Capabilities | Effective bounded capability policy at start and resume | Sentinels cannot execute, worker coding works, and reviewer writes fail. |
+| **CX-123** | P0 | Project lifecycle | Bounded two-task production-controller project with forced continuation | Prove overlap, reviewer capacity, integration, final review, verification, completion, and generate the readiness report. |
+| **CX-124** | P1 | Comparison | Compare CX-123 report to normalized baseline | Pure Python launches no model and reports outcome/accounting/comparability independently. |
 
 ## Live-Codex cost-control protocol
 
@@ -710,6 +734,6 @@ case must have exactly one of these statuses:
 
 The checked in coverage snapshot is maintained in
 [`CONTROLLER_TEST_COVERAGE.md`](CONTROLLER_TEST_COVERAGE.md). Its counts must
-sum to all 344 cases. Live cases stay `IMPLEMENTED` or `DEFERRED` until an
+sum to all 368 cases. Live cases stay `IMPLEMENTED` or `DEFERRED` until an
 opt-in run records an actual passing result. The E4 representative benchmark is
 always deferred until the user explicitly authorizes that spend.

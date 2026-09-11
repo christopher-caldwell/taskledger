@@ -311,9 +311,19 @@ def dispatch(args, data):
         async def build_report():
             if not include:return await controller_report(service.con,run_id,include_provider_detail=False)
             from .controller.app_server import AppServerRuntime
-            runtime=AppServerRuntime(repository_root=project["repository_root"])
-            try:return await controller_report(service.con,run_id,include_provider_detail=True,provider_loader=runtime.provider_history)
-            finally:await runtime.close()
+            runtime=None
+            try:
+                runtime=AppServerRuntime(repository_root=project["repository_root"])
+                return await controller_report(service.con,run_id,include_provider_detail=True,provider_loader=runtime.provider_history)
+            except Exception:
+                # Provider diagnostics are optional enrichment. Construction,
+                # version probing, history reads, and cleanup must never make
+                # the durable core report unavailable.
+                return await controller_report(service.con,run_id,include_provider_detail=True)
+            finally:
+                if runtime is not None:
+                    try:await runtime.close()
+                    except Exception:pass
         return asyncio.run(build_report())
     if command=="controller.extend-budget":
         require_object(data,{"run_id","kind","amount","reason"},{"run_id","kind","amount","reason"})

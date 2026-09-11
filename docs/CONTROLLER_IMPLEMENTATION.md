@@ -102,6 +102,29 @@ and turn history/timing. Taskledger does not mirror those items or raw response
 bodies. Cached input is a component of input usage; token admission remains
 `input_tokens + output_tokens` and does not add cached input again.
 
+## Benchmark readiness
+
+Every dispatched turn begins as an incomplete accounting allocation. Terminal
+`COMPLETED`, `FAILED`, and `UNCERTAIN` turns retain any attributable cumulative
+delta; exact response observations without a provable final delta are retained
+as `PARTIAL_OBSERVATION`. Reconciliation improves the same external-turn
+allocation idempotently. Under a token budget, any terminal incomplete
+allocation stops new admission while preserving the known lower-bound subtotal.
+
+Controller reports aggregate every terminal outcome and reconcile counts and
+token dimensions by model/runtime identity, conceptual role, dispatch reason,
+semantic outcome, and accounting class. Timing distinguishes gross elapsed,
+recorded pause, non-paused wall time, summed attempt time, and interval unions
+at a fixed report cutoff. Provider history is optional, bounded, read-only
+enrichment and cannot prevent the core CLI report.
+
+The frozen pre-run protocol is
+[`BENCHMARK_PROTOCOL_V1.json`](BENCHMARK_PROTOCOL_V1.json). The pure-Python
+`taskledger.controller.benchmark` module validates normalized measurements and
+keeps outcome, accounting quality, and comparability independent. It never
+fetches prices, converts tokens to credits without a supplied immutable
+valuation snapshot, or declares a winner from incomplete or confounded runs.
+
 ## Verification
 
 The default test suite uses no Codex. Live tests must use disposable repositories

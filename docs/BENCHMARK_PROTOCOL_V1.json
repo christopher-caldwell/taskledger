@@ -1,0 +1,18 @@
+{
+  "schema_version": "taskledger-benchmark-protocol-v1",
+  "name": "Equipment Lending representative benchmark",
+  "status": "FROZEN_BEFORE_FIRST_RUN",
+  "execution_authority": "deterministic Taskledger Python controller",
+  "measurement_scope": "POST_APPROVAL_EXECUTION",
+  "setup_excluded": ["dependency installation", "repository preparation", "plan approval"],
+  "measured_execution_includes": ["implementation", "review", "continuation", "correction", "structured-output retry", "final requirement review", "failed and uncertain attempts"],
+  "required_start_identity": ["workload/specification hash", "starting Git OID", "approved plan fingerprint"],
+  "required_runtime_identity": ["conceptual role", "profile", "model", "effort", "protocol version", "capability-policy hash"],
+  "review_standard": "independent submission review, guarded integration, and requirement-level final review",
+  "budgets": {"must_be_recorded_before_run": true, "admission_basis": "input_tokens + output_tokens", "in_flight_overshoot_possible": true},
+  "stopping_rules": ["configured turn budget", "configured token admission budget", "configured elapsed budget", "runtime uncertainty", "unresolved accounting under a token budget"],
+  "comparison_dimensions": ["outcome", "accounting", "comparability"],
+  "valuation_policy": "raw usage only unless the protocol embeds an immutable supplied valuation snapshot",
+  "historical_baseline": {"status": "UNAVAILABLE_UNTIL_SUPPLIED", "rule": "missing fields remain unavailable; aggregate legacy estimates remain legacy"},
+  "representative_run_authorized": false
+}

@@ -1,0 +1,24 @@
+{
+  "schema_version": "taskledger-benchmark-comparison-v1",
+  "fixture_kind": "SYNTHETIC_CODE_BEHAVIOR_ONLY",
+  "left": {"outcome": "INCOMPLETE", "accounting": "PARTIAL_MISSING", "source": "synthetic-cheap-incomplete"},
+  "right": {"outcome": "COMPLETED_VERIFIED", "accounting": "COMPLETE", "source": "synthetic-complete"},
+  "comparability": "QUALIFIED_DESCRIPTIVE",
+  "mismatches": [],
+  "usage_delta_right_minus_left": {
+    "input_tokens": 0,
+    "cached_input_tokens": 0,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 0,
+    "reasoning_tokens": 0,
+    "admission_tokens": 0,
+    "non_cached_input_tokens": 0
+  },
+  "valuation_comparison": "UNAVAILABLE",
+  "winner": null,
+  "warnings": [
+    "outcomes differ; cost alone cannot select a winner",
+    "at least one accounting method is incomplete, estimated, or legacy",
+    "no common immutable valuation snapshot; monetary comparison unavailable"
+  ]
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 import subprocess
@@ -68,6 +69,16 @@ class AppServerRuntime:
     def session_identity(self, *, role: SessionRole, profile: str, subject_id: str, cwd: str | None, writable: bool) -> RuntimeIdentity:
         resolved = self._profile(profile, role)
         sandbox = self._sandbox(subject_id=subject_id, cwd=cwd, writable=writable)
+        tools = self._worker_tool_specs() if writable and subject_id in self.worker_tools else []
+        capability_policy = {
+            "version": "taskledger-capabilities-v1",
+            "agents": False,
+            "collaboration": False,
+            "ambient_mcp_apps_plugins_hooks": False,
+            "writable": writable,
+            "network": False,
+            "dynamic_tool_names": [item["name"] for item in tools],
+        }
         return RuntimeIdentity(
             model=resolved.model,
             effort=resolved.effort,
@@ -79,6 +90,11 @@ class AppServerRuntime:
             profile_source_kind=resolved.source_kind,
             profile_source_file=resolved.source_display,
             profile_hash=resolved.profile_hash,
+            capability_policy_hash=hashlib.sha256(json.dumps(capability_policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+            base_instruction_bytes=len(self.BASE_INSTRUCTIONS.encode("utf-8")),
+            profile_instruction_bytes=len((resolved.developer_instructions or "").encode("utf-8")),
+            dynamic_tool_schema_bytes=len(json.dumps(tools, sort_keys=True, separators=(",", ":")).encode("utf-8")) if tools else 0,
+            dynamic_tool_count=len(tools),
         )
 
     async def start_session(self, *, role: SessionRole, profile: str, subject_id: str, cwd: str | None, writable: bool) -> RuntimeSession:
@@ -209,7 +225,7 @@ class AppServerRuntime:
             if status in {"completed", "interrupted"}:
                 return RuntimeTurnInspection("COMPLETED", self._turn_result(handle, turn))
             if status in {"failed", "error"}:
-                return RuntimeTurnInspection("FAILED", error=self._error_text(turn.get("error")))
+                return RuntimeTurnInspection("FAILED", self._turn_result(handle, turn), self._error_text(turn.get("error")))
             return RuntimeTurnInspection("UNKNOWN", error=f"unknown Codex turn status {status}")
         return RuntimeTurnInspection("UNKNOWN", error="Codex thread did not contain the recorded turn")
 
@@ -278,6 +294,11 @@ class AppServerRuntime:
                 "-c", "agents.enabled=false", "-c", "features.multi_agent_v2=false",
                 "-c", "features.collab=false",
                 "-c", "include_collaboration_mode_instructions=false",
+                "-c", "mcp_servers={}", "-c", "apps={}", "-c", "plugins={}",
+                "-c", "hooks={}", "-c", "notify=[]",
+                "-c", "features.apps=false", "-c", "features.plugins=false",
+                "-c", "features.browser_use=false", "-c", "features.computer_use=false",
+                "-c", "features.image_generation=false", "-c", "features.goals=false",
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             self.reader_task = asyncio.create_task(self._read_messages())
@@ -405,9 +426,6 @@ class AppServerRuntime:
         waiter = self.turn_waiters.setdefault(handle.turn_id, asyncio.get_running_loop().create_future())
         if waiter.done():
             return
-        if turn.get("status") in {"failed", "error"}:
-            waiter.set_exception(RuntimeError(self._error_text(turn.get("error"))))
-            return
         event = self.turn_usage_events.setdefault(handle.turn_id, asyncio.Event())
         if not event.is_set():
             try:
@@ -415,7 +433,10 @@ class AppServerRuntime:
             except asyncio.TimeoutError:
                 pass
         if not waiter.done():
-            waiter.set_result(self._turn_result(handle, turn))
+            if turn.get("status") in {"failed", "error"}:
+                waiter.set_exception(RuntimeError(self._error_text(turn.get("error"))))
+            else:
+                waiter.set_result(self._turn_result(handle, turn))
 
     def _fail_pending(self, error: RuntimeError) -> None:
         for future in list(self.pending.values()):
@@ -577,6 +598,12 @@ class AppServerRuntime:
                     precision = UsagePrecision.EXACT_RESPONSES
             except ValueError:
                 precision = UsagePrecision.MISSING
+        elif (observed := self.turn_exact_usage.get(handle.turn_id)) is not None:
+            # A disconnect can leave response observations without a provable
+            # final cumulative delta. Retain the lower bound, but do not call it
+            # complete accounting.
+            usage = observed
+            precision = UsagePrecision.PARTIAL_OBSERVATION
         return RuntimeTurnResult(
             handle, structured, text, usage, precision == UsagePrecision.MISSING, precision,
             before, after, len(self.turn_exact_response_ids.get(handle.turn_id, ())),
