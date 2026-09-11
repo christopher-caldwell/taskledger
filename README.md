@@ -46,6 +46,17 @@ Taskledger is the durable record and safety boundary. It does **not** generate a
 plan, choose a model, decide whether code is correct, or replace the primary
 agent's review.
 
+An experimental foreground controller can supervise one existing isolated
+assignment. It persists Codex thread and turn identities, continues ordinary
+early model stops, runs independent checks and review, and pauses when an
+external result cannot be proven. Live execution requires explicit opt in.
+
+Controller process state lives in separate tables in the project Taskledger
+database. Domain changes still use the existing service methods. Worker model
+sessions reach worker operations through assignment-scoped app-server dynamic
+tools handled by a local broker, so neither worker nor orchestrator credentials
+are placed in the model environment and outbound network access stays disabled.
+
 ## Requirements
 
 For the standalone CLI:
@@ -55,10 +66,11 @@ For the standalone CLI:
 - Git 2.20 or later
 - a non-bare Git repository with a named branch
 
-For the complete routed-agent workflow, you also need:
+For the complete routed-agent or controller workflow, you also need:
 
 - a local Codex surface that supports skills and custom agents;
-- one primary/orchestrator model and two named worker profiles; and
+- one primary/orchestrator model, two named worker profiles, and the bundled
+  `taskledger-reviewer.toml` profile for controller review; and
 - permission to create Git worktrees and write `.taskledger/` inside the target
   repository.
 

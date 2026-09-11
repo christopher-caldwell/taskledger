@@ -12,6 +12,7 @@ requires-python = ">=3.11"
 
 [project.scripts]
 taskledger = "taskledger.cli:main"
+taskledger-worker-proxy = "taskledger.worker_proxy:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

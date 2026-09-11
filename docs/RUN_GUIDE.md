@@ -92,10 +92,12 @@ cp ~/.codex/skills/taskledger/assets/taskledger-worker-routine.toml \
   .codex/agents/taskledger-worker-routine.toml
 cp ~/.codex/skills/taskledger/assets/taskledger-worker-complex.toml \
   .codex/agents/taskledger-worker-complex.toml
+cp ~/.codex/skills/taskledger/assets/taskledger-reviewer.toml \
+  .codex/agents/taskledger-reviewer.toml
 ```
 
-The templates use Luna for routine work and Terra for complex work. These are
-defaults, not protocol requirements. Edit `model` and
+The templates use Luna for routine work, Terra for complex work, and Astra for
+controller review. These are defaults, not protocol requirements. Edit `model` and
 `model_reasoning_effort` to models available in the consuming repository while
 preserving the profile names and Taskledger-specific instructions.
 

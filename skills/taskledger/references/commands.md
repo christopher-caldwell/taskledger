@@ -60,6 +60,15 @@ For each risk use `{"description":"Known risk","blocking":false,"blocker_categor
 
 Worker calls use `--token <scoped-worker-token>`. Run them from the assignment worktree so the CLI can locate the canonical repository's `.taskledger/`; the token alone determines project and assignment authority.
 
+## Executable controller
+
+- `controller run-assignment`: `{"assignment_id":"uuid","live":true,"limits":{"max_worker_turns":20,"max_consecutive_stalled_turns":2,"max_consecutive_runtime_failures":2,"max_reviewer_turns_per_submission":2,"max_total_tokens":40000,"max_elapsed_seconds":3600,"turn_timeout_seconds":1800,"reviewer_profile":"taskledger_reviewer"}}`. This is an explicit paid live run. It supervises one existing assignment through confirmed integration or a durable pause.
+- `controller resume`: `{"run_id":"uuid","live":true}`. Reconciles recorded thread and turn identities before any new dispatch.
+- `controller show`: `{"run_id":"uuid"}`. Reads controller run, session, pause, and usage state without dispatching work.
+- `controller extend-budget`: `{"run_id":"uuid","kind":"WORKER_TURNS","amount":2,"reason":"Approved continuation"}`. Kinds are `WORKER_TURNS`, `REVIEWER_TURNS`, `TOKENS`, and `ELAPSED_SECONDS`.
+
+Controller workers use assignment-scoped app-server dynamic tools backed by the local broker instead of receiving a worker or orchestrator credential. Unknown runtime outcomes pause and cannot be converted into retry or success by a controller command.
+
 ## Verification, integration, and blockers
 
 - `submission verify`: `{"submission_id":"uuid","outcome":"ACCEPTED","criterion_results":[{"criterion_id":"uuid","satisfied":true,"evidence":"Independent check"}],"behavior_matches_intent":true,"required_evidence_present":true,"blocking_issues_remaining":false,"corrections":null,"notes":"Verification summary"}`. Include every current criterion exactly once. `REJECTED` requires corrections and at least one unmet assertion. `BLOCKED` requires exactly one `blocker_id` or `blocker` definition.

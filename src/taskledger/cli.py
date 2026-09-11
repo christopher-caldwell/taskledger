@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -129,7 +131,7 @@ def dispatch(args, data):
         if command=="worker.submit":return service.worker_submit(principal,data)
         raise LedgerError("INVALID_REQUEST","Unknown worker command.")
     project,principal=service.auth_orchestrator(args.project,args.token)
-    if command not in {"project.show","project.recover"}:service.preflight(project)
+    if command not in {"project.show","project.recover","controller.show"}:service.preflight(project)
     if command=="project.show":
         service.preflight(project);valid,fingerprint,diagnostics=service.plan_current(project["id"])
         return {"project_id":project["id"],"repository_root":project["repository_root"],"canonical_branch":project["canonical_branch"],"effective_phase":service.phase(project),"plan":{"valid":valid,"fingerprint":fingerprint,"diagnostics":diagnostics},"progress":service.progress(project),"pending_reviews":service.con.execute("SELECT COUNT(*) FROM specification_reviews WHERE project_id=? AND state='PENDING'",(project["id"],)).fetchone()[0]}
@@ -140,6 +142,80 @@ def dispatch(args, data):
     if command=="project.set-canonical-branch":return service.set_branch(project,principal,data)
     if command=="project.complete":require_object(data,{});return service.complete_project(project,principal)
     if command=="project.cleanup":require_object(data,{});return service.cleanup_worktrees(project,principal)
+    if command=="controller.run-assignment":
+        require_object(data,{"assignment_id","live","limits"},{"assignment_id","live"})
+        if data["live"] is not True:raise LedgerError("INVALID_REQUEST","Live controller execution requires live=true explicit opt in.")
+        limits=data.get("limits",{});require_object(limits,{"max_worker_turns","max_consecutive_stalled_turns","max_consecutive_runtime_failures","max_reviewer_turns_per_submission","max_total_tokens","max_elapsed_seconds","turn_timeout_seconds","reviewer_profile"})
+        from .controller.app_server import AppServerRuntime
+        from .controller.journal import Journal
+        from .controller.supervisor import Supervisor,SupervisorConfig
+        from .controller.taskledger_adapter import TaskledgerLedgerAdapter
+        try:config=SupervisorConfig(**limits);config.validate()
+        except (TypeError,ValueError) as exc:raise LedgerError("INVALID_REQUEST",str(exc))
+        assignment_id=text(data["assignment_id"],"assignment_id")
+        if not service.con.execute("SELECT 1 FROM assignments WHERE id=? AND project_id=?",(assignment_id,project["id"])).fetchone():raise LedgerError("ASSIGNMENT_NOT_ACTIVE","Assignment was not found.")
+        journal=Journal(service.con,service.home)
+        try:run_id=journal.create_run(project["id"],mode="ASSIGNMENT",config={"assignment_id":assignment_id,"limits":asdict(config)})
+        except RuntimeError as exc:raise LedgerError("INVALID_REQUEST",str(exc))
+        async def execute():
+            from .controller.worker_broker import WorkerBroker,broker_socket_path
+            token_path=service.home/"projects"/project["id"]/"assignments"/assignment_id/"worker-token"
+            worker=service.authenticate(project["id"],token_path.read_text().strip(),"WORKER")
+            socket_path=broker_socket_path(service.home,assignment_id)
+            broker=WorkerBroker(service,worker,socket_path);runtime=None
+            try:
+                runtime=AppServerRuntime(repository_root=project["repository_root"],worker_tools={assignment_id:broker.dispatch})
+                adapter=TaskledgerLedgerAdapter(service,project,principal,worker_tool_enabled=True)
+                return await Supervisor(project_id=project["id"],run_id=run_id,ledger=adapter,runtime=runtime,journal=journal,config=config).run_assignment(assignment_id)
+            except Exception as exc:
+                journal.finish_run(run_id,"FAILED",reason="INVALID_STATE",detail=str(exc));raise
+            finally:
+                if runtime:await runtime.close()
+                await broker.close()
+        result=asyncio.run(execute());return {"run_id":run_id,**asdict(result)}
+    if command=="controller.resume":
+        require_object(data,{"run_id","live"},{"run_id","live"})
+        if data["live"] is not True:raise LedgerError("INVALID_REQUEST","Live controller execution requires live=true explicit opt in.")
+        from .controller.app_server import AppServerRuntime
+        from .controller.journal import Journal
+        from .controller.supervisor import Supervisor,SupervisorConfig
+        from .controller.taskledger_adapter import TaskledgerLedgerAdapter
+        journal=Journal(service.con,service.home);requested_id=text(data["run_id"],"run_id");existing=journal.run(requested_id)
+        if not existing or existing["project_id"]!=project["id"] or existing["mode"]!="ASSIGNMENT":raise LedgerError("INVALID_REQUEST","Controller run does not belong to this project or mode.")
+        try:run=journal.resume_run(requested_id)
+        except RuntimeError as exc:raise LedgerError("INVALID_REQUEST",str(exc))
+        assignment_id=run["config"]["assignment_id"];config=SupervisorConfig(**run["config"]["limits"])
+        async def resume_execution():
+            from .controller.worker_broker import WorkerBroker,broker_socket_path
+            token_path=service.home/"projects"/project["id"]/"assignments"/assignment_id/"worker-token"
+            worker=service.authenticate(project["id"],token_path.read_text().strip(),"WORKER")
+            socket_path=broker_socket_path(service.home,assignment_id)
+            broker=WorkerBroker(service,worker,socket_path);runtime=None
+            try:
+                runtime=AppServerRuntime(repository_root=project["repository_root"],worker_tools={assignment_id:broker.dispatch})
+                adapter=TaskledgerLedgerAdapter(service,project,principal,worker_tool_enabled=True)
+                return await Supervisor(project_id=project["id"],run_id=run["id"],ledger=adapter,runtime=runtime,journal=journal,config=config).run_assignment(assignment_id)
+            except Exception as exc:
+                journal.finish_run(run["id"],"FAILED",reason="INVALID_STATE",detail=str(exc));raise
+            finally:
+                if runtime:await runtime.close()
+                await broker.close()
+        result=asyncio.run(resume_execution());return {"run_id":run["id"],**asdict(result)}
+    if command=="controller.show":
+        require_object(data,{"run_id"},{"run_id"})
+        from .controller.journal import Journal
+        journal=Journal(service.con,service.home);run=journal.run(text(data["run_id"],"run_id"))
+        if not run or run["project_id"]!=project["id"]:raise LedgerError("INVALID_REQUEST","Controller run was not found.")
+        sessions=[dict(row) for row in service.con.execute("SELECT id,role,profile,subject_id,external_thread_id,state,created_at,closed_at FROM controller_sessions WHERE run_id=? ORDER BY created_at,id",(run["id"],))]
+        return {"run":run,"sessions":sessions,"usage":asdict(journal.usage(run_id=run["id"]))}
+    if command=="controller.extend-budget":
+        require_object(data,{"run_id","kind","amount","reason"},{"run_id","kind","amount","reason"})
+        from .controller.journal import Journal
+        journal=Journal(service.con,service.home);run=journal.run(text(data["run_id"],"run_id"))
+        if not run or run["project_id"]!=project["id"]:raise LedgerError("INVALID_REQUEST","Controller run was not found.")
+        try:grant_id=journal.grant_budget(run_id=run["id"],kind=text(data["kind"],"kind"),amount=data["amount"],reason=text(data["reason"],"reason"),principal_id=principal["id"])
+        except ValueError as exc:raise LedgerError("INVALID_REQUEST",str(exc))
+        return {"run_id":run["id"],"grant_id":grant_id,"kind":data["kind"],"amount":data["amount"]}
     if command=="spec.register":return service.register_spec(project,principal,data)
     if command=="spec.check":require_object(data,{});return service.check_specs(project,principal)
     if command=="spec.review":return service.review_spec(project,principal,data)

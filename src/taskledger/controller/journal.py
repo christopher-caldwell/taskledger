@@ -1,0 +1,336 @@
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import os
+from datetime import datetime, timezone
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterator
+
+from taskledger.core import canonical, new_id, now
+from taskledger.db import transaction
+
+from .model import RuntimeTurnHandle, RuntimeTurnResult, Usage
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
+
+
+@dataclass(frozen=True)
+class AgentSession:
+    id: str
+    run_id: str
+    project_id: str
+    role: str
+    profile: str
+    subject_id: str
+    thread_id: str
+    config_hash: str
+    state: str
+
+
+@dataclass(frozen=True)
+class OpenTurn:
+    id: str
+    session_id: str
+    thread_id: str
+    state: str
+    external_turn_id: str | None
+
+
+@dataclass(frozen=True)
+class TerminalTurn:
+    id: str
+    session_id: str
+    state: str
+    thread_id: str
+    external_turn_id: str | None
+    result: RuntimeTurnResult | None
+    error: str | None
+    progress_before: str | None
+    progress_after: str | None
+    progressed: bool | None
+
+
+class Journal:
+    """Controller state stored beside, but separate from, Taskledger domain rows."""
+
+    def __init__(self, con, home: Path):
+        self.con = con
+        self.home = home
+
+    @contextlib.contextmanager
+    def project_lock(self, project_key: str) -> Iterator[None]:
+        if fcntl is None:
+            raise RuntimeError("controller locking requires fcntl")
+        lock_dir = self.home / "controller-locks"
+        lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        digest = hashlib.sha256(project_key.encode()).hexdigest()[:24]
+        lock_path = lock_dir / f"{digest}.lock"
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("controller already running for this project") from exc
+            os.ftruncate(fd, 0)
+            os.write(fd, f"pid={os.getpid()}\nproject={project_key}\n".encode())
+            os.fsync(fd)
+            yield
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+    def create_run(self, project_id: str, *, mode: str, config: dict[str, Any]) -> str:
+        if mode not in {"ASSIGNMENT", "PROJECT"}:
+            raise ValueError(mode)
+        run_id = new_id()
+        stamp = now()
+        with transaction(self.con):
+            active = self.con.execute(
+                "SELECT id FROM controller_runs WHERE project_id=? AND state='RUNNING' LIMIT 1",
+                (project_id,),
+            ).fetchone()
+            if active:
+                raise RuntimeError(f"controller run {active['id']} is already running for this project")
+            self.con.execute(
+                "INSERT INTO controller_runs(id,project_id,mode,state,config_json,created_at,started_at) VALUES(?,?,?,?,?,?,?)",
+                (run_id, project_id, mode, "RUNNING", canonical(config), stamp, stamp),
+            )
+        return run_id
+
+    def resume_run(self, run_id: str) -> dict[str, Any]:
+        row = self.con.execute("SELECT * FROM controller_runs WHERE id=?", (run_id,)).fetchone()
+        if not row:
+            raise RuntimeError("controller run was not found")
+        if row["state"] == "COMPLETED":
+            raise RuntimeError("completed controller run cannot be resumed")
+        with transaction(self.con):
+            active = self.con.execute(
+                "SELECT id FROM controller_runs WHERE project_id=? AND state='RUNNING' AND id<>? LIMIT 1",
+                (row["project_id"], run_id),
+            ).fetchone()
+            if active:
+                raise RuntimeError(f"controller run {active['id']} is already running for this project")
+            self.con.execute(
+                "UPDATE controller_runs SET state='RUNNING',pause_reason=NULL,pause_detail=NULL,finished_at=NULL WHERE id=?",
+                (run_id,),
+            )
+        result = dict(row)
+        result["config"] = json.loads(result.pop("config_json"))
+        return result
+
+    def finish_run(self, run_id: str, state: str, *, reason: str | None = None, detail: str | None = None) -> None:
+        if state not in {"COMPLETED", "PAUSED", "FAILED"}:
+            raise ValueError(state)
+        with transaction(self.con):
+            self.con.execute(
+                "UPDATE controller_runs SET state=?,pause_reason=?,pause_detail=?,finished_at=? WHERE id=?",
+                (state, reason, detail, now(), run_id),
+            )
+
+    def run(self, run_id: str) -> dict[str, Any] | None:
+        row = self.con.execute("SELECT * FROM controller_runs WHERE id=?", (run_id,)).fetchone()
+        if not row:
+            return None
+        value = dict(row)
+        value["config"] = json.loads(value.pop("config_json"))
+        return value
+
+    def find_active_session(self, *, project_id: str, role: str, subject_id: str) -> AgentSession | None:
+        row = self.con.execute(
+            "SELECT * FROM controller_sessions WHERE project_id=? AND role=? AND subject_id=? AND state='ACTIVE'",
+            (project_id, role, subject_id),
+        ).fetchone()
+        return self._session(row) if row else None
+
+    def active_sessions(self, *, project_id: str, role: str | None = None) -> list[AgentSession]:
+        sql = "SELECT * FROM controller_sessions WHERE project_id=? AND state='ACTIVE'"
+        params: tuple[Any, ...] = (project_id,)
+        if role is not None:
+            sql += " AND role=?"
+            params += (role,)
+        rows = self.con.execute(sql + " ORDER BY created_at,id", params).fetchall()
+        return [self._session(row) for row in rows]
+
+    def create_session(
+        self,
+        *,
+        run_id: str,
+        project_id: str,
+        role: str,
+        profile: str,
+        subject_id: str,
+        external_thread_id: str,
+        config_hash: str,
+    ) -> AgentSession:
+        session_id = new_id()
+        with transaction(self.con):
+            self.con.execute(
+                "INSERT INTO controller_sessions VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (session_id, run_id, project_id, role, profile, subject_id, external_thread_id, config_hash, "ACTIVE", now(), None),
+            )
+        return AgentSession(session_id, run_id, project_id, role, profile, subject_id, external_thread_id, config_hash, "ACTIVE")
+
+    def close_session(self, session_id: str, *, uncertain: bool = False) -> None:
+        with transaction(self.con):
+            self.con.execute(
+                "UPDATE controller_sessions SET state=?,closed_at=? WHERE id=? AND state='ACTIVE'",
+                ("UNCERTAIN" if uncertain else "CLOSED", now(), session_id),
+            )
+
+    def begin_turn(self, session_id: str, prompt_kind: str, *, progress_before: str | None = None) -> str:
+        turn_id = new_id()
+        with transaction(self.con):
+            pending = self.con.execute(
+                "SELECT id FROM controller_turns WHERE session_id=? AND (state IN ('DISPATCHING','RUNNING','UNCERTAIN') OR (state IN ('COMPLETED','FAILED') AND consumed_at IS NULL)) LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if pending:
+                raise RuntimeError(f"session has unresolved turn {pending['id']}")
+            sequence = self.con.execute(
+                "SELECT COALESCE(MAX(sequence),0)+1 FROM controller_turns WHERE session_id=?", (session_id,)
+            ).fetchone()[0]
+            self.con.execute(
+                "INSERT INTO controller_turns(id,session_id,sequence,state,prompt_kind,progress_before,started_at) VALUES(?,?,?,?,?,?,?)",
+                (turn_id, session_id, sequence, "DISPATCHING", prompt_kind, progress_before, now()),
+            )
+        return turn_id
+
+    def acknowledge_turn(self, local_turn_id: str, handle: RuntimeTurnHandle) -> None:
+        with transaction(self.con):
+            cur = self.con.execute(
+                "UPDATE controller_turns SET state='RUNNING',external_turn_id=? WHERE id=? AND state='DISPATCHING'",
+                (handle.turn_id, local_turn_id),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("turn acknowledgement is stale")
+
+    def complete_turn(self, local_turn_id: str, result: RuntimeTurnResult) -> None:
+        payload = canonical(result.structured_output) if result.structured_output is not None else None
+        with transaction(self.con):
+            row = self.con.execute("SELECT state,external_turn_id FROM controller_turns WHERE id=?", (local_turn_id,)).fetchone()
+            if not row or row["state"] not in {"RUNNING", "COMPLETED"}:
+                raise RuntimeError("completed turn is not reconcilable")
+            if row["external_turn_id"] != result.handle.turn_id:
+                raise RuntimeError("completed turn identity does not match")
+            self.con.execute(
+                "UPDATE controller_turns SET state='COMPLETED',result_json=?,final_response=?,input_tokens=?,cached_input_tokens=?,output_tokens=?,reasoning_tokens=?,finished_at=? WHERE id=?",
+                (payload, result.final_response, result.usage.input_tokens, result.usage.cached_input_tokens,
+                 result.usage.output_tokens, result.usage.reasoning_tokens, now(), local_turn_id),
+            )
+
+    def fail_turn(self, local_turn_id: str, error: str, *, uncertain: bool) -> None:
+        with transaction(self.con):
+            self.con.execute(
+                "UPDATE controller_turns SET state=?,error=?,finished_at=? WHERE id=? AND state IN ('DISPATCHING','RUNNING')",
+                ("UNCERTAIN" if uncertain else "FAILED", error, now(), local_turn_id),
+            )
+
+    def consume_turn(self, local_turn_id: str, *, progress_after: str | None = None) -> None:
+        with transaction(self.con):
+            row = self.con.execute("SELECT state,progress_before FROM controller_turns WHERE id=?", (local_turn_id,)).fetchone()
+            if not row or row["state"] not in {"COMPLETED", "FAILED"}:
+                raise RuntimeError("only completed or failed turns can be consumed")
+            progressed = None
+            if progress_after is not None and row["progress_before"] is not None:
+                progressed = int(progress_after != row["progress_before"])
+            self.con.execute(
+                "UPDATE controller_turns SET progress_after=COALESCE(?,progress_after),progressed=COALESCE(?,progressed),consumed_at=COALESCE(consumed_at,?) WHERE id=?",
+                (progress_after, progressed, now(), local_turn_id),
+            )
+
+    def terminal_unconsumed_turn(self, session_id: str) -> TerminalTurn | None:
+        row = self.con.execute(
+            "SELECT t.*,s.external_thread_id FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE t.session_id=? AND t.state IN ('COMPLETED','FAILED') AND t.consumed_at IS NULL ORDER BY t.sequence LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return self._terminal(row) if row else None
+
+    def open_turns(self, *, project_id: str) -> list[OpenTurn]:
+        rows = self.con.execute(
+            "SELECT t.id,t.session_id,t.state,t.external_turn_id,s.external_thread_id FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.project_id=? AND t.state IN ('DISPATCHING','RUNNING','UNCERTAIN') ORDER BY t.started_at,t.id",
+            (project_id,),
+        ).fetchall()
+        return [OpenTurn(r["id"], r["session_id"], r["external_thread_id"], r["state"], r["external_turn_id"]) for r in rows]
+
+    def session_turn_count(self, session_id: str) -> int:
+        return self.con.execute("SELECT COUNT(*) FROM controller_turns WHERE session_id=?", (session_id,)).fetchone()[0]
+
+    def consecutive_stalled_turns(self, session_id: str) -> int:
+        rows = self.con.execute(
+            "SELECT progressed FROM controller_turns WHERE session_id=? AND prompt_kind='worker' AND state='COMPLETED' AND consumed_at IS NOT NULL AND progressed IS NOT NULL ORDER BY sequence DESC",
+            (session_id,),
+        ).fetchall()
+        count = 0
+        for row in rows:
+            if row["progressed"]:
+                break
+            count += 1
+        return count
+
+    def consecutive_failures(self, session_id: str) -> int:
+        rows = self.con.execute(
+            "SELECT state FROM controller_turns WHERE session_id=? AND consumed_at IS NOT NULL ORDER BY sequence DESC",
+            (session_id,),
+        ).fetchall()
+        count = 0
+        for row in rows:
+            if row["state"] != "FAILED":
+                break
+            count += 1
+        return count
+
+    def usage(self, *, run_id: str) -> Usage:
+        row = self.con.execute(
+            "SELECT COALESCE(SUM(input_tokens),0),COALESCE(SUM(cached_input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(reasoning_tokens),0) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=?",
+            (run_id,),
+        ).fetchone()
+        return Usage(*map(int, row))
+
+    def grant_budget(self, *, run_id: str, kind: str, amount: int, reason: str, principal_id: str) -> str:
+        if kind not in {"WORKER_TURNS", "REVIEWER_TURNS", "TOKENS", "ELAPSED_SECONDS"} or not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+            raise ValueError("invalid controller budget grant")
+        grant_id = new_id()
+        with transaction(self.con):
+            self.con.execute(
+                "INSERT INTO controller_budget_grants VALUES(?,?,?,?,?,?,?)",
+                (grant_id, run_id, kind, amount, reason, principal_id, now()),
+            )
+        return grant_id
+
+    def granted_amount(self, *, run_id: str, kind: str) -> int:
+        return int(self.con.execute(
+            "SELECT COALESCE(SUM(amount),0) FROM controller_budget_grants WHERE run_id=? AND kind=?",
+            (run_id, kind),
+        ).fetchone()[0])
+
+    def elapsed_seconds(self, *, run_id: str) -> int:
+        row = self.con.execute("SELECT started_at FROM controller_runs WHERE id=?", (run_id,)).fetchone()
+        if not row:
+            raise RuntimeError("controller run was not found")
+        started = datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))
+        return max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
+
+    @staticmethod
+    def _session(row) -> AgentSession:
+        return AgentSession(row["id"], row["run_id"], row["project_id"], row["role"], row["profile"], row["subject_id"], row["external_thread_id"], row["config_hash"], row["state"])
+
+    @staticmethod
+    def _terminal(row) -> TerminalTurn:
+        result = None
+        if row["state"] == "COMPLETED":
+            structured = json.loads(row["result_json"]) if row["result_json"] is not None else None
+            result = RuntimeTurnResult(
+                RuntimeTurnHandle(row["external_thread_id"], row["external_turn_id"]),
+                structured_output=structured,
+                final_response=row["final_response"],
+                usage=Usage(row["input_tokens"], row["cached_input_tokens"], row["output_tokens"], row["reasoning_tokens"]),
+            )
+        return TerminalTurn(row["id"], row["session_id"], row["state"], row["external_thread_id"], row["external_turn_id"], result, row["error"], row["progress_before"], row["progress_after"], None if row["progressed"] is None else bool(row["progressed"]))

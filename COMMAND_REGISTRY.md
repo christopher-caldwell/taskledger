@@ -23,3 +23,7 @@ All commands emit the stable JSON envelope in Technical Specification §9. Unkno
 | `question answer`; `follow-up list`, `review` | orchestrator | answer / filter / disposition | plan-neutral |
 | `worker context`, `check`, `checkpoint`, `artifact-register`, `question`, `blocker`, `follow-up`, `submit` | scoped worker | cached context / exact check / slice / local file / worker-local payload | correction/checkpoint state is durable; receipts and artifacts remain assignment-scoped |
 | `operation adopt-success`, `mark-failed` | orchestrator | operation ID and current OID | only deterministic recovery proof |
+| `controller run-assignment` | orchestrator | assignment ID, `live=true`, optional durable limits | foreground supervision of one existing assignment; live execution requires explicit opt in |
+| `controller resume` | orchestrator | run ID, `live=true` | reconcile recorded thread and turn identities before continuing |
+| `controller show` | orchestrator | run ID | read controller state, sessions, pause reason, and usage without dispatch |
+| `controller extend-budget` | orchestrator | run ID, grant kind, positive amount, reason | audited extension without resetting prior turns or usage |

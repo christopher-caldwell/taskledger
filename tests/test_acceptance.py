@@ -123,6 +123,11 @@ class TaskledgerAcceptance(unittest.TestCase):
             self.assertIn("taskledger worker checkpoint",template)
             self.assertIn("taskledger worker check",template)
 
+        reviewer=(ROOT/"skills"/"taskledger"/"assets"/"taskledger-reviewer.toml").read_text()
+        self.assertIn('name = "taskledger_reviewer"',reviewer)
+        self.assertIn('model = "gpt-6-astra"',reviewer)
+        self.assertIn("Do not edit files",reviewer)
+
         commands=(ROOT/"skills"/"taskledger"/"references"/"commands.md").read_text()
         self.assertIn("exhaustive public command and input registry",commands)
         self.assertIn("do not probe unlisted commands or flags",commands)
@@ -154,7 +159,7 @@ class TaskledgerAcceptance(unittest.TestCase):
 
         migrated=connect(prior_schema_home)
         self.assertEqual(migrated.execute("SELECT worker_profile FROM assignments").fetchone()[0],"complex")
-        self.assertEqual([row[0] for row in migrated.execute("SELECT version FROM schema_migrations ORDER BY version")],[1,2,3,4])
+        self.assertEqual([row[0] for row in migrated.execute("SELECT version FROM schema_migrations ORDER BY version")],[1,2,3,4,5])
         migrated.close()
 
     def test_task_create_confirms_success_after_post_commit_error(self):
@@ -710,6 +715,58 @@ class TaskledgerAcceptance(unittest.TestCase):
         self.assertEqual(timed_out["data"]["status"],"TIMED_OUT")
         code,blocked=self.command("worker","submit",{"summary":"done","evidence":[{"label":"changed","details":"observed","receipt_id":changed["data"]["receipt_id"]},{"label":"timeout","details":"observed","receipt_id":timed_out["data"]["receipt_id"]}],"risks":[],"unresolved_questions":[],"follow_up_work":[]},token=token)
         self.assertEqual(code,3);self.assertEqual(blocked["error"]["code"],"REQUIRED_CHECK_EVIDENCE_MISSING")
+
+    def test_controller_real_adapter_runs_fake_runtime_through_integration(self):
+        import asyncio
+
+        from taskledger.controller.fakes import FakeRuntime, TurnScript, accepted_verdict
+        from taskledger.controller.journal import Journal
+        from taskledger.controller.supervisor import Supervisor, SupervisorConfig
+        from taskledger.controller.taskledger_adapter import TaskledgerLedgerAdapter
+        from taskledger.db import connect
+        from taskledger.service import Service
+
+        project_id=self.init();_,task_id=self.setup_task(project_id);self.command("plan","validate",{},project=project_id)
+        _,created=self.command("assignment","create",{"task_id":task_id,"worker_profile":"routine"},project=project_id)
+        worker_token=self.assignment_token(created);assignment_id=created["data"]["assignment_id"]
+        service=Service(connect(self.home),self.home);project,orchestrator=service.auth_orchestrator(project_id,None)
+        worker=service.authenticate(None,worker_token,"WORKER");worktree=Path(created["data"]["worktree_path"])
+        adapter=TaskledgerLedgerAdapter(service,project,orchestrator)
+        before=adapter.progress_fingerprint(assignment_id)
+
+        def implement_and_submit():
+            (worktree/"README").write_text("implemented\n")
+            subprocess.run(["git","-C",str(worktree),"add","README"],check=True,capture_output=True)
+            subprocess.run(["git","-C",str(worktree),"-c","user.name=Controller Test","-c","user.email=controller@example.invalid","commit","-qm","implement"],check=True,capture_output=True)
+            service.worker_submit(worker,{"summary":"implemented","evidence":[{"label":"fake runtime","details":"implemented in the assignment worktree"}],"risks":[],"unresolved_questions":[],"follow_up_work":[]})
+
+        criterion=service.con.execute("SELECT id FROM task_acceptance_criteria WHERE task_id=?",(task_id,)).fetchone()[0]
+        runtime=FakeRuntime(worker_turns=[TurnScript(effect=implement_and_submit)],reviewer_turns=[TurnScript(structured_output=accepted_verdict((criterion,)))])
+        config=SupervisorConfig();journal=Journal(service.con,self.home);run_id=journal.create_run(project_id,mode="ASSIGNMENT",config=config.__dict__)
+        result=asyncio.run(Supervisor(project_id=project_id,run_id=run_id,ledger=adapter,runtime=runtime,journal=journal,config=config).run_assignment(assignment_id))
+        self.assertEqual(result.status.value,"INTEGRATED")
+        self.assertNotEqual(before,adapter.progress_fingerprint(assignment_id))
+        self.assertEqual(service.con.execute("SELECT state FROM tasks WHERE id=?",(task_id,)).fetchone()[0],"COMPLETED")
+        service.con.close()
+
+    def test_controller_cli_requires_live_opt_in_and_tracks_budget_grants(self):
+        from taskledger.controller.journal import Journal
+        from taskledger.db import connect
+        from taskledger.service import Service
+
+        project_id=self.init();_,task_id=self.setup_task(project_id);self.command("plan","validate",{},project=project_id)
+        _,assignment=self.command("assignment","create",{"task_id":task_id,"worker_profile":"routine"},project=project_id)
+        code,refused=self.command("controller","run-assignment",{"assignment_id":assignment["data"]["assignment_id"],"live":False},project=project_id)
+        self.assertEqual(code,2);self.assertEqual(refused["error"]["code"],"INVALID_REQUEST")
+
+        service=Service(connect(self.home),self.home);project,principal=service.auth_orchestrator(project_id,None)
+        journal=Journal(service.con,self.home);run_id=journal.create_run(project_id,mode="ASSIGNMENT",config={"assignment_id":assignment["data"]["assignment_id"],"limits":{}})
+        journal.finish_run(run_id,"PAUSED",reason="MAX_TURNS",detail="test pause");service.con.close()
+        code,shown=self.command("controller","show",{"run_id":run_id},project=project_id)
+        self.assertEqual(code,0);self.assertEqual(shown["data"]["run"]["pause_reason"],"MAX_TURNS")
+        code,extended=self.command("controller","extend-budget",{"run_id":run_id,"kind":"WORKER_TURNS","amount":2,"reason":"approved continuation"},project=project_id)
+        self.assertEqual(code,0);self.assertEqual(extended["data"]["amount"],2)
+        self.assertEqual(self.db_scalar("SELECT SUM(amount) FROM controller_budget_grants WHERE run_id=?",(run_id,)),2)
 
 
 if __name__ == "__main__": unittest.main()

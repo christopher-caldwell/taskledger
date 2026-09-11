@@ -81,6 +81,38 @@ CREATE TABLE IF NOT EXISTS blockers(id TEXT PRIMARY KEY,project_id TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),kind TEXT NOT NULL,entity_type TEXT NOT NULL,entity_id TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('STARTED','SUCCEEDED','FAILED','UNCERTAIN')),expected_state_json TEXT NOT NULL,result_json TEXT,started_at TEXT NOT NULL,finished_at TEXT);
 CREATE UNIQUE INDEX IF NOT EXISTS current_operation ON operations(project_id) WHERE state='STARTED';
 CREATE TABLE IF NOT EXISTS audit_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL REFERENCES projects(id),principal_id TEXT,event_type TEXT NOT NULL,entity_type TEXT NOT NULL,entity_id TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS controller_runs(
+ id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),mode TEXT NOT NULL CHECK(mode IN ('ASSIGNMENT','PROJECT')),
+ state TEXT NOT NULL CHECK(state IN ('RUNNING','PAUSED','COMPLETED','FAILED')),config_json TEXT NOT NULL,
+ pause_reason TEXT,pause_detail TEXT,created_at TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_controller_run ON controller_runs(project_id) WHERE state='RUNNING';
+CREATE TABLE IF NOT EXISTS controller_run_targets(
+ run_id TEXT NOT NULL REFERENCES controller_runs(id),task_id TEXT NOT NULL REFERENCES tasks(id),wave INTEGER NOT NULL,
+ worker_profile TEXT NOT NULL CHECK(worker_profile IN ('routine','complex')),parallel_safe INTEGER NOT NULL CHECK(parallel_safe IN (0,1)),
+ write_surfaces_json TEXT NOT NULL,assignment_id TEXT REFERENCES assignments(id),state TEXT NOT NULL CHECK(state IN ('QUEUED','ACTIVE','INTEGRATED','BLOCKED','CANCELLED')),
+ PRIMARY KEY(run_id,task_id));
+CREATE TABLE IF NOT EXISTS controller_sessions(
+ id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES controller_runs(id),project_id TEXT NOT NULL REFERENCES projects(id),
+ role TEXT NOT NULL CHECK(role IN ('WORKER','REVIEWER','REQUIREMENT_REVIEWER')),profile TEXT NOT NULL,subject_id TEXT NOT NULL,
+ external_thread_id TEXT NOT NULL,config_hash TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('ACTIVE','CLOSED','UNCERTAIN')),
+ created_at TEXT NOT NULL,closed_at TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_controller_session ON controller_sessions(project_id,role,subject_id) WHERE state='ACTIVE';
+CREATE TABLE IF NOT EXISTS controller_turns(
+ id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES controller_sessions(id),sequence INTEGER NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('DISPATCHING','RUNNING','COMPLETED','FAILED','UNCERTAIN')),prompt_kind TEXT NOT NULL,
+ external_turn_id TEXT,result_json TEXT,final_response TEXT,error TEXT,progress_before TEXT,progress_after TEXT,
+ progressed INTEGER CHECK(progressed IN (0,1)),input_tokens INTEGER NOT NULL DEFAULT 0,cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+ output_tokens INTEGER NOT NULL DEFAULT 0,reasoning_tokens INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,finished_at TEXT,consumed_at TEXT,
+ UNIQUE(session_id,sequence));
+CREATE INDEX IF NOT EXISTS controller_turns_open ON controller_turns(state) WHERE state IN ('DISPATCHING','RUNNING','UNCERTAIN');
+CREATE INDEX IF NOT EXISTS controller_turns_unconsumed ON controller_turns(session_id,consumed_at) WHERE consumed_at IS NULL;
+CREATE TABLE IF NOT EXISTS controller_usage_events(
+ id TEXT PRIMARY KEY,turn_id TEXT NOT NULL REFERENCES controller_turns(id),external_event_id TEXT NOT NULL,raw_json TEXT NOT NULL,
+ input_tokens INTEGER,cached_input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,created_at TEXT NOT NULL,
+ UNIQUE(turn_id,external_event_id));
+CREATE TABLE IF NOT EXISTS controller_budget_grants(
+ id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES controller_runs(id),kind TEXT NOT NULL CHECK(kind IN ('WORKER_TURNS','REVIEWER_TURNS','TOKENS','ELAPSED_SECONDS')),
+ amount INTEGER NOT NULL CHECK(amount>0),reason TEXT NOT NULL,granted_by_principal_id TEXT NOT NULL REFERENCES principals(id),created_at TEXT NOT NULL);
 """
 
 
@@ -110,6 +142,7 @@ def connect(home: Path) -> sqlite3.Connection:
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(2,?)", (now(),))
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(3,?)", (now(),))
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(4,?)", (now(),))
+        con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(5,?)", (now(),))
         return con
     except (OSError, sqlite3.Error) as exc:
         if con is not None:

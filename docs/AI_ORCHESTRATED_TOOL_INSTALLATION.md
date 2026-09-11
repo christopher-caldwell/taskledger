@@ -210,6 +210,8 @@ cp "${CODEX_HOME:-$HOME/.codex}/skills/taskledger/assets/taskledger-worker-routi
   /absolute/path/to/managed-repository/.codex/agents/taskledger-worker-routine.toml
 cp "${CODEX_HOME:-$HOME/.codex}/skills/taskledger/assets/taskledger-worker-complex.toml" \
   /absolute/path/to/managed-repository/.codex/agents/taskledger-worker-complex.toml
+cp "${CODEX_HOME:-$HOME/.codex}/skills/taskledger/assets/taskledger-reviewer.toml" \
+  /absolute/path/to/managed-repository/.codex/agents/taskledger-reviewer.toml
 ```
 
 For an existing repository, compare and merge the templates. Preserve the stable
