@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from taskledger.controller.app_server import AppServerRuntime
 from taskledger.controller.fakes import FakeLedger, FakeRuntime, TurnScript, accepted_verdict
@@ -100,6 +102,123 @@ class ControllerHardeningTests(unittest.IsolatedAsyncioTestCase):
         """)
         service = MiniService(con)
         return con, service, TaskledgerLedgerAdapter(service, {"id": "p"}, {})
+
+    @unittest.skipUnless(
+        os.environ.get("TASKLEDGER_ZERO_MODEL_CODEX") == "1",
+        "set TASKLEDGER_ZERO_MODEL_CODEX=1 for the local no-model capability sentinel",
+    )
+    async def test_r4_ambient_mcp_sentinel_is_removed_on_start_and_resume(self):
+        codex_home = self.root / "codex-home"
+        codex_home.mkdir()
+        sentinel = self.root / "sentinel_mcp.py"
+        marker = self.root / "sentinel-started"
+        sentinel.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            "pathlib.Path(sys.argv[1]).write_text('started\\n')\n"
+            "for line in sys.stdin:\n"
+            "    try: message = json.loads(line)\n"
+            "    except json.JSONDecodeError: continue\n"
+            "    if 'id' not in message: continue\n"
+            "    method = message.get('method')\n"
+            "    if method == 'initialize':\n"
+            "        result = {'protocolVersion':'2025-06-18','capabilities':{'tools':{}},'serverInfo':{'name':'sentinel','version':'1'}}\n"
+            "    elif method == 'tools/list': result = {'tools':[]}\n"
+            "    else: result = {}\n"
+            "    print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':result}), flush=True)\n"
+        )
+        sentinel.chmod(0o700)
+        (codex_home / "config.toml").write_text(
+            "[mcp_servers.sentinel]\n"
+            f"command = {json.dumps(str(sentinel))}\n"
+            f"args = [{json.dumps(str(marker))}]\n"
+        )
+        self.role_file(
+            'model="gpt-5.6-luna"\nmodel_reasoning_effort="low"\n'
+        )
+        (self.root / ".codex" / "agents" / "taskledger-reviewer.toml").write_text(
+            'model="gpt-5.6-luna"\nmodel_reasoning_effort="low"\n'
+        )
+
+        class InheritedRuntime(AppServerRuntime):
+            async def _ensure_started(inner_self):
+                if inner_self.process and inner_self.process.returncode is None:
+                    return
+                inner_self.process = await asyncio.create_subprocess_exec(
+                    inner_self.codex_executable,
+                    "app-server",
+                    "--stdio",
+                    "--strict-config",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                inner_self.reader_task = asyncio.create_task(inner_self._read_messages())
+                inner_self.stderr_task = asyncio.create_task(inner_self._drain_stderr())
+                await inner_self._request("initialize", {
+                    "clientInfo": {"name": "sentinel_control", "title": "Sentinel Control", "version": "1"},
+                    "capabilities": {"experimentalApi": True},
+                })
+                await inner_self._notify("initialized", {})
+
+        with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+            control = InheritedRuntime(repository_root=str(self.root))
+            try:
+                await control._ensure_started()
+                status = await control._request(
+                    "mcpServerStatus/list", {"cursor": None, "limit": 100, "detail": "full"}
+                )
+                self.assertIn("sentinel", json.dumps(status))
+                self.assertTrue(marker.is_file(), "control app server did not load the valid sentinel")
+            finally:
+                await control.close()
+
+            marker.unlink()
+            runtime = AppServerRuntime(repository_root=str(self.root))
+            try:
+                session = await runtime.start_session(
+                    role=SessionRole.REVIEWER,
+                    profile="taskledger_reviewer",
+                    subject_id="sentinel-review",
+                    cwd=str(self.root),
+                    writable=False,
+                )
+                started_status = await runtime._request(
+                    "mcpServerStatus/list", {"cursor": None, "limit": 100, "detail": "full"}
+                )
+                sentinel_status = next(
+                    row for row in started_status["data"] if row["name"] == "sentinel"
+                )
+                self.assertIsNone(sentinel_status["runtimeStatus"])
+                self.assertFalse(marker.exists())
+                config = runtime.session_config[session.thread_id]["nativeConfig"]
+                self.assertEqual(config["agents"]["enabled"], False)
+                self.assertEqual(config["features"]["multi_agent_v2"], False)
+                self.assertEqual(config["features"]["collab"], False)
+            finally:
+                await runtime.close()
+
+            resumed_runtime = AppServerRuntime(repository_root=str(self.root))
+            try:
+                with self.assertRaisesRegex(RuntimeError, "no rollout found"):
+                    await resumed_runtime.resume_session(
+                        thread_id=session.thread_id,
+                        role=SessionRole.REVIEWER,
+                        profile="taskledger_reviewer",
+                        subject_id="sentinel-review",
+                        cwd=str(self.root),
+                        writable=False,
+                    )
+                resumed_status = await resumed_runtime._request(
+                    "mcpServerStatus/list", {"cursor": None, "limit": 100, "detail": "full"}
+                )
+                resumed_sentinel = next(
+                    row for row in resumed_status["data"] if row["name"] == "sentinel"
+                )
+                self.assertIsNone(resumed_sentinel["runtimeStatus"])
+                self.assertFalse(marker.exists())
+            finally:
+                await resumed_runtime.close()
 
     def completed_report_run(self):
         run_id = self.journal.create_run("p", mode="PROJECT", config={"manifest": {"scope": "POST_APPROVAL_EXECUTION"}, "limits": {"max_workers": 1, "max_reviewers": 1, "max_inflight_targets": 2}})

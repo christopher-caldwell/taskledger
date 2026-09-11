@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -215,7 +217,7 @@ class AppServerRuntime:
         try:
             response = await self._request("thread/read", {"threadId": handle.thread_id, "includeTurns": True})
         except Exception as exc:
-            return RuntimeTurnInspection("UNKNOWN", error=str(exc))
+            return RuntimeTurnInspection("UNKNOWN", self._partial_turn_result(handle), str(exc))
         for turn in response.get("thread", {}).get("turns", []):
             if turn.get("id") != handle.turn_id:
                 continue
@@ -226,8 +228,17 @@ class AppServerRuntime:
                 return RuntimeTurnInspection("COMPLETED", self._turn_result(handle, turn))
             if status in {"failed", "error"}:
                 return RuntimeTurnInspection("FAILED", self._turn_result(handle, turn), self._error_text(turn.get("error")))
-            return RuntimeTurnInspection("UNKNOWN", error=f"unknown Codex turn status {status}")
-        return RuntimeTurnInspection("UNKNOWN", error="Codex thread did not contain the recorded turn")
+            return RuntimeTurnInspection(
+                "UNKNOWN", self._partial_turn_result(handle), f"unknown Codex turn status {status}"
+            )
+        return RuntimeTurnInspection(
+            "UNKNOWN", self._partial_turn_result(handle), "Codex thread did not contain the recorded turn"
+        )
+
+    def _partial_turn_result(self, handle: RuntimeTurnHandle) -> RuntimeTurnResult | None:
+        if handle.turn_id not in self.turn_exact_usage:
+            return None
+        return self._turn_result(handle, {})
 
     def usage_events(self, handle: RuntimeTurnHandle) -> tuple[dict[str, Any], ...]:
         return ()
@@ -289,6 +300,7 @@ class AppServerRuntime:
         async with self.start_lock:
             if self.process and self.process.returncode is None:
                 return
+            mcp_disable_args = self._ambient_mcp_disable_args()
             self.process = await asyncio.create_subprocess_exec(
                 self.codex_executable, "app-server", "--stdio", "--strict-config",
                 "-c", "agents.enabled=false", "-c", "features.multi_agent_v2=false",
@@ -299,6 +311,7 @@ class AppServerRuntime:
                 "-c", "features.apps=false", "-c", "features.plugins=false",
                 "-c", "features.browser_use=false", "-c", "features.computer_use=false",
                 "-c", "features.image_generation=false", "-c", "features.goals=false",
+                *mcp_disable_args,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             self.reader_task = asyncio.create_task(self._read_messages())
@@ -308,6 +321,57 @@ class AppServerRuntime:
                 "capabilities": {"experimentalApi": True},
             })
             await self._notify("initialized", {})
+
+    def _ambient_mcp_disable_args(self) -> list[str]:
+        """Disable every inherited MCP server through Codex's public config CLI.
+
+        An empty-table override is merged with inherited tables by Codex and
+        therefore does not remove named servers. Codex 0.153.4 also replaces a
+        server table for a dotted command-line override, so an override that
+        contains only ``enabled=false`` loses the required transport. Rebuild
+        the minimum non-secret transport shape while disabling the server.
+        """
+        try:
+            result = subprocess.run(
+                [self.codex_executable, "mcp", "list", "--json"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            servers = json.loads(result.stdout)
+            if not isinstance(servers, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]
+                for item in servers
+            ):
+                raise ValueError("invalid MCP inventory")
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError("Codex MCP configuration inventory is unavailable") from exc
+        args: list[str] = []
+        for item in sorted(servers, key=lambda row: row["name"]):
+            name = item["name"]
+            if re.fullmatch(r"[A-Za-z0-9_-]+", name) is None:
+                raise RuntimeError("Codex MCP configuration contains a server name that cannot be safely overridden")
+            transport = item.get("transport")
+            if not isinstance(transport, dict):
+                raise RuntimeError("Codex MCP configuration contains an invalid transport")
+            transport_type = transport.get("type")
+            if transport_type == "stdio":
+                if not isinstance(transport.get("command"), str):
+                    raise RuntimeError("Codex MCP stdio configuration is invalid")
+                fields = [
+                    f"command={json.dumps(sys.executable)}",
+                    f"args={json.dumps(['-c', 'pass'], separators=(',', ':'))}",
+                ]
+            elif transport_type == "streamable_http":
+                if not isinstance(transport.get("url"), str):
+                    raise RuntimeError("Codex MCP HTTP configuration is invalid")
+                fields = [f"url={json.dumps('http://127.0.0.1:9/taskledger-disabled')}"]
+            else:
+                raise RuntimeError("Codex MCP configuration uses an unsupported transport")
+            fields.append("enabled=false")
+            args.extend(["-c", f"mcp_servers.{name}=" + "{" + ",".join(fields) + "}"])
+        return args
 
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.process or not self.process.stdin:
@@ -605,7 +669,12 @@ class AppServerRuntime:
             usage = observed
             precision = UsagePrecision.PARTIAL_OBSERVATION
         return RuntimeTurnResult(
-            handle, structured, text, usage, precision == UsagePrecision.MISSING, precision,
+            handle,
+            structured,
+            text,
+            usage,
+            precision in {UsagePrecision.MISSING, UsagePrecision.PARTIAL_OBSERVATION},
+            precision,
             before, after, len(self.turn_exact_response_ids.get(handle.turn_id, ())),
         )
 

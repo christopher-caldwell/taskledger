@@ -434,7 +434,12 @@ class Supervisor:
                 self.journal.fail_turn(local_id, inspection.error or str(exc), uncertain=False, result=inspection.result)
                 return TurnExecution(TurnExecutionState.KNOWN_FAILED, local_id, error=inspection.error or str(exc))
             else:
-                self.journal.fail_turn(local_id, inspection.error or str(exc), uncertain=True)
+                self.journal.fail_turn(
+                    local_id,
+                    inspection.error or str(exc),
+                    uncertain=True,
+                    result=inspection.result,
+                )
                 return TurnExecution(TurnExecutionState.UNCERTAIN, local_id, error=inspection.error or str(exc))
         self.journal.record_usage_events(local_id, self.runtime.usage_events(result.handle))
         self.journal.complete_turn(local_id, result)

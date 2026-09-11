@@ -391,6 +391,9 @@ These tests should be run continuously in CI/local development. They should cons
 | **NC-242** | P2 | Historical stability | Identical inputs and cutoff | Reports and normalized comparisons are structurally identical. |
 | **NC-243** | P2 | Comparison | Matched synthetic measurements and unavailable valuation | Raw deltas are deterministic and monetary comparison is unavailable. |
 | **NC-244** | P1 | Comparison | Incomplete cheap run or mismatched complete runs | Differences and confounders are explicit; no unsupported winner is declared. |
+| **NC-245** | P0 | Project lifecycle | Real-ledger early stop, automatic continuation, rejection, same-thread correction, acceptance, integration, final verification, plus unsatisfied-final negative | The complete production-controller chain succeeds, while a valid unsatisfied final result prevents false completion. |
+| **NC-246** | P0 | Scheduler | Event-controlled independent worker/reviewer pipeline through real Taskledger and Git | Review A is observed at the fake runtime before unresolved worker B is released; worker/reviewer limits remain independent and own-worker review overlap is forbidden. |
+| **NC-247** | P0 | Evidence | Paid validation raises after known usage while provider enrichment is unavailable | A compact external artifact survives fixture cleanup with original failure, IDs, usage, controller events, and local report; enrichment failure cannot replace it. |
 
 ## No-Codex destructive/fault-injection matrix
 

@@ -9,9 +9,9 @@ the final section.
 
 | Environment | PASSING | IMPLEMENTED | PLANNED | DEFERRED | NOT_APPLICABLE | Total |
 |---|---:|---:|---:|---:|---:|---:|
-| No Codex (`NC`) | 147 | 69 | 28 | 0 | 0 | 244 |
+| No Codex (`NC`) | 151 | 68 | 28 | 0 | 0 | 247 |
 | Live Codex (`CX`) | 15 | 72 | 6 | 31 | 0 | 124 |
-| **All cases** | **162** | **141** | **34** | **31** | **0** | **368** |
+| **All cases** | **166** | **140** | **34** | **31** | **0** | **371** |
 
 `PASSING` means the required result is exercised by the current automated
 suite. A broad test may cover several adjacent cases. `IMPLEMENTED` means the
@@ -22,7 +22,7 @@ runs, benchmarks, and upgrade checks.
 
 ## No Codex cases
 
-The following 147 cases are passing:
+The following 151 cases are passing:
 
 - NC-001 through NC-006
 - NC-010 through NC-012
@@ -43,7 +43,7 @@ The following 147 cases are passing:
 - NC-180 through NC-182
 - NC-191 through NC-224
 - NC-225 through NC-234
-- NC-236, NC-238, NC-242 through NC-244
+- NC-236, NC-238, NC-240, NC-242 through NC-247
 
 Coverage is supplied by `tests/test_controller.py`,
 `tests/test_project_controller.py`, and the real Taskledger disposable Git
@@ -63,9 +63,11 @@ performance thresholds:
 All other NC cases are implemented but do not yet have exact attributable
 coverage. This includes several crash windows whose fail-closed behavior is
 covered at a neighboring boundary but not at the exact process kill point.
-For the benchmark-readiness additions, NC-235, NC-237, and NC-239 through
-NC-241 are `IMPLEMENTED`; their exact historical-revision and disposable
-sentinel fixtures remain outstanding.
+For the benchmark-readiness additions, NC-235, NC-237, NC-239, and NC-241 are
+`IMPLEMENTED`; their exact historical-revision or broader identity fixtures
+remain outstanding. NC-240 now has an executable inherited-MCP sentinel at
+both start and resume. NC-245 through NC-247 are the narrowly approved R1/R2
+release-gate fixtures.
 
 ## Live Codex cases
 
@@ -106,22 +108,39 @@ The following 31 cases are deferred:
   explicit user authorization before model spend.
 - CX-109 through CX-111: runtime upgrade compatibility is run when evaluating
   a specific new Codex version.
-- CX-121 through CX-124: the bounded readiness live sweep and its non-model
-  comparison remain opt-in validation; no Equipment Lending run is authorized.
+- CX-121 through CX-124 retain their literal inventory status. The approved
+  experiment-readiness bar moved CX-119/CX-123's timing-dependent
+  worker/reviewer overlap proof to deterministic causal case NC-246; it did not
+  retroactively turn the earlier failed live assertion into a pass. Equipment
+  Lending remains separately authorized and was not run.
 
 ## Latest execution
 
-The benchmark-readiness default suite passed 124 non-live methods and skipped
-the eight explicitly opt-in live methods (132 discovered total) in 79.865
-seconds. The bounded live sweep used `gpt-5.6-luna` at `low` effort and passed
-seven of eight methods in 160.622 seconds. The two-task project completed, but
-its CX-123 predecessor assertion did not observe a worker turn overlapping a
-reviewer turn, so CX-099, CX-103, and CX-118 through CX-120 are not marked
-passing in this snapshot.
+The final default suite passed 131 non-live methods and skipped the eight paid
+methods plus one zero-model sentinel (140 discovered total) in 85.589 seconds.
+The sentinel then passed separately with
+`TASKLEDGER_ZERO_MODEL_CODEX=1`. The three new deterministic gate methods are
+`test_r1a_project_continuation_rejection_correction_and_completion`,
+`test_r1a_unsatisfied_final_requirement_prevents_empty_queue_completion`, and
+`test_r1b_review_starts_before_independent_worker_is_released`; the causal case
+also passed five repeated executions during flake checking.
+
+The new bounded live method used `gpt-5.6-luna` at `low` effort. Its first
+attempt disconnected before provider dispatch and recorded zero turns. The one
+predeclared corrected attempt completed the actual project in six turns and
+retained a complete report, but the method errored in a secondary passive
+observer assertion because the callback looked up identity through the journal
+at the wrong boundary. Both validation artifacts therefore honestly retain
+`FAILED`; no CX inventory case is promoted solely from this method. The
+retained report nevertheless supplies the separately approved R3 experiment
+gate evidence: project state `COMPLETED`, two successful integrations, two
+accepted independent submission reviews, one final review, six complete usage
+allocations, and one progressing early stop followed by one automatic active
+continuation on the same external thread.
 
 The following table is the prior successful baseline sweep retained as
-historical provenance; it is not the accounting total for the latest partially
-reported validation run.
+historical provenance; it is not the accounting total for the new retained
+six-turn validation attempt.
 
 | Live case group | Turns | Input | Cached input | Cache-write input | Output | Reasoning |
 |---|---:|---:|---:|---:|---:|---:|

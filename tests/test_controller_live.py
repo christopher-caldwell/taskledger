@@ -8,9 +8,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from taskledger.controller.benchmark import SCHEMA_VERSION, compare_measurements, normalize_measurement
 from taskledger.controller.app_server import AppServerRuntime
 from taskledger.controller.model import SessionRole, UsagePrecision
 from taskledger.controller.reporting import controller_report
+from tests.live_evidence import EvidenceRuntime, LiveEvidence
 
 
 LIVE = os.environ.get("TASKLEDGER_LIVE_CODEX") == "1"
@@ -381,8 +383,8 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                 service.con.close()
             fixture.tearDown()
 
-    async def test_cx099_cx103_cx118_cx119_cx120_live_multi_task_project(self):
-        """Budget: four Luna/low worker turns and five total reviewer turns."""
+    async def test_r3_live_project_automatic_same_thread_continuation(self):
+        """Budget: three worker and three reviewer turns; six total."""
         from tests.test_acceptance import TaskledgerAcceptance
         from taskledger.controller.journal import Journal
         from taskledger.controller.project import ProjectController, ProjectControllerConfig, validate_execution_policy
@@ -393,18 +395,29 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
         fixture = TaskledgerAcceptance("test_version_flag_returns_installed_version")
         fixture.setUp()
         runtime = None
+        underlying_runtime = None
+        evidence = None
+        run_id = None
         service = None
         try:
             project_id = fixture.init()
             agents = fixture.root / ".codex" / "agents"
             agents.mkdir(parents=True, exist_ok=True)
             profile = f'model = "{LIVE_MODEL}"\nmodel_reasoning_effort = "{LIVE_EFFORT}"\n'
-            for name in (
-                "taskledger-worker-routine.toml",
-                "taskledger-worker-complex.toml",
-                "taskledger-reviewer.toml",
-                "taskledger-task-creator.toml",
-            ):
+            (agents / "taskledger-worker-routine.toml").write_text(profile)
+            (agents / "taskledger-worker-complex.toml").write_text(
+                profile
+                + "developer_instructions = "
+                + json.dumps(
+                    "This profile is used only by disposable task A. On your first turn, create and commit "
+                    "a.txt with meaningful but intentionally incomplete draft content, then end the turn "
+                    "normally without submitting and without opening a blocker. On the next turn, replace "
+                    "a.txt so it contains exactly alpha, commit it, and submit through the provided "
+                    "assignment-scoped Taskledger worker tool. Do not perform both stages in one turn."
+                )
+                + "\n"
+            )
+            for name in ("taskledger-reviewer.toml", "taskledger-task-creator.toml"):
                 (agents / name).write_text(profile)
             fixture.git("add", ".codex/agents")
             fixture.git("commit", "-qm", "configure disposable project agents")
@@ -426,14 +439,14 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
             project, orchestrator = service.auth_orchestrator(project_id, None)
             task_ids = applied["data"]["task_ids"]
             targets = validate_execution_policy(service, project, [
-                {"task_id": task_ids["t-a"], "wave": 1, "worker_profile": "routine", "parallel_safe": True, "write_surfaces": ["a.txt"]},
+                {"task_id": task_ids["t-a"], "wave": 1, "worker_profile": "complex", "parallel_safe": True, "write_surfaces": ["a.txt"]},
                 {"task_id": task_ids["t-b"], "wave": 1, "worker_profile": "routine", "parallel_safe": True, "write_surfaces": ["b.txt"]},
             ])
             config = ProjectControllerConfig(
                 max_workers=2,
                 max_reviewers=1,
-                max_total_worker_turns=4,
-                max_total_reviewer_turns=5,
+                max_total_worker_turns=3,
+                max_total_reviewer_turns=3,
                 reviewer_token_reserve=150_000,
                 max_final_reviewer_turns=1,
                 max_task_creator_turns=1,
@@ -446,7 +459,7 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             journal = Journal(service.con, fixture.home)
-            runtime = AppServerRuntime(repository_root=str(fixture.root), worker_tools={})
+            underlying_runtime = AppServerRuntime(repository_root=str(fixture.root), worker_tools={})
             _, plan_fingerprint, _ = service.plan_current(project_id)
             manifest = {
                 "canonical_starting_oid": subprocess.run(
@@ -457,14 +470,79 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                 "execution_policy_hash": hashlib.sha256(json.dumps(targets, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                 "controller_configuration_hash": hashlib.sha256(json.dumps(config.as_dict(), sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                 "taskledger_schema_version": 7,
-                "codex_protocol_identity": runtime.protocol_identity,
+                "codex_protocol_identity": underlying_runtime.protocol_identity,
                 "scope": "POST_APPROVAL_EXECUTION",
             }
+            evidence_dir = Path(os.environ.get(
+                "TASKLEDGER_LIVE_EVIDENCE_DIR",
+                str(Path(__file__).parents[1] / ".taskledger-validation-evidence" / "benchmark-readiness"),
+            ))
+            evidence = LiveEvidence(
+                directory=evidence_dir,
+                validation_id="r3-live-controller-continuation",
+                source_root=Path(__file__).parents[1],
+                model=LIVE_MODEL,
+                effort=LIVE_EFFORT,
+                configuration={
+                    "limits": config.as_dict(),
+                    "execution_policy_hash": manifest["execution_policy_hash"],
+                    "controller_configuration_hash": manifest["controller_configuration_hash"],
+                    "protocol_identity": underlying_runtime.protocol_identity,
+                    "global_validation_cap": {
+                        "paid_turns": 14,
+                        "admission_tokens": 1_200_000,
+                        "elapsed_seconds": 600,
+                        "corrected_reruns": 1,
+                    },
+                },
+            )
+            first_a_boundary = {}
+
+            def observe_result(turn_result, runtime_subject):
+                if runtime_subject.get("role") != "WORKER":
+                    return
+                assignment = service.con.execute(
+                    "SELECT * FROM assignments WHERE id=?", (runtime_subject.get("subject_id"),)
+                ).fetchone()
+                if not assignment or assignment["task_id"] != task_ids["t-a"] or first_a_boundary:
+                    return
+                worktree = Path(assignment["worktree_path"])
+                first_a_boundary.update({
+                    "provider_completed_normally": True,
+                    "assignment_state": assignment["state"],
+                    "file_content": (worktree / "a.txt").read_text() if (worktree / "a.txt").is_file() else None,
+                    "head_oid": subprocess.run(
+                        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+                        check=True, capture_output=True, text=True,
+                    ).stdout.strip(),
+                    "base_oid": assignment["base_commit_oid"],
+                    "submission_count": service.con.execute(
+                        "SELECT COUNT(*) FROM submissions WHERE assignment_id=?", (assignment["id"],)
+                    ).fetchone()[0],
+                    "blocker_count": service.con.execute(
+                        "SELECT COUNT(*) FROM blockers WHERE assignment_id=? AND state='OPEN'", (assignment["id"],)
+                    ).fetchone()[0],
+                })
+
+            runtime = EvidenceRuntime(underlying_runtime, evidence, on_result=observe_result)
             run_id = journal.create_project_run(project_id, config={"limits": config.as_dict(), "manifest": manifest}, targets=targets)
+            print("TASKLEDGER_PAID_VALIDATION_LIMITS " + json.dumps({
+                "method": "test_r3_live_project_automatic_same_thread_continuation",
+                "model": LIVE_MODEL,
+                "effort": LIVE_EFFORT,
+                "per_attempt": {"worker_turns": 3, "reviewer_turns": 3, "total_turns": 6, "admission_tokens": 600_000, "elapsed_seconds": 300},
+                "global": {"paid_turns": 14, "admission_tokens": 1_200_000, "elapsed_seconds": 600, "corrected_reruns": 1},
+            }, sort_keys=True))
             result = await ProjectController(
                 service=service, project=project, orchestrator=orchestrator, run_id=run_id,
                 runtime=runtime, journal=journal, config=config,
             ).run()
+            await evidence.finalize(
+                con=service.con,
+                run_id=run_id,
+                outcome=result.status,
+                provider_loader=underlying_runtime.provider_history,
+            )
             self.assertEqual(result.status, "COMPLETED", result)
             self.assertEqual((fixture.root / "a.txt").read_text().strip(), "alpha")
             self.assertEqual((fixture.root / "b.txt").read_text().strip(), "beta")
@@ -472,29 +550,55 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT lifecycle FROM projects WHERE id=?", (project_id,)
             ).fetchone()[0], "COMPLETED")
 
+            assignment_a = service.con.execute(
+                "SELECT id FROM assignments WHERE task_id=?", (task_ids["t-a"],)
+            ).fetchone()[0]
+            worker_session_a = service.con.execute(
+                "SELECT id,external_thread_id FROM controller_sessions WHERE run_id=? AND role='WORKER' AND subject_id=?",
+                (run_id, assignment_a),
+            ).fetchone()
+            worker_turns_a = list(service.con.execute(
+                "SELECT * FROM controller_turns WHERE session_id=? ORDER BY sequence", (worker_session_a["id"],),
+            ))
+            self.assertEqual(len(worker_turns_a), 2)
+            self.assertEqual([row["state"] for row in worker_turns_a], ["COMPLETED", "COMPLETED"])
+            self.assertEqual([row["dispatch_reason"] for row in worker_turns_a], ["INITIAL_WORK", "ACTIVE_CONTINUATION"])
+            self.assertEqual(len({row["external_turn_id"] for row in worker_turns_a}), 2)
+            self.assertGreater(worker_turns_a[0]["static_assignment_bytes"], 0)
+            self.assertEqual(worker_turns_a[1]["static_assignment_bytes"], 0)
+            self.assertLess(worker_turns_a[1]["controller_payload_bytes"], worker_turns_a[0]["controller_payload_bytes"])
+            self.assertEqual(first_a_boundary["provider_completed_normally"], True)
+            self.assertEqual(first_a_boundary["assignment_state"], "ACTIVE")
+            self.assertNotEqual(first_a_boundary["head_oid"], first_a_boundary["base_oid"])
+            self.assertNotEqual((first_a_boundary["file_content"] or "").strip(), "alpha")
+            self.assertEqual(first_a_boundary["submission_count"], 0)
+            self.assertEqual(first_a_boundary["blocker_count"], 0)
             worker_turns = list(service.con.execute(
-                "SELECT t.started_at,t.finished_at FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id "
+                "SELECT t.started_at,t.finished_at,s.subject_id FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id "
                 "WHERE s.run_id=? AND s.role='WORKER' ORDER BY t.started_at", (run_id,),
             ))
-            self.assertEqual(len(worker_turns), 2)
-            self.assertLess(worker_turns[1]["started_at"], worker_turns[0]["finished_at"])
+            self.assertEqual(len(worker_turns), 3)
             reviewer_turns = list(service.con.execute(
                 "SELECT t.started_at,t.finished_at FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id "
                 "WHERE s.run_id=? AND s.role='REVIEWER' ORDER BY t.started_at", (run_id,),
             ))
             self.assertEqual(len(reviewer_turns), 2)
             self.assertGreaterEqual(reviewer_turns[1]["started_at"], reviewer_turns[0]["finished_at"])
-            self.assertTrue(any(
+            natural_overlap = any(
                 worker["started_at"] < reviewer["finished_at"] and reviewer["started_at"] < worker["finished_at"]
                 for worker in worker_turns for reviewer in reviewer_turns
-            ), "expected an independent worker turn to overlap a submission-review turn")
+            )
+            print("TASKLEDGER_LIVE_CONCURRENCY_DIAGNOSTIC " + json.dumps({
+                "natural_worker_reviewer_overlap_observed": natural_overlap,
+                "timing_dependent_gate": False,
+            }, sort_keys=True))
 
             rows = list(service.con.execute(
                 "SELECT s.role,s.profile,s.runtime_identity_json,t.external_turn_id,t.input_tokens,t.cached_input_tokens,t.cache_write_input_tokens,t.output_tokens,t.reasoning_tokens,t.usage_precision,t.exact_response_count,t.usage_missing "
                 "FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? ORDER BY t.started_at,t.id",
                 (run_id,),
             ))
-            self.assertEqual(len(rows), 5)
+            self.assertEqual(len(rows), 6)
             self.assertFalse(any(row["usage_missing"] for row in rows))
             reviewer_identities = [
                 json.loads(row["runtime_identity_json"])
@@ -509,7 +613,7 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
             for row in rows:
                 identity = json.loads(row["runtime_identity_json"])
                 print("TASKLEDGER_LIVE_USAGE " + json.dumps({
-                    "case": "live-multi-task-project", "role": row["role"], "profile": row["profile"],
+                    "case": "r3-live-controller-continuation", "role": row["role"], "profile": row["profile"],
                     "model": identity["model"], "effort": identity["effort"], "turn_id": row["external_turn_id"],
                     "input_tokens": row["input_tokens"], "cached_input_tokens": row["cached_input_tokens"],
                     "cache_write_input_tokens": row["cache_write_input_tokens"],
@@ -519,18 +623,46 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                 }, sort_keys=True))
             async def forbidden_start_turn(**kwargs):
                 raise AssertionError("reporting attempted to start a model turn")
-            runtime.start_turn = forbidden_start_turn
+            underlying_runtime.start_turn = forbidden_start_turn
             report_one = await controller_report(
-                service.con, run_id, include_provider_detail=True, provider_loader=runtime.provider_history,
+                service.con, run_id, include_provider_detail=True, provider_loader=underlying_runtime.provider_history,
             )
             report_two = await controller_report(
-                service.con, run_id, include_provider_detail=True, provider_loader=runtime.provider_history,
+                service.con, run_id, include_provider_detail=True, provider_loader=underlying_runtime.provider_history,
             )
             self.assertEqual(report_one, report_two)
             self.assertEqual(report_one["quality"]["provider_detail"]["status"], "AVAILABLE")
             self.assertTrue(report_one["quality"]["provider_detail"]["complete"])
             self.assertEqual(report_one["architecture_invariants"]["nested_agent_calls"], 0)
             self.assertEqual(report_one["architecture_invariants"]["subagent_activity"], 0)
+            totals = report_one["economics"]["totals"]
+            live_measurement = normalize_measurement({
+                "schema_version": SCHEMA_VERSION,
+                "outcome": "COMPLETED_VERIFIED",
+                "accounting": "COMPLETE",
+                "provenance": {"source": "r3 retained live report"},
+                "workload_identity": "r3-two-file-continuation-v1",
+                "starting_code_identity": manifest["canonical_starting_oid"],
+                "review_standard": "independent-submission-and-final-review-v1",
+                "measurement_scope": "POST_APPROVAL_EXECUTION",
+                "role_configuration_identity": manifest["controller_configuration_hash"],
+                "usage": {key: totals[key] for key in (
+                    "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+                    "output_tokens", "reasoning_tokens",
+                )},
+            })
+            synthetic = {
+                **live_measurement,
+                "outcome": "INCOMPLETE",
+                "accounting": "PARTIAL_MISSING",
+                "provenance": {"source": "synthetic incomplete comparison fixture"},
+            }
+            comparison_one = compare_measurements(live_measurement, synthetic)
+            comparison_two = compare_measurements(live_measurement, synthetic)
+            self.assertEqual(comparison_one, comparison_two)
+            self.assertIsNone(comparison_one["winner"])
+            self.assertEqual(comparison_one["left"]["outcome"], "COMPLETED_VERIFIED")
+            self.assertEqual(comparison_one["left"]["accounting"], "COMPLETE")
             table_names = {row[0] for row in service.con.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )}
@@ -568,12 +700,24 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                 "scheduler": report_one["scheduler"],
                 "architecture_invariants": report_one["architecture_invariants"],
             }, sort_keys=True))
+        except BaseException as exc:
+            if evidence is not None:
+                await evidence.finalize(
+                    con=service.con if service is not None else None,
+                    run_id=run_id,
+                    outcome="FAILED",
+                    failure=exc,
+                    provider_loader=underlying_runtime.provider_history if underlying_runtime is not None else None,
+                )
+            raise
         finally:
             if runtime is not None:
                 await runtime.close()
             if service is not None:
                 service.con.close()
             fixture.tearDown()
+            if evidence is not None:
+                LiveEvidence.print_rollup(evidence.directory)
 
 
 if __name__ == "__main__":

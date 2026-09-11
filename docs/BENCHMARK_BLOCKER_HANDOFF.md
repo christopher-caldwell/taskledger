@@ -159,3 +159,71 @@ Return a short investigation report containing:
 If implementation is justified, make the smallest scoped change on this branch,
 run the non live suite, preserve all live evidence even on failure, and stop
 before Equipment Lending.
+
+## Resolution under the approved experimental release bar
+
+The user subsequently approved a narrower four-gate confidence pass for one
+representative experiment. This changes the evidence required before that
+experiment, not the production guarantees or the historical inventory result:
+
+- scheduler concurrency and rejection/correction are proved causally with the
+  production controller, real Taskledger/Git, and an event-controlled external
+  runtime;
+- real Codex is required to prove automatic same-thread continuation and the
+  provider integration, but worker/reviewer overlap no longer depends on live
+  response timing;
+- earlier AC-1 through AC-8 fixtures and all 368 original inventory cases are
+  not required to be closed for this experimental release;
+- the earlier live overlap failure remains failed and is not rewritten as a
+  pass.
+
+The scheduler investigation confirmed that each selected target owns its own
+assignment supervisor, worker and reviewer semaphores are independent, and the
+outer gather is only the next-wave barrier. The original blocker was therefore
+a fixture/evidence-retention defect, not a scheduler barrier. NC-246 now holds
+worker B at an observed runtime dispatch, lets worker A submit, and requires
+review A to reach the runtime before B is released. It fails under a bounded
+timeout if review waits for B.
+
+The confidence pass also found two narrow production defects:
+
+1. an unresolved adapter inspection could discard already observed partial
+   usage; terminal UNKNOWN/FAILED reconciliation now carries that observation
+   while semantic uncertainty remains fail-closed;
+2. project-wide worker/reviewer turn caps were correctly checked at paid
+   admission but were also checked by the non-spending global lifecycle gate,
+   which could pause after the last permitted worker turn before integration or
+   final review. The duplicate global checks were removed; the admission checks
+   remain.
+
+An executable MCP sentinel exposed a Codex 0.153.4 command-line overlay detail:
+an `enabled=false` dotted override replaces the named server table and loses
+its required transport. Taskledger now inventories servers with the public
+`codex mcp list --json` command, reconstructs only the minimum non-secret
+transport in each disabled override, and fails closed on invalid or unsupported
+inventory. The disabled override uses a harmless non-secret placeholder
+transport rather than copying configured arguments, URLs, or environment. The
+sentinel passes on both start and resume, and a zero-model check
+against the installed six-server inventory reported zero running servers.
+
+Paid validation was capped before dispatch at two attempts total, fourteen
+turns, 1,200,000 admission tokens, and 600 seconds. Attempt
+`310da87f35224f4ca75acb2c3bed93f6` disconnected before any provider turn and
+retains zero usage. The one corrected attempt,
+`93135489878d4cb09b5ae6a3073443d4`, completed the controller project in six
+turns with complete provider reconciliation: 325,490 input, 232,448 cached
+input (already included in input), 0 cache-write input, 3,443 output, and 673
+reasoning tokens; admission usage was 328,933. Its test wrapper then failed on
+a secondary observer key that the callback had not populated. The artifact
+truthfully remains `FAILED`, while its retained report records `COMPLETED`, two
+successful integrations, two accepted independent submission reviews, final
+review, and requirement completion. Provider-history diagnostics, performed
+without starting a turn, confirmed two completed turns on one worker thread,
+distinct turn IDs, prompt sizes of 2,088 then 397 serialized bytes, no immutable
+assignment markers in the second prompt, and separate successful partial and
+completion commit commands. The callback is repaired for future validation;
+the paid allowance was not reset and no third run was made.
+
+The retained local artifacts are under
+`.taskledger-validation-evidence/benchmark-readiness/` and are intentionally
+gitignored. `BENCHMARK_READINESS_REPORT.md` contains the final R1-R4 decision.

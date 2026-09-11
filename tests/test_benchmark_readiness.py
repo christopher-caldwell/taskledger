@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
 from taskledger.controller.benchmark import SCHEMA_VERSION, compare_measurements, normalize_measurement
 from taskledger.controller.app_server import AppServerRuntime
+from taskledger.controller.fakes import FakeLedger, FakeRuntime, TurnScript, accepted_verdict
 from taskledger.controller.journal import Journal
-from taskledger.controller.model import RuntimeTurnHandle, RuntimeTurnResult, SessionRole, Usage, UsagePrecision
+from taskledger.controller.model import PauseReason, RuntimeTurnHandle, RuntimeTurnResult, SessionRole, Usage, UsagePrecision
 from taskledger.controller.reporting import controller_report
+from taskledger.controller.supervisor import Supervisor, SupervisorConfig
 from taskledger.core import now
 from taskledger.db import connect, transaction
+from tests.live_evidence import EvidenceRuntime, LiveEvidence
 
 
 def measurement(**changes):
@@ -77,6 +81,78 @@ class BenchmarkReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.journal.missing_usage_count(run_id=run), 1)
         self.assertEqual((await controller_report(self.con, run, include_provider_detail=False))["quality"]["accounting_complete"], False)
 
+    async def test_r2a_supervisor_accounts_failed_retry_and_blocks_partial_uncertainty(self):
+        run = self.journal.create_run("p", mode="ASSIGNMENT", config={})
+        ledger = FakeLedger()
+        runtime = FakeRuntime(
+            worker_turns=[
+                TurnScript(effect=ledger.progress, usage=Usage(1000, 600, 80)),
+                TurnScript(failure="failed after model work", usage=Usage(400, 100, 20)),
+                TurnScript(effect=ledger.submit, usage=Usage(600, 300, 50)),
+            ],
+            reviewer_turns=[TurnScript(structured_output=accepted_verdict())],
+        )
+        result = await Supervisor(
+            project_id="p",
+            run_id=run,
+            ledger=ledger,
+            runtime=runtime,
+            journal=self.journal,
+            config=SupervisorConfig(max_worker_turns=4, max_total_tokens=10_000),
+        ).run_assignment("a1")
+        self.assertEqual(result.status.value, "INTEGRATED")
+        self.assertEqual(self.journal.usage(run_id=run), Usage(2000, 1000, 150))
+        failed = self.con.execute(
+            "SELECT t.id,s.external_thread_id,t.external_turn_id,t.input_tokens,t.output_tokens "
+            "FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id "
+            "WHERE s.run_id=? AND t.state='FAILED'",
+            (run,),
+        ).fetchone()
+        replay = RuntimeTurnResult(
+            RuntimeTurnHandle(failed["external_thread_id"], failed["external_turn_id"]),
+            usage=Usage(400, 100, 20),
+            usage_precision=UsagePrecision.THREAD_TOTAL_DELTA,
+        )
+        self.journal.reconcile_usage(failed["id"], replay)
+        self.journal.reconcile_usage(failed["id"], replay)
+        report = await controller_report(self.con, run, include_provider_detail=False)
+        self.assertEqual(report["economics"]["totals"]["admission_tokens"], 2150)
+        self.assertEqual(report["economics"]["by_outcome"]["FAILED"]["input_tokens"], 400)
+        for dimension in ("by_model", "by_role", "by_dispatch_reason", "by_outcome", "by_accounting_class"):
+            for field in ("turn_count", "input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_tokens"):
+                self.assertEqual(
+                    sum(bucket[field] for bucket in report["economics"][dimension].values()),
+                    report["economics"]["totals"][field],
+                )
+
+        uncertain_run = self.journal.create_run("p", mode="ASSIGNMENT", config={})
+        uncertain_ledger = FakeLedger()
+        uncertain_runtime = FakeRuntime(
+            worker_turns=[TurnScript(uncertain=True, usage=Usage(40, 10, 2), usage_missing=True)],
+            reviewer_turns=[],
+        )
+        uncertain = await Supervisor(
+            project_id="p",
+            run_id=uncertain_run,
+            ledger=uncertain_ledger,
+            runtime=uncertain_runtime,
+            journal=self.journal,
+            config=SupervisorConfig(max_total_tokens=100),
+        ).run_assignment("a1")
+        self.assertEqual(uncertain.pause_reason, PauseReason.RUNTIME_UNCERTAIN)
+        self.assertEqual(self.journal.usage(run_id=uncertain_run), Usage(40, 10, 2))
+        self.assertEqual(self.journal.missing_usage_count(run_id=uncertain_run), 1)
+        second = await Supervisor(
+            project_id="p",
+            run_id=uncertain_run,
+            ledger=uncertain_ledger,
+            runtime=uncertain_runtime,
+            journal=self.journal,
+            config=SupervisorConfig(max_total_tokens=100),
+        ).run_assignment("a1")
+        self.assertEqual(second.pause_reason, PauseReason.RUNTIME_UNCERTAIN)
+        self.assertEqual(uncertain_runtime.turns_started, 1)
+
     async def test_nc229_nc231_breakdowns_reconcile_for_every_dimension(self):
         run, session = self._run_and_session()
         local = self.journal.begin_turn(session.id, "worker")
@@ -105,6 +181,22 @@ class BenchmarkReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inspection.result.usage, Usage(400, 100, 20, 5))
         self.assertEqual(inspection.result.usage_precision, UsagePrecision.THREAD_TOTAL_DELTA)
 
+    async def test_r2a_unknown_adapter_inspection_retains_partial_usage(self):
+        class ScriptedRuntime(AppServerRuntime):
+            async def _ensure_started(self):
+                return None
+
+            async def _request(self, method, params):
+                raise RuntimeError("connection lost")
+
+        runtime = ScriptedRuntime(repository_root=str(self.home), experimental_raw_events=True)
+        runtime.turn_exact_usage["turn"] = Usage(40, 10, 2, 1)
+        inspection = await runtime.inspect_turn(RuntimeTurnHandle("thread", "turn"))
+        self.assertEqual(inspection.state, "UNKNOWN")
+        self.assertEqual(inspection.result.usage, Usage(40, 10, 2, 1))
+        self.assertTrue(inspection.result.usage_missing)
+        self.assertEqual(inspection.result.usage_precision, UsagePrecision.PARTIAL_OBSERVATION)
+
     async def test_nc227_partial_then_final_reconciliation_is_idempotent(self):
         run, session = self._run_and_session()
         local = self.journal.begin_turn(session.id, "worker")
@@ -119,6 +211,81 @@ class BenchmarkReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.journal.usage(run_id=run), Usage(140, 30, 12, 3))
         self.assertEqual(self.journal.missing_usage_count(run_id=run), 0)
         self.assertEqual(self.con.execute("SELECT state FROM controller_turns WHERE id=?", (local,)).fetchone()[0], "COMPLETED")
+
+    async def test_r2b_live_evidence_survives_assertion_and_enrichment_failure(self):
+        with tempfile.TemporaryDirectory() as outer:
+            evidence_dir = Path(outer) / "evidence"
+            disposable = Path(outer) / "disposable"
+            disposable.mkdir()
+            evidence = LiveEvidence(
+                directory=evidence_dir,
+                validation_id="r2b-failure",
+                source_root=Path(__file__).parents[1],
+                model="fake-luna",
+                effort="low",
+                configuration={"max_turns": 1},
+                attempt_id="attempt",
+            )
+            run, session = self._run_and_session()
+            local = self.journal.begin_turn(session.id, "worker")
+            handle = RuntimeTurnHandle("thread", "turn-known")
+            self.journal.acknowledge_turn(local, handle)
+            result = RuntimeTurnResult(
+                handle,
+                usage=Usage(100, 20, 10, 2),
+                usage_precision=UsagePrecision.THREAD_TOTAL_DELTA,
+            )
+            self.journal.complete_turn(local, result)
+            evidence.session(role="WORKER", subject_id="a", thread_id="thread", resumed=False)
+            evidence.turn_started(thread_id="thread", turn_id="turn-known")
+            evidence.turn_result(result, outcome="COMPLETED")
+            original = AssertionError("intentional post-usage assertion")
+
+            async def unavailable(_thread):
+                raise RuntimeError("provider enrichment unavailable")
+
+            await evidence.finalize(
+                con=self.con,
+                run_id=run,
+                outcome="FAILED",
+                failure=original,
+                provider_loader=unavailable,
+            )
+            shutil.rmtree(disposable)
+            retained = json.loads(evidence.path.read_text())
+            self.assertEqual(retained["failure"]["message"], str(original))
+            self.assertEqual(retained["sessions"][0]["session_id"], session.id)
+            self.assertEqual(retained["usage_allocations"][0]["input_tokens"], 100)
+            self.assertEqual(retained["report"]["economics"]["totals"]["admission_tokens"], 110)
+            self.assertEqual(retained["report"]["quality"]["provider_detail"]["status"], "UNAVAILABLE")
+
+    async def test_r2b_evidence_observer_uses_acknowledged_runtime_identity(self):
+        with tempfile.TemporaryDirectory() as outer:
+            evidence = LiveEvidence(
+                directory=Path(outer) / "evidence",
+                validation_id="r2b-observer",
+                source_root=Path(__file__).parents[1],
+                model="fake-luna",
+                effort="low",
+                configuration={"max_turns": 1},
+                attempt_id="observer",
+            )
+            observed = []
+            runtime = EvidenceRuntime(
+                FakeRuntime(worker_turns=[TurnScript()], reviewer_turns=[]),
+                evidence,
+                on_result=lambda _result, identity: observed.append(dict(identity)),
+            )
+            session = await runtime.start_session(
+                role=SessionRole.WORKER,
+                profile="routine",
+                subject_id="assignment-a",
+                cwd=outer,
+                writable=True,
+            )
+            handle = await runtime.start_turn(thread_id=session.thread_id, prompt="bounded")
+            await runtime.wait_turn(handle)
+            self.assertEqual(observed, [{"role": "WORKER", "subject_id": "assignment-a"}])
 
     async def test_nc232_nc235_fixed_clock_pause_utilization_and_open_wait(self):
         run = self.journal.create_run("p", mode="PROJECT", config={"limits": {"max_workers": 2, "max_reviewers": 1}})
