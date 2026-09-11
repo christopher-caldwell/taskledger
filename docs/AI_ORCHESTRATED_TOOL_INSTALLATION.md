@@ -1,9 +1,10 @@
-# Installing Taskledger as an AI Orchestrated Tool
+# Installing Taskledger as a Python-Orchestrated Tool
 
 This document explains the exact Taskledger installation, including the local
 command, Codex instructions, plugin package, worker profiles, and project state.
-It is written for a model building a similar tool whose operations will be
-planned, invoked, and reviewed by another model.
+It is written for a developer building a similar tool whose semantic planning,
+implementation, and review jobs are bounded while executable code owns the
+workflow.
 
 ## Installation is a set of contracts
 
@@ -13,9 +14,9 @@ together:
 | Surface | Source | Installed location | Responsibility |
 | --- | --- | --- | --- |
 | Python CLI | `src/taskledger/` and `pyproject.toml` | Active Python environment or `uv` tool environment | Owns validation, durable state, credentials, Git operations, and JSON responses |
-| Codex skill | `skills/taskledger/` | `${CODEX_HOME:-$HOME/.codex}/skills/taskledger/` | Tells the primary model when and how to call the CLI |
+| Codex skill | `skills/taskledger/` | `${CODEX_HOME:-$HOME/.codex}/skills/taskledger/` | Describes the approval phase and controller-facing workflow |
 | Plugin package | `.codex-plugin/plugin.json` plus `skills/` | A local marketplace plugin source, currently `$HOME/plugins/taskledger/` | Makes the skill installable and visible through Codex plugin management |
-| Worker profiles | `skills/taskledger/assets/*.toml` | `<managed-repository>/.codex/agents/` | Defines the named implementation agents that the primary may launch |
+| Agent profiles | `skills/taskledger/assets/*.toml` | `<managed-repository>/.codex/agents/` | Defines bounded Task Creator, worker, and Reviewer identities used by the Python controller |
 | Project state | Created by `taskledger project init` | `<managed-repository>/.taskledger/` | Stores the ledger, credentials, worktrees, receipts, artifacts, and exports |
 
 The CLI is the authority. The skill and profiles are model guidance. The plugin
@@ -197,9 +198,9 @@ The plugin path is optional for a tool distributed only as a direct skill. For a
 marketplace plugin, it is the preferred user installation surface. Do not list
 an MCP server or app in `plugin.json` unless its companion manifest exists.
 
-## 5. Install worker profiles per managed repository
+## 5. Install agent profiles per managed repository
 
-Taskledger deliberately does not overwrite worker profiles during a global
+Taskledger deliberately does not overwrite agent profiles during a global
 refresh. Each consuming repository owns its model choices and local additions.
 
 For a new managed repository:
@@ -212,6 +213,8 @@ cp "${CODEX_HOME:-$HOME/.codex}/skills/taskledger/assets/taskledger-worker-compl
   /absolute/path/to/managed-repository/.codex/agents/taskledger-worker-complex.toml
 cp "${CODEX_HOME:-$HOME/.codex}/skills/taskledger/assets/taskledger-reviewer.toml" \
   /absolute/path/to/managed-repository/.codex/agents/taskledger-reviewer.toml
+cp "${CODEX_HOME:-$HOME/.codex}/skills/taskledger/assets/taskledger-task-creator.toml" \
+  /absolute/path/to/managed-repository/.codex/agents/taskledger-task-creator.toml
 ```
 
 For an existing repository, compare and merge the templates. Preserve the stable
@@ -264,19 +267,20 @@ codex plugin list
 python3 -m unittest -v
 ```
 
-Also inspect one consuming repository and confirm that both named profile files
+Also inspect one consuming repository and confirm that all four named profile files
 exist. In a new Codex thread, ask the model to identify the Taskledger skill and
 run read only project discovery. Do not use a state changing command as the first
 plugin smoke test.
 
-## Blueprint for a similar AI orchestrated tool
+## Blueprint for a similar model-assisted tool
 
 Use the same separation when building another tool:
 
 1. Put authority in a deterministic program with strict input validation,
    stable machine responses, scoped credentials, and durable state.
-2. Put orchestration policy in a skill. State when the model may mutate data,
-   what requires human approval, and which output is evidence versus a claim.
+2. Put semantic planning and approval guidance in a skill. Keep dispatch,
+   continuation, waiting, capacity, retry, and recovery policy in executable
+   code.
 3. Put delegated roles in named profiles. Give each role the minimum authority
    and enough persisted context to start without inherited chat history.
 4. Wrap the skill, MCP servers, or apps in a valid plugin manifest. Declare only
@@ -289,6 +293,6 @@ Use the same separation when building another tool:
    metadata, skill metadata, plugin version, profile version, and state schema can
    drift even when one smoke test passes.
 
-The model that installs such a tool should report each surface it changed, the
-exact verification result, and any surface intentionally left for a consuming
-repository to customize.
+The installer should report each surface it changed, the exact verification
+result, and any surface intentionally left for a consuming repository to
+customize.

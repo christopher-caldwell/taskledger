@@ -1,8 +1,8 @@
 # Task Ledger Supervisor — Exhaustive Test Plan
 
-**Status:** design/verification plan
+**Status:** current acceptance backlog
 **Date:** 2026-09-10
-**Scope:** deterministic Task Ledger supervisor + future Codex runtime adapter
+**Scope:** deterministic Task Ledger assignment supervisor, project controller, and Codex app-server adapter
 **Inventory:** **190 no-Codex cases + 111 live-Codex cases = 301 total cases**
 
 This plan is intended to be exhaustive against the current supervisor design and the failure surfaces already identified. It is a living verification document: cases may be split into more granular tests as implementation reveals new boundaries, but a case should not be removed unless its invariant is deliberately retired.
@@ -74,7 +74,10 @@ Same as E1, with targeted process kills, monkey-patched Git/SQLite failures, fil
 
 ### E3 — Minimal live Codex smoke
 
-Disposable repository and tiny tasks specifically constructed to verify SDK/runtime contracts: authentication, thread persistence, resume, output schemas, sandboxing, usage telemetry, and crash/reconnect behavior. Keep prompts/tasks tiny to minimize paid usage.
+Disposable repository and tiny tasks specifically constructed to verify Codex
+app server contracts: authentication, thread persistence, resume, output
+schemas, sandboxing, usage telemetry, and crash/reconnect behavior. Keep
+prompts/tasks tiny to minimize paid usage.
 
 ### E4 — Live representative benchmark
 
@@ -278,7 +281,7 @@ These tests should be run continuously in CI/local development. They should cons
 | **NC-147** | P2 | TaskLedgerPolicy | Cleanup after successful project completion | Only safety-checked clean finalized worktrees removed; branches/commits retained. |
 | **NC-148** | P2 | TaskLedgerPolicy | Cleanup sees dirty/locked/mismatched worktree | Skips and reports it rather than force-deleting. |
 
-## A7. Future scheduling, pools, waves, and parallel safety
+## A7. Project scheduling, pools, waves, and parallel safety
 
 | ID | Pri | Layer | Test case | Required result |
 |---|---|---|---|---|
@@ -378,20 +381,30 @@ After every generated step assert INV-01 through INV-25 where applicable. Especi
 
 These tests validate the runtime boundary that fakes cannot prove. They should be intentionally few in routine CI because they consume model usage, but the inventory is broad so every supported live behavior has an explicit acceptance case.
 
-Current Codex Python SDK behavior assumed by this plan must itself be verified during E3: threads are persistent conversation state, turns are individual model executions, threads can be resumed by ID, `AsyncCodex` supports concurrent active turns, turns accept `output_schema`, sandbox can be selected per thread/turn, and turn results expose usage telemetry including cached input. Treat these as external contracts, not internal guarantees.
+Current Codex app server behavior assumed by this plan must itself be verified
+during E3: threads are persistent conversation state, turns are individual model
+executions, threads can be resumed by ID, one stdio client can route concurrent
+turn events by exact thread and turn IDs, turns accept `outputSchema`, sandbox
+policy can be selected per thread and turn, and
+`thread/tokenUsage/updated.tokenUsage.last` reports the latest upstream response
+while `tokenUsage.total` is cumulative thread usage. A tool using turn may emit
+several response local updates, which must be deduplicated and summed within the
+exact turn. Treat these as external contracts, not internal guarantees. The
+controller stores the resolved Codex CLI version and its own protocol identity
+with every session.
 
-## B1. SDK, authentication, version, and model preflight
+## B1. App server, authentication, version, and model preflight
 
 | ID | Pri | Layer | Test case | Required result |
 |---|---|---|---|---|
-| **CX-001** | P0 | SDK/Auth | Instantiate supported Codex SDK/runtime with existing ChatGPT/Codex login | Client initializes and account is usable without interactive surprise during an unattended turn. |
-| **CX-002** | P1 | SDK/Auth | No existing authentication | Supervisor fails preflight or enters explicit authentication-needed state before dispatch. |
-| **CX-003** | P1 | SDK/Auth | Expired/revoked auth between turns | Current turn/session error is classified; no duplicate dispatch or false task failure. |
-| **CX-004** | P1 | SDK/Auth | SDK runtime version incompatible with required feature set | Preflight rejects before model usage. |
-| **CX-005** | P1 | SDK/Auth | Configured model no longer available | Preflight/model-list validation fails with clear profile mapping error. |
-| **CX-006** | P1 | SDK/Auth | Configured reasoning effort unsupported by selected model | Fail preflight or surface deterministic runtime error; no silent substitution. |
-| **CX-007** | P2 | SDK/Auth | Codex runtime executable missing/corrupted | Supervisor fails before ledger assignment mutation or model turn. |
-| **CX-008** | P2 | SDK/Auth | SDK/client closes gracefully | No orphan controller ownership; active external turn state remains recoverable. |
+| **CX-001** | P0 | Runtime/Auth | Start the supported Codex app server with existing ChatGPT/Codex login | Client initializes and account is usable without interactive surprise during an unattended turn. |
+| **CX-002** | P1 | Runtime/Auth | No existing authentication | Supervisor fails preflight or enters explicit authentication-needed state before dispatch. |
+| **CX-003** | P1 | Runtime/Auth | Expired/revoked auth between turns | Current turn/session error is classified; no duplicate dispatch or false task failure. |
+| **CX-004** | P1 | Runtime/Auth | App server protocol version incompatible with required feature set | Preflight rejects before model usage. |
+| **CX-005** | P1 | Runtime/Auth | Configured model no longer available | Preflight/model-list validation fails with clear profile mapping error. |
+| **CX-006** | P1 | Runtime/Auth | Configured reasoning effort unsupported by selected model | Fail preflight or surface deterministic runtime error; no silent substitution. |
+| **CX-007** | P2 | Runtime/Auth | Codex runtime executable missing/corrupted | Supervisor fails before ledger assignment mutation or model turn. |
+| **CX-008** | P2 | Runtime/Auth | App server client closes gracefully | No orphan controller ownership; active external turn state remains recoverable. |
 
 ## B2. Thread/session lifecycle and bounded context
 
@@ -433,8 +446,8 @@ Current Codex Python SDK behavior assumed by this plan must itself be verified d
 
 | ID | Pri | Layer | Test case | Required result |
 |---|---|---|---|---|
-| **CX-035** | P0 | Reviewer | Reviewer turn uses output_schema and returns valid exact verdict | SDK returns structured result accepted by parser; Task Ledger applies once. |
-| **CX-036** | P0 | Reviewer | Reviewer omits criterion despite output_schema | Parser catches semantic coverage gap even if schema accepts structure. |
+| **CX-035** | P0 | Reviewer | Reviewer turn uses `outputSchema` and returns valid exact verdict | App server returns structured result accepted by parser; Task Ledger applies once. |
+| **CX-036** | P0 | Reviewer | Reviewer omits criterion despite `outputSchema` | Parser catches semantic coverage gap even if schema accepts structure. |
 | **CX-037** | P0 | Reviewer | Reviewer tries to ACCEPT when provided failed required-check evidence | Structured result is rejected/procedurally barred. |
 | **CX-038** | P1 | Reviewer | Reviewer returns no final response/structured output | Bounded continuation/retry occurs; no inferred acceptance. |
 | **CX-039** | P1 | Reviewer | Reviewer gives prose plus malformed structured result | Only structured contract is authoritative. |
@@ -485,7 +498,7 @@ Current Codex Python SDK behavior assumed by this plan must itself be verified d
 
 | ID | Pri | Layer | Test case | Required result |
 |---|---|---|---|---|
-| **CX-072** | P0 | Concurrency | Two worker turns run concurrently through one AsyncCodex client | Events/results route to correct thread/turn IDs; no cross-contamination. |
+| **CX-072** | P0 | Concurrency | Two worker turns run concurrently through one app server client | Events/results route to correct thread/turn IDs; no cross-contamination. |
 | **CX-073** | P0 | Concurrency | One reviewer runs while two independent workers run | Three active operations remain correctly routed within configured capacity. |
 | **CX-074** | P1 | Concurrency | Worker A finishes while Worker B remains running | Only A slot frees; B remains attached to its turn. |
 | **CX-075** | P1 | Concurrency | Reviewer finishes while workers run | Verdict applies to correct submission; worker state unaffected. |
@@ -532,8 +545,8 @@ Current Codex Python SDK behavior assumed by this plan must itself be verified d
 | **CX-106** | P1 | Benchmark | Compare fresh-per-assignment vs long-lived-pool thread strategies | Use same tasks/model/effort where possible; select strategy by completed-work cost and correctness, not cache ratio alone. |
 | **CX-107** | P1 | Benchmark | Compare max_workers=1 vs max_workers=2 | Measure wall-clock improvement, usage change, conflicts/rework, and reviewer bottleneck. |
 | **CX-108** | P1 | Benchmark | Quality regression comparison against current Task Ledger primary-orchestrator run | Supervisor version must preserve or improve acceptance/architecture correctness at materially lower cost. |
-| **CX-109** | P2 | Upgrade | Upgrade Codex SDK/runtime one compatible version | Run compatibility smoke suite before enabling production; state/journal remains readable. |
-| **CX-110** | P2 | Upgrade | SDK changes TurnResult/usage/output-schema behavior | Contract tests fail visibly; no silent accounting/review degradation. |
+| **CX-109** | P2 | Upgrade | Upgrade Codex CLI/app server one compatible version | Run compatibility smoke suite before enabling production; state/journal remains readable. |
+| **CX-110** | P2 | Upgrade | App server changes turn, usage, or output schema behavior | Contract tests fail visibly; no silent accounting/review degradation. |
 | **CX-111** | P2 | Upgrade | Configured model aliases/version change | Resolved model is recorded and benchmark baselines remain attributable. |
 
 ## Live-Codex cost-control protocol
@@ -541,7 +554,7 @@ Current Codex Python SDK behavior assumed by this plan must itself be verified d
 Live tests exist to verify external contracts, not to rediscover deterministic bugs expensively. Apply these rules:
 
 1. **No E3/E4 test until its corresponding E0/E1/E2 logic is green.**
-2. Use tiny disposable tasks for SDK/thread/sandbox/recovery tests.
+2. Use tiny disposable tasks for app server, thread, sandbox, and recovery tests.
 3. Before every paid test, record the expected maximum number of worker and reviewer turns.
 4. Refuse admission when the test would exceed its explicit live-turn budget.
 5. Persist raw usage fields per turn before computing any credit-equivalent estimate.
@@ -557,7 +570,7 @@ The persistent-thread question should be decided by data. Use one fixed workload
 - **S2 — same thread for the entire assignment + corrections** (current default candidate);
 - **S3 — persistent role worker across multiple unrelated assignments**;
 - **S4 — periodic rollover after N assignments/tokens**;
-- **S5 — forked seed thread**, only if the SDK behavior remains supported and useful.
+- **S5 — forked seed thread**, only if app server behavior remains supported and useful.
 
 For each strategy collect:
 
@@ -613,7 +626,10 @@ Required: real early stop -> automatic continuation -> submission -> review -> c
 
 ## Gate 4 — Parallel scheduler
 
-Only after single-assignment crash behavior is proven. Enable max_workers=2 / max_reviewers=1 and pass all scheduler/concurrency P0 cases.
+The project scheduler is implemented with `max_workers=2` and
+`max_reviewers=1` defaults. Gate 4 closes only when the scheduler and
+concurrency P0 cases are explicitly passing; implementation alone does not
+close the gate.
 
 ## Gate 5 — Representative project benchmark
 
@@ -627,8 +643,23 @@ All P0 and P1 cases applicable to shipped features pass. Remaining P2 failures a
 
 Any production incident, unexpected model stop behavior, duplicate dispatch, stale verdict, bad integration, token-accounting anomaly, or manual intervention that was not represented by an existing test must produce a new deterministic reproduction if technically possible. The new test should fail before the fix and remain permanently in the suite.
 
-# Current prototype coverage
+# Coverage status
 
-The v2 prototype's existing 19 tests cover only a small subset of this plan—primarily NC supervisor/reviewer/journal cases using E0. Passing them proves the controller idea is testable; it does **not** prove the real Task Ledger adapter or Codex boundary.
+This inventory is an acceptance backlog, not a claim of test coverage. Every
+case must have one of these statuses:
 
-The next implementation target remains: **real Task Ledger adapter + fake runtime**, with the no-Codex P0 cases above acting as the acceptance backlog.
+- `passing`: an automated test directly exercises the required result and is
+  green in the current run;
+- `implemented`: the production path exists, but the exact inventory case has
+  not yet passed as a dedicated test;
+- `planned`: the case remains in the backlog and its required fixture or
+  behavior is not complete;
+- `deferred`: the case is intentionally postponed with a stated reason;
+- `not applicable`: the shipped architecture makes the case impossible, with
+  the replacement contract named.
+
+The checked in coverage snapshot is maintained in
+[`CONTROLLER_TEST_COVERAGE.md`](CONTROLLER_TEST_COVERAGE.md). Its counts must
+sum to all 301 cases. Live cases stay `implemented` or `deferred` until an
+opt-in run records an actual passing result. The E4 representative benchmark is
+always deferred until the user explicitly authorizes that spend.

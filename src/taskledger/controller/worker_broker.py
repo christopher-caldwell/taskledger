@@ -49,7 +49,7 @@ class WorkerBroker:
             request = json.loads(raw)
             if not isinstance(request, dict) or set(request) != {"action", "data"} or not isinstance(request["data"], dict):
                 raise LedgerError("INVALID_REQUEST", "Worker broker request is invalid.")
-            result = self._dispatch(request["action"], request["data"])
+            result = await asyncio.to_thread(self.dispatch, request["action"], request["data"])
             response = {"ok": True, "data": result}
         except LedgerError as exc:
             response = {"ok": False, "error": {"code": exc.code, "message": exc.message, "details": exc.details}}
@@ -60,24 +60,34 @@ class WorkerBroker:
         writer.close()
         await writer.wait_closed()
 
-    def _dispatch(self, action: str, data: dict[str, Any]) -> dict[str, Any]:
-        project, _ = self.service.worker_assignment(self.principal)
+    def _dispatch(self, action: str, data: dict[str, Any], *, service=None) -> dict[str, Any]:
+        service = service or self.service
+        project, _ = service.worker_assignment(self.principal)
         methods = {
-            "context": lambda: self.service.worker_context(self.principal, data),
-            "check": lambda: self.service.worker_check(self.principal, data),
-            "checkpoint": lambda: self.service.worker_checkpoint(self.principal, data),
-            "artifact-register": lambda: self.service.register_artifact(project, self.principal, data, worker=True),
-            "question": lambda: self.service.worker_question(self.principal, data),
-            "blocker": lambda: self.service.blocker_create(project, self.principal, data, worker=True),
-            "follow-up": lambda: self.service.worker_followup(self.principal, data),
-            "submit": lambda: self.service.worker_submit(self.principal, data),
+            "context": lambda: service.worker_context(self.principal, data),
+            "check": lambda: service.worker_check(self.principal, data),
+            "checkpoint": lambda: service.worker_checkpoint(self.principal, data),
+            "artifact-register": lambda: service.register_artifact(project, self.principal, data, worker=True),
+            "question": lambda: service.worker_question(self.principal, data),
+            "blocker": lambda: service.blocker_create(project, self.principal, data, worker=True),
+            "follow-up": lambda: service.worker_followup(self.principal, data),
+            "submit": lambda: service.worker_submit(self.principal, data),
         }
         if action not in methods:
             raise LedgerError("AUTHORIZATION_DENIED", "Worker broker action is not allowed.")
         return methods[action]()
 
     def dispatch(self, action: str, data: dict[str, Any]) -> dict[str, Any]:
-        return self._dispatch(action, data)
+        if not hasattr(self.service, "home") or not hasattr(self.service, "con"):
+            return self._dispatch(action, data)
+        from taskledger.db import connect
+        from taskledger.service import Service
+
+        isolated = Service(connect(self.service.home), self.service.home)
+        try:
+            return self._dispatch(action, data, service=isolated)
+        finally:
+            isolated.con.close()
 
 
 def request(socket_path: str, action: str, data: dict[str, Any]) -> dict[str, Any]:

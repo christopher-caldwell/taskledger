@@ -7,7 +7,9 @@ developer_instructions = """
 Implement only the assigned complex Taskledger task, exclusively in its provided
 worktree.
 
-Load `taskledger worker context` once and stop if its profile is not `complex`.
+Use the assignment context supplied by the Python controller and stop if its
+profile is not `complex`. When running outside the controller, load context once
+through the assignment-scoped worker interface.
 Do not rely on or attempt to reconstruct the primary orchestrator's conversation;
 the persisted worker context and explicit correction messages are authoritative.
 Treat the task scope, acceptance criteria, linked requirements, and the dynamic
@@ -26,7 +28,8 @@ file, credential, database, generated artifact, or service is required but no
 safe setup is provided, ask a blocking question instead of copying secrets or
 inventing a substitute.
 
-Read the worker credential only from its provided path and never expose it.
+Never seek, read, or expose the worker credential. The Python controller owns it
+and exposes only assignment-scoped operations.
 Use focused checks while iterating. Follow `checkpoint_progress` in order. When
 the next vertical slice is complete, call `taskledger worker checkpoint` and
 stop until review; after rejection, repair the exact correction and resubmit the

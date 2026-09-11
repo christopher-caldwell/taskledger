@@ -1,8 +1,9 @@
 # Taskledger
 
-Taskledger is a local execution ledger for long-running coding-agent work. A
-strong primary agent plans, routes, and reviews the work; lower-cost workers
-implement bounded assignments; Taskledger records the approved plan, isolated
+Taskledger is a local execution ledger for long running coding agent work. A
+bounded Task Creator prepares the semantic plan, a foreground Python controller
+operates it, workers implement bounded assignments, and independent reviewers
+judge immutable submissions. Taskledger records the approved plan, isolated
 worktrees, submissions, verification, integration, blockers, and recovery state.
 
 Use it when a change is too large or important to trust to one uninterrupted
@@ -27,29 +28,36 @@ or real durable-recovery value.
 specification
     │
     ▼
-primary agent plans ──► you approve the plan and execution wave
+bounded Task Creator plans ──► you approve the plan and execution policy
     │
     ▼
-Taskledger creates scoped assignments and isolated Git worktrees
+Python controller schedules eligible Taskledger assignments
     │
     ├──► routine worker (preferred for fully specified work)
     └──► complex worker (when meaningful judgment remains)
     │
     ▼
-primary agent independently reviews the exact submitted commit
+bounded reviewer independently judges the exact submitted commit
     │
     ▼
-Taskledger records verification, integration, and requirement completion
+controller applies Taskledger verification and guarded integration
+    │
+    ▼
+bounded final review verifies requirements before project completion
 ```
 
-Taskledger is the durable record and safety boundary. It does **not** generate a
-plan, choose a model, decide whether code is correct, or replace the primary
-agent's review.
+Taskledger is the durable authority and safety boundary. Models provide bounded
+planning, implementation, and review. They do not operate the project loop.
+Python derives mechanical readiness from approved policy and current ledger
+state; it does not invent semantic routing or decide that code is correct.
 
-An experimental foreground controller can supervise one existing isolated
-assignment. It persists Codex thread and turn identities, continues ordinary
-early model stops, runs independent checks and review, and pauses when an
-external result cannot be proven. Live execution requires explicit opt in.
+The foreground project controller persists Codex thread and turn identities,
+continues ordinary early model stops, enforces dependencies, waves, declared
+write surfaces, worker and reviewer capacity, runs independent checks and
+review, integrates accepted work, and performs bounded final requirement
+review. It pauses when an external result cannot be proven. Live execution
+requires explicit opt in. The single assignment supervisor remains available
+as the execution primitive below the project controller.
 
 Controller process state lives in separate tables in the project Taskledger
 database. Domain changes still use the existing service methods. Worker model
@@ -66,11 +74,11 @@ For the standalone CLI:
 - Git 2.20 or later
 - a non-bare Git repository with a named branch
 
-For the complete routed-agent or controller workflow, you also need:
+For the complete controller workflow, you also need:
 
 - a local Codex surface that supports skills and custom agents;
-- one primary/orchestrator model, two named worker profiles, and the bundled
-  `taskledger-reviewer.toml` profile for controller review; and
+- the bounded Task Creator and reviewer profiles plus named routine and complex
+  worker profiles; and
 - permission to create Git worktrees and write `.taskledger/` inside the target
   repository.
 
@@ -127,7 +135,7 @@ The repository includes a Codex plugin manifest, but it is not currently
 published in a plugin marketplace. Installing the local skill directly is the
 supported setup path for now.
 
-### 3. Add the two worker profiles to your project
+### 3. Add the controller profiles to your project
 
 From the repository that Taskledger will manage:
 
@@ -137,31 +145,29 @@ cp ~/.codex/skills/taskledger/assets/taskledger-worker-routine.toml \
   .codex/agents/taskledger-worker-routine.toml
 cp ~/.codex/skills/taskledger/assets/taskledger-worker-complex.toml \
   .codex/agents/taskledger-worker-complex.toml
+cp ~/.codex/skills/taskledger/assets/taskledger-reviewer.toml \
+  .codex/agents/taskledger-reviewer.toml
+cp ~/.codex/skills/taskledger/assets/taskledger-task-creator.toml \
+  .codex/agents/taskledger-task-creator.toml
 ```
 
-The templates currently map routine work to Luna and complex work to Terra.
-Those mappings are defaults, not Taskledger requirements. Edit `model` and
+The templates use lower strength for routine work, medium strength for complex
+work, and high strength for bounded planning and review. Those mappings are
+defaults, not Taskledger requirements. Edit `model` and
 `model_reasoning_effort` in each file to match the models available to the
 consuming repository.
 
-Configure the stronger primary model and assignment concurrency in the target
-repository's `.codex/config.toml`:
+Configure Codex concurrency in the target repository's `.codex/config.toml`:
 
 ```toml
-model = "gpt-5.6-sol"
-model_reasoning_effort = "medium"
-
 [agents]
 enabled = true
 max_concurrent_threads_per_session = 1
 ```
 
-Taskledger does not require these exact model names. It requires the primary to
-be capable of decomposition and independent review, plus named `routine` and
-`complex` workers with the stable names in the templates. Start a new Codex task
-after installing or changing the skill or agent files. Medium is the recommended
-starting effort for a capable primary; raise it only when the specification or
-review boundary actually warrants more reasoning.
+Taskledger does not require exact model names. It requires the relative role
+strengths and stable profile names. Start a new Codex task after installing or
+changing the skill or agent files.
 
 ### One-command local refresh
 
@@ -208,8 +214,8 @@ Before the first Taskledger run:
 1. Make sure the repository has a named branch and a normal Git author identity.
 2. Add `.taskledger/` to the repository's `.gitignore` and commit that change if
    necessary.
-3. Install the two worker profiles as described above.
-4. Put the specification in a file the primary agent can read.
+3. Install the four controller profiles as described above.
+4. Put the specification in a file the bounded Task Creator can read.
 5. Identify ignored local inputs workers need, such as `.env` files, database
    URLs/services, generated metadata, or certificates. Give the primary a safe
    read-only path or setup command; do not copy credentials into Git or prompts.
@@ -238,19 +244,21 @@ For a new or materially changed plan, Taskledger uses two approval gates:
 1. **Plan approval:** outcome, success criteria, scope, dependencies, task
    boundaries, assumptions, and proposed parallel work.
 2. **Execution approval:** exact branch and Git state, initialization and commit
-   actions, validation result, and the first assignment wave.
+   actions, validation result, and the complete execution policy.
 
-The primary runs the bounded preparation diagnostic, then creates only the
-approved assignments. Workers implement in scoped worktrees and submit through
-Taskledger; they do not integrate their own work. The primary independently
-checks the exact submitted commit before recording verification and integration.
+The Task Creator runs the bounded preparation diagnostic and durably
+materializes the approved plan and execution policy, then exits. The foreground
+Python controller creates eligible assignments. Workers implement in scoped
+worktrees and submit through Taskledger; they do not integrate their own work.
+Bounded reviewers inspect exact submissions. The controller validates their
+structured verdicts before invoking Taskledger verification and integration.
 
 Task definitions may include exact `required_checks`. Use task-focused checks
 for intermediate slices, put strict lint/generated-contract checks on the first
 slice that can break them, and reserve the complete cross-project suite for the
 integrated final audit. Workers execute each required command through Taskledger
 and attach the observed receipt; reported command/exit-code prose is not enough.
-The primary reruns each command through the reviewer path against the exact
+The controller reruns each command through the reviewer path against the exact
 submitted commit, and worker receipts cannot satisfy that obligation. For a larger new plan,
 `plan apply` creates a batch of requirements and tasks transactionally using
 short local references, reducing repetitive CLI traffic before `plan validate`.
@@ -259,9 +267,9 @@ To resume later, ask Codex to resume the existing Taskledger project. The ledger
 persists the approved plan and completed work; the chat transcript is not the
 source of truth.
 
-Small cohesive projects may keep one worker across ordered vertical slices by
+Small cohesive assignments may keep one worker across ordered checkpoints by
 creating a `lightweight` assignment with checkpoint criteria. Each checkpoint
-records an immutable commit and stops until the primary approves or rejects that
+records an immutable commit and stops until a bounded reviewer approves or rejects that
 exact commit. Final submission, independent review, integration, and requirement
 verification stay unchanged. Correction packets, checkpoint progression, and
 replacement-worker handoff state are returned by `worker context`.
@@ -323,11 +331,11 @@ frozen authority during implementation and should be changed only by a task that
 explicitly owns that exact specification edit. Consolidating maintained-spec
 updates into one final documentation reconciliation avoids repeated plan pauses.
 
-After the final implementation integration, the primary performs the integrated
-cross-task audit and complete quality suite directly. Do not create a generic
-“final hardening” worker whose main job is to review already integrated work;
-create narrowly scoped correction assignments only for defects the primary
-audit actually finds.
+After the final implementation integration, the controller dispatches a bounded
+high strength reviewer for the integrated cross task audit. Clear implementation
+defects go to a fresh bounded Task Creator job, which produces correction tasks.
+Product ambiguity pauses for the user. The final reviewer does not remain alive
+to operate later work.
 
 When approved behavior replaces an existing active requirement, use
 `requirement supersede`. It creates the replacement and retires the prior
@@ -344,6 +352,7 @@ Useful entry points:
 ```sh
 taskledger --version
 taskledger project init --repo /absolute/path/to/repository
+taskledger controller run-project --input approved-controller-run.json
 printf '{}\n' | taskledger project cleanup --input -
 ```
 

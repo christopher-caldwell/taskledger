@@ -13,9 +13,10 @@ A complete Codex installation has three independently maintained components:
 
 1. The `taskledger` Python CLI, which owns the ledger protocol and Git
    operations.
-2. The Taskledger Codex skill, which tells the primary agent how to plan,
-   approve, route, review, and recover work.
-3. Two custom worker profiles in every repository that will use routed workers.
+2. The Taskledger Codex skill, which guides the bounded Task Creator and human
+   approval phase.
+3. Task Creator, reviewer, routine worker, and complex worker profiles in every
+   repository that will use the controller.
 
 The default project state is stored in `<repository>/.taskledger/`. That
 directory contains the SQLite database, orchestrator and worker credentials,
@@ -36,10 +37,10 @@ For the standalone CLI:
 - Git 2.20 or later; and
 - a non-bare Git repository with a symbolic branch.
 
-For the routed Codex workflow, you also need a local Codex surface with skills
-and custom agents, permission to create Git worktrees, and suitable models for
-the primary, routine worker, and complex worker roles. Windows and WSL are not
-currently tested.
+For the Codex controller workflow, you also need a local Codex surface with
+skills and custom agents, permission to create Git worktrees, and suitable
+models for bounded planning, review, routine work, and complex work. Windows and
+WSL are not currently tested.
 
 ## Install from a source checkout
 
@@ -94,28 +95,26 @@ cp ~/.codex/skills/taskledger/assets/taskledger-worker-complex.toml \
   .codex/agents/taskledger-worker-complex.toml
 cp ~/.codex/skills/taskledger/assets/taskledger-reviewer.toml \
   .codex/agents/taskledger-reviewer.toml
+cp ~/.codex/skills/taskledger/assets/taskledger-task-creator.toml \
+  .codex/agents/taskledger-task-creator.toml
 ```
 
 The templates use Luna for routine work, Terra for complex work, and Astra for
-controller review. These are defaults, not protocol requirements. Edit `model` and
-`model_reasoning_effort` to models available in the consuming repository while
-preserving the profile names and Taskledger-specific instructions.
+bounded planning and review. These are defaults, not protocol requirements.
+Edit `model` and `model_reasoning_effort` to models available in the consuming
+repository while preserving the profile names and Taskledger instructions.
 
-Configure the primary model and assignment concurrency in the managed
-repository's `.codex/config.toml`. For example:
+Configure Codex concurrency in the managed repository's `.codex/config.toml`.
+For example:
 
 ```toml
-model = "gpt-5.6-sol"
-model_reasoning_effort = "medium"
-
 [agents]
 enabled = true
 max_concurrent_threads_per_session = 1
 ```
 
-The primary must be capable of decomposition and independent review. Increase
-concurrency only when the primary has confirmed that the assignments' likely
-write sets and behavioral assumptions are independent.
+The Task Creator makes semantic routing and concurrency decisions once. The
+Python controller enforces the approved policy with bounded runtime capacity.
 
 ### Contributor convenience install
 
@@ -144,7 +143,7 @@ git commit -m "Ignore Taskledger local state"
 
 If `.taskledger/` is already ignored, do not add a duplicate entry or commit.
 Also confirm that the repository has a symbolic branch, a usable Git author
-identity, the two worker profiles, and a written specification that Codex can
+identity, the four controller profiles, and a written specification that Codex can
 read. Identify any ignored inputs that worker checks need—such as `.env` files,
 local services, certificates, or generated metadata—and provide a safe setup
 command or read-only location. Never place credentials in Git or prompts.
@@ -173,10 +172,11 @@ revised plan, the skill stops at two gates:
    commit actions, validated ledger plan, worktree prerequisites, and the first
    assignment wave.
 
-The primary creates only the approved assignments. Workers implement in
-isolated worktrees and submit through Taskledger. The primary independently
-reviews and tests the exact submitted commit before recording verification and
-integration.
+The Task Creator durably materializes the approved requirements, tasks, checks,
+dependencies, routing, and concurrency policy, then exits. Start the foreground
+project controller with `controller run-project`. It creates eligible
+assignments, continues unfinished worker turns, dispatches bounded independent
+reviewers, and invokes Taskledger verification and integration.
 
 ### 3. Resume an existing project
 
@@ -195,9 +195,10 @@ operation must be reconciled.
 
 ### 4. Complete and clean up
 
-After every active requirement is verified and no task, review, blocker, or
-uncertain operation remains, the primary runs `project complete`. Completion
-records the canonical commit and removes clean, finalized assignment worktrees.
+After approved implementation work is integrated, the controller runs a bounded
+final review, records requirement verification through Taskledger, and invokes
+`project complete` only when existing completion gates pass. Completion records
+the canonical commit and removes clean, finalized assignment worktrees.
 Assignment branches, commits, integration records, and ledger history remain.
 
 Dirty, locked, mismatched, or otherwise unsafe worktrees are left untouched.
@@ -215,20 +216,21 @@ The normal lifecycle is:
 1. Discover or load the repository's ledger.
 2. Inspect the specification and Git state without mutation.
 3. Approve the plan.
-4. Approve initialization, materialization, and the first assignment wave.
+4. Approve initialization, materialization, and the complete execution policy.
 5. Route fully specified work to the routine profile and judgment-heavy work to
    the complex profile.
 6. Let each worker progress through declared vertical checkpoints and submit
    from its scoped assignment worktree.
-7. Have the primary independently inspect, run reviewer checks, verify, and integrate each
-   submission.
-8. Have the primary run the integrated final audit, verify requirements, and
-   complete the project.
+7. Let the Python controller run reviewer checks, dispatch bounded independent
+   reviewers, validate structured verdicts, and invoke verification and
+   integration.
+8. Let the controller dispatch the bounded integrated final review, verify
+   requirements, and complete the project.
 
 Do not manually move worker commits, delete assignment worktrees, resolve
-Taskledger merge conflicts, rotate credentials, or edit the database while an
-agent-run workflow is active. Let the primary follow the skill and command
-reference so that every state transition remains recorded.
+Taskledger merge conflicts, rotate credentials, or edit the database while a
+controller run is active. Let the controller and existing Taskledger service
+methods record every state transition.
 
 ### Lightweight checkpoint flow
 

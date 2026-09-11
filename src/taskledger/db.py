@@ -93,8 +93,8 @@ CREATE TABLE IF NOT EXISTS controller_run_targets(
  PRIMARY KEY(run_id,task_id));
 CREATE TABLE IF NOT EXISTS controller_sessions(
  id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES controller_runs(id),project_id TEXT NOT NULL REFERENCES projects(id),
- role TEXT NOT NULL CHECK(role IN ('WORKER','REVIEWER','REQUIREMENT_REVIEWER')),profile TEXT NOT NULL,subject_id TEXT NOT NULL,
- external_thread_id TEXT NOT NULL,config_hash TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('ACTIVE','CLOSED','UNCERTAIN')),
+ role TEXT NOT NULL CHECK(role IN ('TASK_CREATOR','WORKER','REVIEWER','REQUIREMENT_REVIEWER')),profile TEXT NOT NULL,subject_id TEXT NOT NULL,
+ external_thread_id TEXT NOT NULL,config_hash TEXT NOT NULL,runtime_identity_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('ACTIVE','CLOSED','UNCERTAIN')),
  created_at TEXT NOT NULL,closed_at TEXT);
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_controller_session ON controller_sessions(project_id,role,subject_id) WHERE state='ACTIVE';
 CREATE TABLE IF NOT EXISTS controller_turns(
@@ -102,7 +102,8 @@ CREATE TABLE IF NOT EXISTS controller_turns(
  state TEXT NOT NULL CHECK(state IN ('DISPATCHING','RUNNING','COMPLETED','FAILED','UNCERTAIN')),prompt_kind TEXT NOT NULL,
  external_turn_id TEXT,result_json TEXT,final_response TEXT,error TEXT,progress_before TEXT,progress_after TEXT,
  progressed INTEGER CHECK(progressed IN (0,1)),input_tokens INTEGER NOT NULL DEFAULT 0,cached_input_tokens INTEGER NOT NULL DEFAULT 0,
- output_tokens INTEGER NOT NULL DEFAULT 0,reasoning_tokens INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,finished_at TEXT,consumed_at TEXT,
+ output_tokens INTEGER NOT NULL DEFAULT 0,reasoning_tokens INTEGER NOT NULL DEFAULT 0,usage_missing INTEGER NOT NULL DEFAULT 0 CHECK(usage_missing IN (0,1)),
+ started_at TEXT NOT NULL,finished_at TEXT,consumed_at TEXT,
  UNIQUE(session_id,sequence));
 CREATE INDEX IF NOT EXISTS controller_turns_open ON controller_turns(state) WHERE state IN ('DISPATCHING','RUNNING','UNCERTAIN');
 CREATE INDEX IF NOT EXISTS controller_turns_unconsumed ON controller_turns(session_id,consumed_at) WHERE consumed_at IS NULL;
@@ -113,6 +114,10 @@ CREATE TABLE IF NOT EXISTS controller_usage_events(
 CREATE TABLE IF NOT EXISTS controller_budget_grants(
  id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES controller_runs(id),kind TEXT NOT NULL CHECK(kind IN ('WORKER_TURNS','REVIEWER_TURNS','TOKENS','ELAPSED_SECONDS')),
  amount INTEGER NOT NULL CHECK(amount>0),reason TEXT NOT NULL,granted_by_principal_id TEXT NOT NULL REFERENCES principals(id),created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS controller_final_reviews(
+ id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES controller_runs(id),canonical_oid TEXT NOT NULL,
+ plan_fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('PENDING','SATISFIED','DEFECTS','AMBIGUOUS','INVALID')),
+ verdict_json TEXT,created_at TEXT NOT NULL,resolved_at TEXT);
 """
 
 
@@ -143,6 +148,8 @@ def connect(home: Path) -> sqlite3.Connection:
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(3,?)", (now(),))
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(4,?)", (now(),))
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(5,?)", (now(),))
+        _migrate_controller_v6(con)
+        con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(6,?)", (now(),))
         return con
     except (OSError, sqlite3.Error) as exc:
         if con is not None:
@@ -152,6 +159,59 @@ def connect(home: Path) -> sqlite3.Connection:
             "Taskledger could not open this repository's local state.",
             details={"path": str(path), "reason": exc.__class__.__name__},
         )
+
+
+def _migrate_controller_v6(con: sqlite3.Connection) -> None:
+    """Add controller identity/usage fields and widen semantic session roles."""
+    session_columns = {row[1] for row in con.execute("PRAGMA table_info(controller_sessions)")}
+    turn_columns = {row[1] for row in con.execute("PRAGMA table_info(controller_turns)")}
+    if "runtime_identity_json" not in session_columns:
+        con.execute("ALTER TABLE controller_sessions ADD COLUMN runtime_identity_json TEXT NOT NULL DEFAULT '{}'")
+    if "usage_missing" not in turn_columns:
+        con.execute("ALTER TABLE controller_turns ADD COLUMN usage_missing INTEGER NOT NULL DEFAULT 0 CHECK(usage_missing IN (0,1))")
+    session_sql = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='controller_sessions'"
+    ).fetchone()[0]
+    if "TASK_CREATOR" not in session_sql:
+        con.execute("PRAGMA foreign_keys=OFF")
+        try:
+            con.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE controller_sessions_v6(
+                 id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES controller_runs(id),project_id TEXT NOT NULL REFERENCES projects(id),
+                 role TEXT NOT NULL CHECK(role IN ('TASK_CREATOR','WORKER','REVIEWER','REQUIREMENT_REVIEWER')),profile TEXT NOT NULL,subject_id TEXT NOT NULL,
+                 external_thread_id TEXT NOT NULL,config_hash TEXT NOT NULL,runtime_identity_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('ACTIVE','CLOSED','UNCERTAIN')),
+                 created_at TEXT NOT NULL,closed_at TEXT);
+                INSERT INTO controller_sessions_v6 SELECT id,run_id,project_id,role,profile,subject_id,external_thread_id,config_hash,runtime_identity_json,state,created_at,closed_at FROM controller_sessions;
+                CREATE TABLE controller_turns_v6(
+                 id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES controller_sessions_v6(id),sequence INTEGER NOT NULL,
+                 state TEXT NOT NULL CHECK(state IN ('DISPATCHING','RUNNING','COMPLETED','FAILED','UNCERTAIN')),prompt_kind TEXT NOT NULL,
+                 external_turn_id TEXT,result_json TEXT,final_response TEXT,error TEXT,progress_before TEXT,progress_after TEXT,
+                 progressed INTEGER CHECK(progressed IN (0,1)),input_tokens INTEGER NOT NULL DEFAULT 0,cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                 output_tokens INTEGER NOT NULL DEFAULT 0,reasoning_tokens INTEGER NOT NULL DEFAULT 0,usage_missing INTEGER NOT NULL DEFAULT 0 CHECK(usage_missing IN (0,1)),
+                 started_at TEXT NOT NULL,finished_at TEXT,consumed_at TEXT,UNIQUE(session_id,sequence));
+                INSERT INTO controller_turns_v6 SELECT id,session_id,sequence,state,prompt_kind,external_turn_id,result_json,final_response,error,progress_before,progress_after,progressed,input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,usage_missing,started_at,finished_at,consumed_at FROM controller_turns;
+                CREATE TABLE controller_usage_events_v6(
+                 id TEXT PRIMARY KEY,turn_id TEXT NOT NULL REFERENCES controller_turns_v6(id),external_event_id TEXT NOT NULL,raw_json TEXT NOT NULL,
+                 input_tokens INTEGER,cached_input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,created_at TEXT NOT NULL,UNIQUE(turn_id,external_event_id));
+                INSERT INTO controller_usage_events_v6 SELECT * FROM controller_usage_events;
+                DROP TABLE controller_usage_events;
+                DROP TABLE controller_turns;
+                DROP TABLE controller_sessions;
+                ALTER TABLE controller_sessions_v6 RENAME TO controller_sessions;
+                ALTER TABLE controller_turns_v6 RENAME TO controller_turns;
+                ALTER TABLE controller_usage_events_v6 RENAME TO controller_usage_events;
+                CREATE UNIQUE INDEX one_active_controller_session ON controller_sessions(project_id,role,subject_id) WHERE state='ACTIVE';
+                CREATE INDEX controller_turns_open ON controller_turns(state) WHERE state IN ('DISPATCHING','RUNNING','UNCERTAIN');
+                CREATE INDEX controller_turns_unconsumed ON controller_turns(session_id,consumed_at) WHERE consumed_at IS NULL;
+                COMMIT;
+            """)
+        except Exception:
+            if con.in_transaction:
+                con.rollback()
+            raise
+        finally:
+            con.execute("PRAGMA foreign_keys=ON")
 
 
 @contextlib.contextmanager

@@ -1,6 +1,6 @@
 # Taskledger Product Specification
 
-**Document status:** Final functional specification for technical design and implementation  
+**Document status:** Current functional specification for technical design and implementation
 **Product:** Taskledger  
 **Document authority:** This document defines required product behavior. The technical specification may select implementation details, but it must not weaken, omit, or expand the behaviors defined here.
 
@@ -8,9 +8,9 @@
 
 ## 1. Document Purpose
 
-Taskledger is a persistent execution ledger for an LLM-led software implementation effort that spans multiple independent model sessions and, when useful, multiple implementation workers.
+Taskledger is the durable authority for a software implementation effort operated by a local Python controller. Model sessions perform bounded planning, implementation, and review jobs. No model remains responsible for running the workflow.
 
-This document defines what Taskledger must do from the perspective of an orchestrator and its workers. It intentionally avoids prescribing a programming language, database, user interface, agent framework, hosting model, or deployment architecture.
+This document defines what Taskledger, the controller, the Task Creator, reviewers, and workers must do. The controller implementation is intentionally local and small: Python, SQLite, Git, and the Codex app server.
 
 Taskledger does not design or implement software. It records authoritative project state, validates structurally checkable rules, controls state transitions, preserves evidence, and prevents a project from being declared complete before its requirements have actually been verified and integrated.
 
@@ -18,21 +18,21 @@ Taskledger does not design or implement software. It records authoritative proje
 
 ## 2. Product Definition
 
-Taskledger allows an LLM orchestrator to take a large product specification through the following durable lifecycle:
+Taskledger allows an approved product specification to move through the following durable lifecycle:
 
 1. Register the product specification documents.
 2. Decompose those documents into atomic product requirements.
 3. Decompose implementation work into bounded executable tasks.
-4. validate requirement coverage and task dependencies.
-5. Assign eligible tasks to implementation workers.
+4. Validate requirement coverage, task dependencies, routing, and approved concurrency policy.
+5. Let the Python controller assign mechanically eligible tasks to implementation workers.
 6. Receive implementation submissions and supporting evidence.
-7. Independently verify each submission.
+7. Use bounded independent Reviewer jobs to verify each submission.
 8. Integrate accepted work into the project’s confirmed canonical working branch.
-9. Verify that the integrated result satisfies each requirement.
+9. Use a bounded final Reviewer job to verify the integrated result against each requirement.
 10. Recover the complete current state in a later session.
 11. Finish only after all required product behavior is verified and no blocking work remains.
 
-The LLM orchestrator supplies all semantic judgment. Taskledger supplies durable memory and deterministic enforcement.
+Bounded models supply semantic judgment. The Python controller owns scheduling, waiting, continuation, recovery, budgets, and routing. Taskledger supplies durable authority and deterministic transition rules.
 
 ---
 
@@ -64,7 +64,7 @@ Taskledger is not responsible for:
 - choosing task priorities;
 - deciding which tasks are safe to run in parallel;
 - semantically judging whether a requirement is atomic or implementation-independent;
-- semantically verifying implementation behavior without an orchestrator decision;
+- semantically verifying implementation behavior without a bounded Reviewer decision;
 - deploying software;
 - operating CI/CD pipelines;
 - replacing a source-code repository;
@@ -74,34 +74,29 @@ Taskledger is not responsible for:
 - generic workflow automation; or
 - securely sandboxing a malicious worker at the operating-system level.
 
+The controller is not a hosted service, distributed worker system, generic workflow engine, or general model framework. Cache policy may affect cost, but it never affects correctness.
+
 The product may coordinate Git operations needed for assignment and integration, but Git hosting, pull requests, deployment, and repository administration remain outside its scope.
 
 ---
 
 ## 5. Actors and Responsibilities
 
-### 5.1 Orchestrator
+### 5.1 User and approvals
 
-The orchestrator is the only actor permitted to make product and planning decisions.
+The user owns product decisions and approvals. Human input is required for product ambiguity, unresolved specification changes, blocking questions, uncertain external outcomes, unsupported configuration drift, and budget extensions. An ordinary model turn ending never requires human intervention.
 
-The orchestrator is responsible for:
+### 5.2 Task Creator
 
-- understanding registered specifications;
-- creating and revising requirements;
-- creating and revising tasks;
-- deciding dependency relationships;
-- selecting eligible tasks for assignment;
-- deciding whether assigned work remains valid after a task changes;
-- answering worker questions;
-- resolving blockers;
-- independently verifying submissions;
-- deciding whether specification changes affect existing requirements or tasks;
-- verifying final requirement satisfaction; and
-- requesting project completion.
+The Task Creator is a bounded strong model job. It reads the specification and produces or revises requirements, tasks, acceptance criteria, deterministic checks, dependencies, worker routing, execution waves, and declared write surfaces. It exits after the approved plan is durably materialized. It may be invoked again when final review finds an implementation defect that needs semantic decomposition. It does not schedule work or monitor execution.
 
-Only the orchestrator may accept or reject a submission, resolve a blocker, verify a requirement, change the canonical branch, or complete the project.
+### 5.3 Python controller
 
-### 5.2 Worker
+The controller is the orchestration engine. It derives mechanical readiness from current Taskledger state and the approved execution policy. It manages worker and reviewer capacity, dispatches or resumes exact assignment threads, continues active assignments after normal turn completion, enforces durable budgets, detects stalls, freezes submitted work, queues reviewers, routes rejections, honors escalation, invokes existing verification and integration operations, performs restart reconciliation, and requests completion only after final requirement verification.
+
+The controller does not invent product meaning, decide semantic parallel safety, fabricate reviewer conclusions, or resolve uncertain external outcomes by guesswork.
+
+### 5.4 Worker
 
 A worker performs bounded implementation work for one assignment.
 
@@ -130,7 +125,13 @@ A worker may not:
 
 A worker submission is evidence and a claim. It is never a completion decision.
 
-### 5.3 Taskledger
+Routine workers use the lowest practical configured model for constrained work. Complex workers use a medium strength configured model when architecture, integration, debugging, or shared state judgment remains. Each thread belongs to one assignment attempt. Correction turns reuse that thread; a replacement assignment receives a new thread.
+
+### 5.5 Reviewer
+
+A Reviewer is a bounded strong model job with read only authority. It inspects the exact immutable submission or integrated canonical state, evaluates the supplied criteria, considers controller run check receipts, and returns structured findings. Reviewer prose has no authority. The controller rejects malformed, incomplete, duplicate, stale, or inconsistent verdicts and never infers acceptance.
+
+### 5.6 Taskledger
 
 Taskledger is a deterministic state-management system.
 
@@ -419,13 +420,13 @@ evidence, and require new current-plan tasks to link to active requirements.
 
 ## 12. Planning and Plan Validation
 
-### PS-030 — Orchestrator-owned plan
+### PS-030 — Approved semantic plan
 
-The orchestrator creates and revises the requirements, tasks, requirement links, and task dependencies that make up the plan. Taskledger does not generate or prioritize the plan.
+The bounded Task Creator creates or revises the requirements, tasks, requirement links, dependencies, routing, and concurrency policy that make up the plan. The user approves the plan. Taskledger does not generate or prioritize it, and the Python controller does not add semantic scheduling decisions during execution.
 
 Taskledger may accept a batch of new requirements and tasks with request-local
 references. The entire batch must commit or roll back as one ledger transaction;
-the orchestrator must still validate the resulting plan explicitly.
+the controller must still invoke explicit Taskledger validation before execution.
 
 ### PS-031 — Structural validation
 
@@ -446,7 +447,7 @@ Taskledger must return all detected validation errors in one result when practic
 
 ### PS-032 — Semantic responsibility
 
-Taskledger must not claim that a requirement is truly atomic, that a task is optimally bounded, that acceptance criteria are sufficient, or that the plan semantically covers the specification. Those judgments remain the orchestrator’s responsibility.
+Taskledger must not claim that a requirement is truly atomic, that a task is optimally bounded, that acceptance criteria are sufficient, or that the plan semantically covers the specification. Those judgments belong to the bounded Task Creator and the user approval process.
 
 ### PS-033 — Plan validity
 
@@ -490,11 +491,11 @@ A blocker may overlay any non-final task state.
 
 ### PS-042 — Task revision
 
-Only the orchestrator may revise a task.
+Only an authorized planning action may revise a task. During automated correction planning, that action is a bounded Task Creator result applied by the controller.
 
 Revising a task must preserve its identity, increment or otherwise distinguish its definition revision, and invalidate the current plan validation.
 
-When a task changes after assignment, Taskledger must require the orchestrator to decide explicitly whether:
+When a task changes after assignment, Taskledger must require an explicit authorized decision whether:
 
 - the existing assignment may continue under the revised definition; or
 - the assignment must be revoked and the task returned to an unassigned state.
@@ -503,19 +504,19 @@ Taskledger must not decide this automatically.
 
 ### PS-043 — Split a task
 
-The orchestrator may split a task by creating replacement tasks, updating affected dependency and requirement links, and cancelling the original task with a recorded split reason.
+The Task Creator may propose a split. The approved plan creates replacement tasks, updates affected dependency and requirement links, and cancels the original task with a recorded split reason.
 
 Taskledger must preserve the original task and its history. The resulting plan must be validated before new assignments proceed.
 
 ### PS-044 — Cancel a task
 
-Only the orchestrator may cancel a task.
+Only an authorized controller or user action may cancel a task.
 
 Cancellation must preserve task history and traceability. If the task has an active assignment, the orchestrator must explicitly revoke or otherwise dispose of that assignment. Cancellation that removes required coverage must make the plan invalid.
 
 ### PS-045 — Reopen a task
 
-Only the orchestrator may reopen a completed or cancelled task.
+Only an authorized controller or user action may reopen a completed or cancelled task.
 
 Reopening must create a new active task revision or equivalent new implementation attempt, invalidate requirement verifications that depended on the prior completion where appropriate, invalidate project completion, and require plan validation before further assignment.
 
@@ -547,13 +548,13 @@ A task is eligible for assignment only when:
 - all dependencies are satisfied; and
 - no unresolved blocker prevents work on the project, task, or an associated requirement.
 
-Taskledger may list eligible tasks, but it must not select or prioritize one. The orchestrator selects assignments.
+Taskledger may list eligible tasks. The Python controller selects the next target by stable ordering within the approved wave and routing policy. It does not ask a model to choose among mechanically equivalent ready tasks.
 
 ### PS-052 — Parallel work
 
-Taskledger may maintain multiple active assignments for different eligible tasks. It must never assume that tasks are safe to run in parallel based on their descriptions or file scope. The orchestrator makes that decision.
+Taskledger may maintain multiple active assignments for different eligible tasks. It must never assume that tasks are safe to run in parallel based on their descriptions or file scope. The approved Task Creator policy supplies that decision, and the Python controller enforces it.
 
-Before launching a parallel wave, the orchestrator must inspect the repository
+Before approval of a parallel wave, the Task Creator must inspect the repository
 and derive a prospective write set for each task. The write set includes explicit
 ownership plus likely shared configuration, registries, generated contracts,
 central exports or cleanup modules, verification scripts, and application entry
@@ -602,16 +603,16 @@ Repository access needed to implement the task is permitted. The authority restr
 
 The orchestrator may revoke an assignment. Revocation must invalidate the worker’s authority to submit further ledger actions for that assignment while preserving any repository work for inspection or recovery.
 
-### PS-063 — Orchestrator-selected worker routing
+### PS-063 — Approved worker routing
 
-Taskledger must require the orchestrator to select `routine` or `complex` when
+Taskledger must require the approved plan to select `routine` or `complex` when
 creating an assignment and must preserve that selection in assignment context,
 recovery state, review context, and audit history. Taskledger records the stable
 capability role; the consuming repository maps each role to its chosen model,
 reasoning effort, and worker instructions. Taskledger must not silently select,
 substitute, or downgrade a worker profile.
 
-The orchestrator must prefer `routine` when the task fixes one implementation
+The Task Creator must prefer `routine` when the task fixes one implementation
 approach, explicitly bounds ownership, provides deterministic acceptance, keeps
 failure local and reversible, and requires no unresolved high-consequence
 judgment. Size, file count, and a mechanical migration do not make a task
@@ -619,15 +620,15 @@ complex. It must use `complex` when the worker still needs to choose architectur
 or state ownership, reconcile shared contracts or implementations, interpret
 product or visual intent, or decide security, authorization, schema/data,
 concurrency, destructive, compatibility, or weakly testable high-impact
-behavior. The orchestrator must first clarify a vague task rather than using the
+behavior. The Task Creator must first clarify a vague task rather than using the
 complex profile as a substitute for adequate planning.
 
 A mechanically broad rollout remains routine when it repeats a frozen,
-integrated pattern. The orchestrator should separate unresolved semantic or
+integrated pattern. The Task Creator should separate unresolved semantic or
 state-reconciliation work into a focused complex task and route deterministic
-followers independently. Final integrated verification remains orchestrator
-work rather than an implementation assignment whose purpose is to review other
-workers.
+followers independently. Final integrated verification is a bounded Reviewer
+job applied by the controller, not an implementation assignment whose purpose
+is to review other workers.
 
 ---
 
@@ -904,18 +905,18 @@ Progress must be derived from durable ledger and repository state. It must not d
 
 ### PS-140 — Final requirement verification
 
-A requirement becomes complete only when the orchestrator records a current verification that the requirement’s observable behavior is satisfied.
+A requirement becomes complete only when the controller records a current verification backed by a bounded final Reviewer decision that the observable behavior is satisfied.
 
 For a task-backed requirement, Taskledger must require every current non-cancelled task linked as its implementation coverage to be complete and validly integrated before accepting requirement verification.
 
-For a directly verifiable requirement, the orchestrator must provide direct evidence.
+For a directly verifiable requirement, the final Reviewer must provide direct evidence.
 
 The requirement verification must record enough information to identify:
 
 - the requirement revision verified;
 - the active specification state considered;
 - the integrated task results considered, if any; and
-- the orchestrator’s evidence or rationale.
+- the Reviewer evidence and controller application record.
 
 ### PS-141 — Verification invalidation
 
@@ -925,7 +926,7 @@ A requirement verification must stop counting as current when any of the followi
 - a supporting task is revised, reopened, cancelled, or loses valid integration;
 - an affected specification change is approved;
 - the canonical branch changes in a way that no longer contains required integrations; or
-- the orchestrator explicitly invalidates it.
+- an authorized controller or user action explicitly invalidates it.
 
 ### PS-142 — Completion checks
 
@@ -944,7 +945,7 @@ The absence of remaining task records is not sufficient.
 
 ### PS-143 — Explicit completion
 
-Only the orchestrator may request project completion.
+Only the Python controller or an explicit user action may request project completion.
 
 Taskledger must evaluate every completion condition at that moment. If any condition fails, it must reject completion and return all known reasons.
 
@@ -1144,16 +1145,40 @@ The CLI may wait for selected actionable audit events using durable sequences,
 a bounded timeout, cancellation, and missed-event diagnostics. The host remains
 responsible for waiting outside model reasoning and waking the model.
 
-Usage tooling requires modern per-response telemetry, deduplicates response IDs,
-discovers an explicit root and descendants, attributes actual model/effort, and
-reconciles additive response usage with cumulative thread counters. Reasoning
-tokens are an output subset, and measured tokens are not billing. Missing or
-inconsistent telemetry is reported; legacy token counters are ignored.
+Usage tooling requires turn identified telemetry, deduplicates exact raw event
+IDs, and attributes actual model and effort. For the current app server contract,
+`tokenUsage.last` is the latest upstream response value and `tokenUsage.total`
+is cumulative thread usage. A tool using turn may contain several response
+updates, so the controller deduplicates and adds response local `last` values by
+exact turn and event identity. It never adds cumulative `total` snapshots.
+Reasoning tokens are an output subset, and measured tokens are not billing.
+Missing or inconsistent telemetry is reported and prevents further token budget
+admission; legacy token counters are ignored.
+
+## 25B. Executable Project Controller
+
+An approved execution policy is durable project state. For every target it records the task, execution wave, worker profile, parallel safety decision, and prospective write surfaces. Python may derive readiness from current Taskledger state, but it must not infer missing semantic concurrency or routing decisions.
+
+The foreground controller uses generic worker capacity and separate reviewer capacity. The default limits are two workers and one reviewer. A free worker slot may run either a routine or complex assignment according to the target profile. Capacity limits, turn limits, stall limits, runtime failure limits, elapsed time, and token admission limits survive restart. Exhaustion pauses the run.
+
+A completed Codex turn is only a transport event. After every worker turn, the controller reads current Taskledger state. A pending submission enters review. A blocker pauses that target. Revocation stops the old thread. An active assignment continues automatically while durable progress and budgets permit. Model prose, including an empty response or a statement of completion, does not alter this rule.
+
+One worker thread belongs to one assignment attempt. Normal continuation and correction reuse it. Revocation or routine worker escalation closes it, and the replacement assignment receives a new thread. Submitted work remains frozen while controller checks and a bounded Reviewer inspect the exact commit.
+
+Reviewer output must cover every current criterion exactly once and must be structurally consistent with the requested outcome. Required check failure prevents acceptance. A missing, malformed, duplicate, stale, or inconsistent result is retried only within the reviewer budget. It never becomes acceptance by inference.
+
+Accepted work uses the existing Taskledger verification and integration path. Known integration failure, uncertain integration outcome, and successful integration remain distinct. Only successful current integration unlocks dependent tasks.
+
+After approved work is integrated, the controller starts one bounded final Reviewer against canonical state. A satisfied result supplies evidence for existing requirement verification and completion checks. An implementation defect starts one bounded Task Creator job that materializes correction tasks and returns control to Python scheduling. Product ambiguity pauses for the user.
+
+The controller persists dispatch intent, external thread and turn identity, resolved model and effort, agent configuration hash, sandbox policy, protocol identity, raw usage events, and consumption state. Restart reconciliation consumes a proven result once. An external operation that may have happened but cannot be identified or reconciled pauses as uncertain.
+
+The security boundary is proportional to this local product. Orchestrator credentials never reach model prompts or environments. Worker ledger operations remain assignment scoped. Reviewers receive read only source access and no mutation authority. Privileged Taskledger changes are controller owned. This does not claim containment against hostile code running as the local user.
 
 ## 26. Scope Boundary for Technical Design
 
 The technical design must implement the behaviors in this document using the simplest reliable architecture.
 
-It must not introduce product scope such as autonomous planning, hosted collaboration, pull-request management, CI orchestration, deployment, cloud state synchronization, general agent chat, or automatic semantic interpretation.
+It must not introduce product scope such as a persistent model orchestrator, hosted collaboration, pull request management, CI orchestration, deployment, cloud state synchronization, general agent chat, distributed workers, or automatic semantic interpretation by the Python scheduler.
 
 A technical mechanism is acceptable when it is necessary to enforce a requirement in this document—for example, scoped credentials, repository workspaces, transactional persistence, version fingerprints, or operation recovery records. Such mechanisms must remain subordinate to the product behavior and must not become additional product features.

@@ -6,6 +6,7 @@ from typing import Any
 
 
 class SessionRole(str, Enum):
+    TASK_CREATOR = "TASK_CREATOR"
     WORKER = "WORKER"
     REVIEWER = "REVIEWER"
     REQUIREMENT_REVIEWER = "REQUIREMENT_REVIEWER"
@@ -13,6 +14,7 @@ class SessionRole(str, Enum):
 
 class ExecutionStatus(str, Enum):
     ACTIVE = "ACTIVE"
+    CHECKPOINT = "CHECKPOINT"
     SUBMITTED = "SUBMITTED"
     BLOCKED = "BLOCKED"
     REVOKED = "REVOKED"
@@ -43,6 +45,9 @@ class PauseReason(str, Enum):
     REVIEWER_FAILURE = "REVIEWER_FAILURE"
     INTEGRATION_FAILED = "INTEGRATION_FAILED"
     INTEGRATION_UNCERTAIN = "INTEGRATION_UNCERTAIN"
+    CONFIGURATION_DRIFT = "CONFIGURATION_DRIFT"
+    PLAN_INVALID = "PLAN_INVALID"
+    PROJECT_INCOMPLETE = "PROJECT_INCOMPLETE"
     INVALID_STATE = "INVALID_STATE"
 
 
@@ -63,10 +68,37 @@ class Usage:
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
+    def __add__(self, other: "Usage") -> "Usage":
+        return Usage(
+            self.input_tokens + other.input_tokens,
+            self.cached_input_tokens + other.cached_input_tokens,
+            self.output_tokens + other.output_tokens,
+            self.reasoning_tokens + other.reasoning_tokens,
+        )
+
+
+@dataclass(frozen=True)
+class RuntimeIdentity:
+    model: str
+    effort: str
+    agent_config_hash: str
+    sandbox: dict[str, Any]
+    protocol_identity: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "effort": self.effort,
+            "agent_config_hash": self.agent_config_hash,
+            "sandbox": self.sandbox,
+            "protocol_identity": self.protocol_identity,
+        }
+
 
 @dataclass(frozen=True)
 class RuntimeSession:
     thread_id: str
+    identity: RuntimeIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +113,7 @@ class RuntimeTurnResult:
     structured_output: dict[str, Any] | None = None
     final_response: str | None = None
     usage: Usage = Usage()
+    usage_missing: bool = False
 
 
 @dataclass(frozen=True)
@@ -106,6 +139,7 @@ class ExecutionView:
     pending_submission_id: str | None = None
     correction_packet: dict[str, Any] | None = None
     detail: str | None = None
+    pending_checkpoint_id: str | None = None
 
 
 @dataclass(frozen=True)

@@ -6,7 +6,7 @@ from typing import Any
 from taskledger import git
 from taskledger.core import canonical, sha256
 
-from .model import ExecutionStatus, ExecutionView, ReviewPreparation, ReviewVerdict
+from .model import ExecutionStatus, ExecutionView, ReviewOutcome, ReviewPreparation, ReviewVerdict
 
 
 class TaskledgerLedgerAdapter:
@@ -76,6 +76,12 @@ class TaskledgerLedgerAdapter:
             return ExecutionView(assignment_id, ExecutionStatus.SUBMITTED, assignment["worker_profile"], submission["id"])
         if task["state"] != "ASSIGNED" or assignment["state"] != "ACTIVE":
             raise RuntimeError(f"unsupported task and assignment state: {task['state']}/{assignment['state']}")
+        checkpoint = self.service.checkpoint_progress(assignment).get("pending")
+        if checkpoint:
+            return ExecutionView(
+                assignment_id, ExecutionStatus.CHECKPOINT, assignment["worker_profile"],
+                pending_checkpoint_id=checkpoint["id"],
+            )
         return ExecutionView(
             assignment_id,
             ExecutionStatus.ACTIVE,
@@ -116,10 +122,9 @@ class TaskledgerLedgerAdapter:
         }
         instruction = (
             "Load this persisted Taskledger assignment context. Continue all authorized work until you submit, create a blocking question or blocker, or the task becomes invalid. "
-            "A normal turn ending is not completion. Use only assignment scoped worker operations."
+            "A normal turn ending is not completion. Use only assignment scoped worker operations. Do not load Codex skill files or invoke the Taskledger CLI; the current context is already included below."
             if first_turn
-            else
-            "Continue the same Taskledger assignment. Recheck the current correction and checkpoint state below, then keep working until submission or a durable blocker."
+            else "Continue the same Taskledger assignment. Recheck the current correction and checkpoint state below, then keep working until submission or a durable blocker. Do not reload Codex skill files."
         )
         broker = ""
         if self.worker_socket:
@@ -139,6 +144,35 @@ class TaskledgerLedgerAdapter:
             "SELECT state FROM submissions WHERE id=? AND project_id=?", (submission_id, self.project["id"])
         ).fetchone()
         return bool(row and row["state"] in {"PENDING", "BLOCKED"})
+
+    def checkpoint_pending(self, checkpoint_id: str) -> bool:
+        row = self.service.con.execute(
+            "SELECT c.state FROM assignment_checkpoints c JOIN assignments a ON a.id=c.assignment_id WHERE c.id=? AND a.project_id=?",
+            (checkpoint_id, self.project["id"]),
+        ).fetchone()
+        return bool(row and row["state"] == "PENDING")
+
+    def prepare_checkpoint_review(self, checkpoint_id: str) -> ReviewPreparation:
+        context = self.service.checkpoint_review_context(self.project, checkpoint_id)
+        checkpoint = context["checkpoint"]
+        assignment = self._assignment(checkpoint["assignment_id"])
+        current = (
+            checkpoint["state"] == "PENDING"
+            and checkpoint["head_object_exists"]
+            and not checkpoint["definition_stale"]
+            and git.oid(assignment["worktree_path"]) == checkpoint["head_commit_oid"]
+            and git.clean(assignment["worktree_path"])
+            and self.service.plan_current(self.project["id"])[0]
+            and not self.service.blocking_reasons(
+                self.project["id"], "assign", task_id=assignment["task_id"], assignment_id=assignment["id"]
+            )
+        )
+        if not current:
+            raise RuntimeError("checkpoint checkout, definition, plan, or blocker state is stale")
+        context["review_kind"] = "CHECKPOINT"
+        context["acceptance_allowed"] = True
+        criterion_ids = tuple(f"checkpoint:{position}" for position in range(1, len(checkpoint["criteria"]) + 1))
+        return ReviewPreparation(checkpoint_id, criterion_ids, True, context)
 
     def prepare_review(self, submission_id: str) -> ReviewPreparation:
         context = self.service.submission_review_context(self.project, submission_id)
@@ -190,6 +224,14 @@ class TaskledgerLedgerAdapter:
             + canonical(preparation.context)
         )
 
+    def checkpoint_reviewer_prompt(self, preparation: ReviewPreparation) -> str:
+        return (
+            "Independently review this exact immutable Taskledger checkpoint commit in the read only checkout. "
+            "Return ACCEPTED only when every checkpoint criterion is satisfied. Return REJECTED with exact corrections otherwise. "
+            "This verdict only advances an intermediate checkpoint and never accepts or integrates the task.\n\n"
+            + canonical(preparation.context)
+        )
+
     def reviewer_cwd(self, submission_id: str) -> str:
         row = self.service.con.execute(
             "SELECT a.worktree_path FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=? AND s.project_id=?",
@@ -197,6 +239,15 @@ class TaskledgerLedgerAdapter:
         ).fetchone()
         if not row:
             raise RuntimeError("submission was not found")
+        return row["worktree_path"]
+
+    def checkpoint_reviewer_cwd(self, checkpoint_id: str) -> str:
+        row = self.service.con.execute(
+            "SELECT a.worktree_path FROM assignment_checkpoints c JOIN assignments a ON a.id=c.assignment_id WHERE c.id=? AND a.project_id=?",
+            (checkpoint_id, self.project["id"]),
+        ).fetchone()
+        if not row:
+            raise RuntimeError("checkpoint was not found")
         return row["worktree_path"]
 
     def reviewer_output_schema(self, preparation: ReviewPreparation) -> dict[str, Any]:
@@ -232,6 +283,11 @@ class TaskledgerLedgerAdapter:
             "additionalProperties": False,
         }
 
+    def checkpoint_reviewer_output_schema(self, preparation: ReviewPreparation) -> dict[str, Any]:
+        schema = self.reviewer_output_schema(preparation)
+        schema["properties"]["outcome"]["enum"] = ["ACCEPTED", "REJECTED"]
+        return schema
+
     def apply_review(self, submission_id: str, verdict: ReviewVerdict) -> ExecutionView:
         before = self.service.submission_review_context(self.project, submission_id)
         if before["submission"]["state"] != "PENDING" or before["submission"]["definition_stale"]:
@@ -252,6 +308,28 @@ class TaskledgerLedgerAdapter:
             data["blocker"] = verdict.blocker
         self.service.verify_submission(self.project, self.orchestrator, data)
         return self.execution_view(before["submission"]["assignment_id"])
+
+    def apply_checkpoint_review(self, checkpoint_id: str, verdict: ReviewVerdict) -> ExecutionView:
+        before = self.service.checkpoint_review_context(self.project, checkpoint_id)
+        checkpoint = before["checkpoint"]
+        if checkpoint["state"] != "PENDING" or checkpoint["definition_stale"]:
+            raise RuntimeError("checkpoint reviewer verdict is stale")
+        if verdict.outcome not in {ReviewOutcome.ACCEPTED, ReviewOutcome.REJECTED}:
+            raise RuntimeError("checkpoint reviewer verdict must accept or reject")
+        results = []
+        for item in verdict.criterion_results:
+            prefix, position = item["criterion_id"].split(":", 1)
+            if prefix != "checkpoint":
+                raise RuntimeError("checkpoint reviewer criterion identity is invalid")
+            results.append({"position": int(position), "satisfied": item["satisfied"], "evidence": item["evidence"]})
+        self.service.verify_checkpoint(self.project, self.orchestrator, {
+            "checkpoint_id": checkpoint_id,
+            "outcome": "APPROVED" if verdict.outcome == ReviewOutcome.ACCEPTED else "REJECTED",
+            "criterion_results": results,
+            "corrections": verdict.corrections,
+            "notes": verdict.notes,
+        })
+        return self.execution_view(checkpoint["assignment_id"])
 
     def _assignment(self, assignment_id: str):
         row = self.service.con.execute(

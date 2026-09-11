@@ -113,6 +113,35 @@ def service_for_command(args) -> Service:
     return Service(connect(home),home)
 
 
+def project_controller_config(limits):
+    from .controller.project import ProjectControllerConfig
+    from .controller.supervisor import SupervisorConfig
+    require_object(limits,{"max_workers","max_reviewers","max_total_worker_turns","max_total_reviewer_turns","reviewer_token_reserve","max_final_reviewer_turns","max_task_creator_turns","task_creator_profile","supervisor"})
+    supervisor=limits.get("supervisor",{});require_object(supervisor,{"max_worker_turns","max_consecutive_stalled_turns","max_consecutive_runtime_failures","max_reviewer_turns_per_submission","max_total_tokens","max_elapsed_seconds","turn_timeout_seconds","reviewer_profile"})
+    try:
+        config=ProjectControllerConfig(
+            max_workers=limits.get("max_workers",2),max_reviewers=limits.get("max_reviewers",1),
+            max_total_worker_turns=limits.get("max_total_worker_turns",100),max_total_reviewer_turns=limits.get("max_total_reviewer_turns",50),
+            reviewer_token_reserve=limits.get("reviewer_token_reserve",0),
+            max_final_reviewer_turns=limits.get("max_final_reviewer_turns",2),max_task_creator_turns=limits.get("max_task_creator_turns",2),
+            task_creator_profile=limits.get("task_creator_profile","taskledger_task_creator"),supervisor=SupervisorConfig(**supervisor),
+        );config.validate();return config
+    except (TypeError,ValueError) as exc:raise LedgerError("INVALID_REQUEST",str(exc))
+
+
+def run_project_controller(service,project,principal,run_id,config,runtime):
+    from .controller.journal import Journal
+    from .controller.project import ProjectController
+    journal=Journal(service.con,service.home)
+    async def execute():
+        try:return await ProjectController(service=service,project=project,orchestrator=principal,run_id=run_id,runtime=runtime,journal=journal,config=config).run()
+        except Exception as exc:
+            if (journal.run(run_id) or {}).get("state")=="RUNNING":journal.finish_run(run_id,"FAILED",reason="INVALID_STATE",detail=str(exc))
+            raise
+        finally:await runtime.close()
+    return asyncio.run(execute())
+
+
 def dispatch(args, data):
     command=f"{args.resource}.{args.action}"
     if command=="project.init":return init_project(args,data)
@@ -142,6 +171,28 @@ def dispatch(args, data):
     if command=="project.set-canonical-branch":return service.set_branch(project,principal,data)
     if command=="project.complete":require_object(data,{});return service.complete_project(project,principal)
     if command=="project.cleanup":require_object(data,{});return service.cleanup_worktrees(project,principal)
+    if command=="controller.run-project":
+        require_object(data,{"execution_policy","live","limits"},{"execution_policy","live"})
+        if data["live"] is not True:raise LedgerError("INVALID_REQUEST","Live controller execution requires live=true explicit opt in.")
+        from .controller.app_server import AppServerRuntime
+        from .controller.journal import Journal
+        from .controller.model import SessionRole
+        from .controller.project import validate_execution_policy
+        try:targets=validate_execution_policy(service,project,data["execution_policy"])
+        except ValueError as exc:raise LedgerError("INVALID_REQUEST",str(exc))
+        config=project_controller_config(data.get("limits",{}))
+        runtime=AppServerRuntime(repository_root=project["repository_root"],worker_tools={})
+        # Resolve every semantic identity before the durable run becomes RUNNING.
+        for profile in sorted({target["worker_profile"] for target in targets}):
+            runtime.session_identity(role=SessionRole.WORKER,profile=profile,subject_id="preflight",cwd=project["repository_root"],writable=True)
+        runtime.session_identity(role=SessionRole.REVIEWER,profile=config.supervisor.reviewer_profile,subject_id="preflight",cwd=project["repository_root"],writable=False)
+        runtime.session_identity(role=SessionRole.REQUIREMENT_REVIEWER,profile=config.supervisor.reviewer_profile,subject_id="preflight",cwd=project["repository_root"],writable=False)
+        runtime.session_identity(role=SessionRole.TASK_CREATOR,profile=config.task_creator_profile,subject_id="preflight",cwd=project["repository_root"],writable=False)
+        journal=Journal(service.con,service.home)
+        try:run_id=journal.create_project_run(project["id"],config={"limits":config.as_dict()},targets=targets)
+        except RuntimeError as exc:raise LedgerError("INVALID_REQUEST",str(exc))
+        result=run_project_controller(service,project,principal,run_id,config,runtime)
+        return asdict(result)
     if command=="controller.run-assignment":
         require_object(data,{"assignment_id","live","limits"},{"assignment_id","live"})
         if data["live"] is not True:raise LedgerError("INVALID_REQUEST","Live controller execution requires live=true explicit opt in.")
@@ -153,24 +204,26 @@ def dispatch(args, data):
         try:config=SupervisorConfig(**limits);config.validate()
         except (TypeError,ValueError) as exc:raise LedgerError("INVALID_REQUEST",str(exc))
         assignment_id=text(data["assignment_id"],"assignment_id")
-        if not service.con.execute("SELECT 1 FROM assignments WHERE id=? AND project_id=?",(assignment_id,project["id"])).fetchone():raise LedgerError("ASSIGNMENT_NOT_ACTIVE","Assignment was not found.")
+        assignment=service.con.execute("SELECT * FROM assignments WHERE id=? AND project_id=?",(assignment_id,project["id"])).fetchone()
+        if not assignment:raise LedgerError("ASSIGNMENT_NOT_ACTIVE","Assignment was not found.")
+        from .controller.worker_broker import WorkerBroker,broker_socket_path
+        token_path=service.home/"projects"/project["id"]/"assignments"/assignment_id/"worker-token"
+        try:worker=service.authenticate(project["id"],token_path.read_text().strip(),"WORKER")
+        except OSError:raise LedgerError("ASSIGNMENT_NOT_ACTIVE","Active assignment worker credential is unavailable.")
+        socket_path=broker_socket_path(service.home,assignment_id);broker=WorkerBroker(service,worker,socket_path)
+        runtime=AppServerRuntime(repository_root=project["repository_root"],worker_tools={assignment_id:broker.dispatch})
+        runtime.session_identity(role=SessionRole.WORKER,profile=assignment["worker_profile"],subject_id=assignment_id,cwd=assignment["worktree_path"],writable=True)
         journal=Journal(service.con,service.home)
         try:run_id=journal.create_run(project["id"],mode="ASSIGNMENT",config={"assignment_id":assignment_id,"limits":asdict(config)})
         except RuntimeError as exc:raise LedgerError("INVALID_REQUEST",str(exc))
         async def execute():
-            from .controller.worker_broker import WorkerBroker,broker_socket_path
-            token_path=service.home/"projects"/project["id"]/"assignments"/assignment_id/"worker-token"
-            worker=service.authenticate(project["id"],token_path.read_text().strip(),"WORKER")
-            socket_path=broker_socket_path(service.home,assignment_id)
-            broker=WorkerBroker(service,worker,socket_path);runtime=None
             try:
-                runtime=AppServerRuntime(repository_root=project["repository_root"],worker_tools={assignment_id:broker.dispatch})
                 adapter=TaskledgerLedgerAdapter(service,project,principal,worker_tool_enabled=True)
                 return await Supervisor(project_id=project["id"],run_id=run_id,ledger=adapter,runtime=runtime,journal=journal,config=config).run_assignment(assignment_id)
             except Exception as exc:
                 journal.finish_run(run_id,"FAILED",reason="INVALID_STATE",detail=str(exc));raise
             finally:
-                if runtime:await runtime.close()
+                await runtime.close()
                 await broker.close()
         result=asyncio.run(execute());return {"run_id":run_id,**asdict(result)}
     if command=="controller.resume":
@@ -178,27 +231,44 @@ def dispatch(args, data):
         if data["live"] is not True:raise LedgerError("INVALID_REQUEST","Live controller execution requires live=true explicit opt in.")
         from .controller.app_server import AppServerRuntime
         from .controller.journal import Journal
+        from .controller.model import SessionRole
         from .controller.supervisor import Supervisor,SupervisorConfig
         from .controller.taskledger_adapter import TaskledgerLedgerAdapter
         journal=Journal(service.con,service.home);requested_id=text(data["run_id"],"run_id");existing=journal.run(requested_id)
-        if not existing or existing["project_id"]!=project["id"] or existing["mode"]!="ASSIGNMENT":raise LedgerError("INVALID_REQUEST","Controller run does not belong to this project or mode.")
+        if not existing or existing["project_id"]!=project["id"]:raise LedgerError("INVALID_REQUEST","Controller run does not belong to this project.")
+        if existing["mode"]=="PROJECT":
+            config=project_controller_config(existing["config"]["limits"])
+            runtime=AppServerRuntime(repository_root=project["repository_root"],worker_tools={})
+            # Validate configured profiles before changing durable run state.
+            for target in journal.targets(requested_id):
+                if target["state"] not in {"INTEGRATED","CANCELLED"}:
+                    runtime.session_identity(role=SessionRole.WORKER,profile=target["worker_profile"],subject_id="preflight",cwd=project["repository_root"],writable=True)
+            runtime.session_identity(role=SessionRole.REVIEWER,profile=config.supervisor.reviewer_profile,subject_id="preflight",cwd=project["repository_root"],writable=False)
+            runtime.session_identity(role=SessionRole.TASK_CREATOR,profile=config.task_creator_profile,subject_id="preflight",cwd=project["repository_root"],writable=False)
+            try:run=journal.resume_run(requested_id)
+            except RuntimeError as exc:raise LedgerError("INVALID_REQUEST",str(exc))
+            return asdict(run_project_controller(service,project,principal,run["id"],config,runtime))
+        if existing["mode"]!="ASSIGNMENT":raise LedgerError("INVALID_REQUEST","Unsupported controller run mode.")
+        assignment_id=existing["config"]["assignment_id"];config=SupervisorConfig(**existing["config"]["limits"])
+        assignment=service.con.execute("SELECT * FROM assignments WHERE id=? AND project_id=?",(assignment_id,project["id"])).fetchone()
+        if not assignment:raise LedgerError("ASSIGNMENT_NOT_ACTIVE","Assignment was not found.")
+        from .controller.worker_broker import WorkerBroker,broker_socket_path
+        token_path=service.home/"projects"/project["id"]/"assignments"/assignment_id/"worker-token"
+        try:worker=service.authenticate(project["id"],token_path.read_text().strip(),"WORKER")
+        except OSError:raise LedgerError("ASSIGNMENT_NOT_ACTIVE","Active assignment worker credential is unavailable.")
+        broker=WorkerBroker(service,worker,broker_socket_path(service.home,assignment_id))
+        runtime=AppServerRuntime(repository_root=project["repository_root"],worker_tools={assignment_id:broker.dispatch})
+        runtime.session_identity(role=SessionRole.WORKER,profile=assignment["worker_profile"],subject_id=assignment_id,cwd=assignment["worktree_path"],writable=True)
         try:run=journal.resume_run(requested_id)
         except RuntimeError as exc:raise LedgerError("INVALID_REQUEST",str(exc))
-        assignment_id=run["config"]["assignment_id"];config=SupervisorConfig(**run["config"]["limits"])
         async def resume_execution():
-            from .controller.worker_broker import WorkerBroker,broker_socket_path
-            token_path=service.home/"projects"/project["id"]/"assignments"/assignment_id/"worker-token"
-            worker=service.authenticate(project["id"],token_path.read_text().strip(),"WORKER")
-            socket_path=broker_socket_path(service.home,assignment_id)
-            broker=WorkerBroker(service,worker,socket_path);runtime=None
             try:
-                runtime=AppServerRuntime(repository_root=project["repository_root"],worker_tools={assignment_id:broker.dispatch})
                 adapter=TaskledgerLedgerAdapter(service,project,principal,worker_tool_enabled=True)
                 return await Supervisor(project_id=project["id"],run_id=run["id"],ledger=adapter,runtime=runtime,journal=journal,config=config).run_assignment(assignment_id)
             except Exception as exc:
                 journal.finish_run(run["id"],"FAILED",reason="INVALID_STATE",detail=str(exc));raise
             finally:
-                if runtime:await runtime.close()
+                await runtime.close()
                 await broker.close()
         result=asyncio.run(resume_execution());return {"run_id":run["id"],**asdict(result)}
     if command=="controller.show":
@@ -206,8 +276,10 @@ def dispatch(args, data):
         from .controller.journal import Journal
         journal=Journal(service.con,service.home);run=journal.run(text(data["run_id"],"run_id"))
         if not run or run["project_id"]!=project["id"]:raise LedgerError("INVALID_REQUEST","Controller run was not found.")
-        sessions=[dict(row) for row in service.con.execute("SELECT id,role,profile,subject_id,external_thread_id,state,created_at,closed_at FROM controller_sessions WHERE run_id=? ORDER BY created_at,id",(run["id"],))]
-        return {"run":run,"sessions":sessions,"usage":asdict(journal.usage(run_id=run["id"]))}
+        sessions=[]
+        for row in service.con.execute("SELECT id,role,profile,subject_id,external_thread_id,runtime_identity_json,state,created_at,closed_at FROM controller_sessions WHERE run_id=? ORDER BY created_at,id",(run["id"],)):
+            item=dict(row);item["runtime_identity"]=json.loads(item.pop("runtime_identity_json"));sessions.append(item)
+        return {"run":run,"targets":journal.targets(run["id"]) if run["mode"]=="PROJECT" else [],"sessions":sessions,"usage":journal.usage_report(run_id=run["id"])}
     if command=="controller.extend-budget":
         require_object(data,{"run_id","kind","amount","reason"},{"run_id","kind","amount","reason"})
         from .controller.journal import Journal

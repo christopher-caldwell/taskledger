@@ -9,6 +9,7 @@ from .model import (
     ReviewPreparation,
     ReviewVerdict,
     RuntimeSession,
+    RuntimeIdentity,
     RuntimeTurnHandle,
     RuntimeTurnInspection,
     RuntimeTurnResult,
@@ -20,31 +21,51 @@ from .model import (
 @dataclass(frozen=True)
 class TurnScript:
     effect: Callable[[], None] | None = None
-    structured_output: dict[str, Any] | None = None
+    structured_output: dict[str, Any] | Callable[[], dict[str, Any] | None] | None = None
     final_response: str | None = None
     usage: Usage = Usage()
     failure: str | None = None
     uncertain: bool = False
+    usage_missing: bool = False
 
 
 class FakeRuntime:
-    def __init__(self, *, worker_turns: list[TurnScript], reviewer_turns: list[TurnScript]):
-        self.scripts = {SessionRole.WORKER: list(worker_turns), SessionRole.REVIEWER: list(reviewer_turns)}
+    def __init__(self, *, worker_turns: list[TurnScript], reviewer_turns: list[TurnScript], final_reviewer_turns: list[TurnScript] | None = None, task_creator_turns: list[TurnScript] | None = None):
+        self.scripts = {
+            SessionRole.WORKER: list(worker_turns),
+            SessionRole.REVIEWER: list(reviewer_turns),
+            SessionRole.REQUIREMENT_REVIEWER: list(final_reviewer_turns or []),
+            SessionRole.TASK_CREATOR: list(task_creator_turns or []),
+        }
         self.roles: dict[str, SessionRole] = {}
         self.turns: dict[tuple[str, str], tuple[str, TurnScript]] = {}
         self.sessions_started = 0
         self.turns_started = 0
+        self.worker_tools: dict[str, Any] = {}
+        self.identity_overrides: dict[tuple[SessionRole, str], RuntimeIdentity] = {}
+
+    def session_identity(self, *, role, profile, subject_id, cwd, writable):
+        return self.identity_overrides.get(
+            (role, profile),
+            RuntimeIdentity(
+                model=f"fake-{profile}",
+                effort="test",
+                agent_config_hash=f"hash-{profile}",
+                sandbox={"type": "workspaceWrite" if writable else "readOnly", "cwd": cwd},
+                protocol_identity="fake-runtime-v1",
+            ),
+        )
 
     async def start_session(self, *, role, profile, subject_id, cwd, writable):
         self.sessions_started += 1
         thread = f"thread-{self.sessions_started}"
         self.roles[thread] = role
-        return RuntimeSession(thread)
+        return RuntimeSession(thread, self.session_identity(role=role, profile=profile, subject_id=subject_id, cwd=cwd, writable=writable))
 
     async def resume_session(self, *, thread_id, role, profile, subject_id, cwd, writable):
         if thread_id not in self.roles:
             raise RuntimeError("thread does not exist")
-        return RuntimeSession(thread_id)
+        return RuntimeSession(thread_id, self.session_identity(role=role, profile=profile, subject_id=subject_id, cwd=cwd, writable=writable))
 
     async def start_turn(self, *, thread_id, prompt, output_schema=None):
         role = self.roles[thread_id]
@@ -65,7 +86,8 @@ class FakeRuntime:
         if script.effect:
             script.effect()
         self.turns[(handle.thread_id, handle.turn_id)] = ("COMPLETED", script)
-        return RuntimeTurnResult(handle, script.structured_output, script.final_response, script.usage)
+        structured = script.structured_output() if callable(script.structured_output) else script.structured_output
+        return RuntimeTurnResult(handle, structured, script.final_response, script.usage, script.usage_missing)
 
     async def inspect_turn(self, handle):
         state, script = self.turns.get((handle.thread_id, handle.turn_id), ("UNKNOWN", TurnScript()))
@@ -74,8 +96,16 @@ class FakeRuntime:
         if state == "FAILED":
             return RuntimeTurnInspection("FAILED", error=script.failure)
         if state == "COMPLETED":
-            return RuntimeTurnInspection("COMPLETED", RuntimeTurnResult(handle, script.structured_output, script.final_response, script.usage))
+            structured = script.structured_output() if callable(script.structured_output) else script.structured_output
+            return RuntimeTurnInspection("COMPLETED", RuntimeTurnResult(handle, structured, script.final_response, script.usage, script.usage_missing))
         return RuntimeTurnInspection("RUNNING")
+
+    def usage_events(self, handle):
+        result = self.turns.get((handle.thread_id, handle.turn_id))
+        if not result:
+            return ()
+        usage = result[1].usage
+        return ({"event_id": f"fake-{handle.turn_id}", "usage": usage.__dict__, "raw": {"turn_id": handle.turn_id}},)
 
 
 class FakeLedger:

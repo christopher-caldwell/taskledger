@@ -1,8 +1,8 @@
 # Taskledger Technical Design Specification
 
-**Document status:** Final implementation design  
+**Document status:** Current implementation design
 **Governing specification:** `taskledger-product-spec.md`  
-**Design rule:** Implement the complete governing product specification with the smallest reliable local architecture. Do not add autonomous planning, hosted collaboration, CI/CD, pull requests, deployment, cloud synchronization, or semantic product reasoning.
+**Design rule:** Python owns orchestration. Models perform bounded semantic jobs. Keep the implementation local: Python, SQLite, Git, and the Codex app server.
 
 ---
 
@@ -17,7 +17,7 @@ The implementation is conformant only when:
 - requirement verification remains the authority for product progress;
 - accepted work is integrated into the explicitly confirmed branch before a task is complete;
 - specification changes and uncertain repository operations create hard execution gates; and
-- a fresh orchestrator session can recover all authoritative state from Taskledger and the repository alone.
+- a restarted Python controller can recover authoritative state from Taskledger, its controller journal, Git, and identified Codex threads without conversation memory.
 
 When this document appears to conflict with the product specification, the product specification controls.
 
@@ -25,7 +25,7 @@ When this document appears to conflict with the product specification, the produ
 
 ## 2. Architecture Decision Summary
 
-Taskledger will be implemented as a local command-line application with the following choices:
+Taskledger is a local command line application with a foreground executable controller:
 
 | Concern | Decision |
 |---|---|
@@ -37,13 +37,13 @@ Taskledger will be implemented as a local command-line application with the foll
 | Repository integration | Installed `git` executable invoked without a shell |
 | Worker isolation | One Git branch and one external Git worktree per assignment |
 | Authorization | One local orchestrator credential per project and one scoped credential per assignment |
-| Concurrency | SQLite transactions plus a durable per-project Git operation journal |
-| Background services | None |
+| Concurrency | SQLite transactions, a durable project controller journal, two generic worker slots by default, and one reviewer slot by default |
+| Process model | Short CLI commands plus an explicit foreground controller process |
 | Change detection | Explicit checks and command-boundary preflight checks |
 | State model | Relational current state plus immutable historical records and an audit log |
-| Network services | None |
+| Model transport | Local Codex app server over standard input and output |
 
-This is intentionally not a server, agent framework, web application, or MCP service. A model orchestrator can call the CLI as a tool and consume JSON. A future adapter could wrap the CLI, but no adapter is part of this implementation.
+This is not a hosted server, generic agent framework, web application, or MCP service. The Python controller calls the local Codex app server directly and remains the only workflow scheduler. Task Creator, worker, and Reviewer sessions are bounded jobs.
 
 ### 2.1 Why this is the simplest adequate architecture
 
@@ -81,22 +81,24 @@ Taskledger runs on the same machine as the Git repository and workers. Each CLI 
 8. emit one JSON response; and
 9. exit.
 
-No daemon or background watcher is required.
+Project execution uses an explicit foreground process started by `controller run-project` and resumed by `controller resume`. It holds the project controller lock, schedules from durable state, waits on Codex turns, and exits at completion or a genuine pause boundary. It is not a daemon and does not require a model to remain active between jobs.
 
 ### 3.2 Trust model
 
-Taskledger enforces authority at its own command boundary. Worker credentials can invoke only worker operations for one assignment. Orchestrator operations require the project’s orchestrator credential.
+Taskledger enforces authority at its own command boundary. Worker credentials can invoke only worker operations for one assignment. Privileged controller calls use the project orchestrator principal inside the Python process. No raw orchestrator or worker token is placed in a model prompt or model environment.
 
-A worker necessarily receives write access to its Git worktree and can execute development commands there. Taskledger is not a hostile-code sandbox and does not attempt to prevent a process running as the same operating-system user from reading arbitrary files. The orchestrator must not intentionally provide its credential to a worker. This boundary satisfies the product requirement that workers lack unrestricted **Taskledger project authority** without introducing an unrelated container or sandbox platform.
+A worker receives write access to its Git worktree and can execute development commands there. Taskledger is not a hostile code sandbox and does not attempt to prevent a process running as the same operating system user from reading arbitrary files. Reviewers receive read only source access and no mutation tools. The controller must not provide privileged credentials to any model. This prevents unrestricted **Taskledger project authority** without introducing an unrelated container platform.
 
 ### 3.3 Principal identities
 
-Every state-changing record identifies a principal:
+Every domain state change identifies a principal:
 
 - one active `ORCHESTRATOR` principal per project; and
 - one `WORKER` principal per assignment attempt.
 
 The worker principal is permanently scoped to its assignment. Deactivating or revoking it prevents additional worker commands while retaining complete history.
+
+Task Creator and Reviewer sessions are controller journal identities, not Taskledger mutation principals. The controller applies their validated structured decisions through its own orchestrator principal.
 
 ---
 
@@ -173,13 +175,22 @@ src/taskledger/
 │   ├── integration.py
 │   ├── blockers.py
 │   └── recovery.py
-└── git/
+├── git/
     ├── client.py
     ├── inspection.py
     ├── worktrees.py
     ├── submission.py
     ├── integration.py
     └── reconciliation.py
+└── controller/
+│   ├── app_server.py
+│   ├── journal.py
+│   ├── model.py
+│   ├── ports.py
+│   ├── project.py
+│   ├── supervisor.py
+│   ├── taskledger_adapter.py
+│   └── worker_broker.py
 
 tests/
 ├── unit/
@@ -201,6 +212,7 @@ taskledger = "taskledger.cli:main"
 - `domain` contains deterministic state rules and calculations with no subprocess or database access.
 - `db` owns SQL, migrations, and transaction boundaries.
 - `git` is the only layer allowed to invoke Git.
+- `controller` owns mechanical scheduling, bounded Codex sessions, capacity, continuation, durable turn records, usage telemetry, and restart reconciliation. Domain mutations still pass through existing services.
 - `output.py` guarantees stable response envelopes.
 
 No service may bypass domain transition checks or execute ad hoc SQL outside the repository layer.
@@ -700,6 +712,26 @@ created_at              TEXT NOT NULL
 
 The audit table is diagnostic history, not an event-sourced authority. Current relational tables remain authoritative.
 
+### 7.27 Controller journal
+
+`controller_runs` stores one assignment or project run, its complete configuration, durable state, and pause result. A partial unique index permits only one `RUNNING` controller for a project.
+
+`controller_run_targets` stores the approved execution policy for each project target: task ID, wave, worker profile, parallel safety, write surfaces, current assignment, and controller state. It does not duplicate task definitions or dependencies.
+
+`controller_sessions` binds one semantic job to one external Codex thread. It records role, profile, subject, resolved model, resolved effort, agent configuration hash, exact sandbox policy, Codex version and protocol identity, and a hash of that complete identity. Restart must either resume with the same identity or pause as `CONFIGURATION_DRIFT`.
+
+`controller_turns` records dispatch intent before the external request, then the acknowledged external turn ID, terminal result, consumption state, progress fingerprints, elapsed timestamps, and exact turn usage. `DISPATCHING` without a proven external ID and any unresolvable external status become `UNCERTAIN`.
+
+`controller_usage_events` retains deduplicated raw usage notifications by local
+turn and stable event identity. The app server notification contains `last`,
+which is local to one upstream model response, and `total`, which is cumulative
+for the thread. A tool-using turn may emit several response-local `last` values.
+The controller deduplicates exact raw notifications, binds them to `turnId`, and
+sums those response-local values for the turn. Missing turn usage is explicit;
+cumulative totals are never substituted or summed.
+
+`controller_budget_grants` records positive user approved extensions. `controller_final_reviews` binds each bounded integrated review to the exact canonical OID and plan fingerprint so a stale result cannot complete the project.
+
 ---
 
 ## 8. Authentication and Authorization
@@ -718,11 +750,20 @@ Project initialization creates the orchestrator principal and credential. The pl
 
 The CLI automatically uses this file when an orchestrator command resolves the project. `--token` and `TASKLEDGER_TOKEN` may override it for automation.
 
-V1 does not provide orchestrator-token rotation. Protect and back up this file as local project state. Worker-token rotation remains available because a worker credential is deliberately handed to another execution context.
+V1 does not provide orchestrator-token rotation. Protect and back up this file
+as local project state. Worker-token rotation remains available because each
+assignment still has a revocable scoped principal, although the project
+controller keeps its plaintext token inside the Python process.
 
 ### 8.3 Worker credential
 
-Assignment creation generates a worker principal and token scoped to that assignment. The plaintext token is written only to the owner-only assignment credential file; model-visible command results return the path, never the secret. The orchestrator passes only the path to the worker execution context.
+Assignment creation generates a worker principal and token scoped to that
+assignment. The plaintext token is written only to the owner-only assignment
+credential file. The Python controller authenticates it and exposes only the
+assignment-scoped dynamic operations through its local broker; it does not put
+the token or its path in the model prompt or environment. The direct/manual
+worker CLI remains available as a diagnostic interface and accepts that scoped
+credential explicitly.
 
 Worker authentication resolves the project and assignment entirely from the principal record. A worker cannot use `--project` to broaden its scope.
 
@@ -914,6 +955,36 @@ operation. Idempotently retries the safe assignment-worktree cleanup in Section
 16.4 and returns removed, already-absent, and skipped worktrees. It never deletes
 assignment branches.
 
+### 10.1A Controller commands
+
+#### `taskledger controller run-project`
+
+Input contains `live: true`, an approved `execution_policy`, and optional limits. Every target must contain exactly `task_id`, positive integer `wave`, `worker_profile`, `parallel_safe`, and `write_surfaces`. The policy must cover every unfinished task exactly once; it may be empty only when the approved plan has no unfinished tasks. Default capacity is `max_workers: 2` and `max_reviewers: 1`; project-wide defaults are 100 worker turns and 50 reviewer turns. An optional reviewer token reserve stops new worker admission early enough to retain review capacity. Supervisor limits remain durable project admission limits.
+
+The command validates the current Taskledger plan, target identities, policy
+shape, configured model profiles, and local Codex executable before creating a
+`RUNNING` journal record. App server startup, authentication, and protocol
+initialization happen immediately afterward. Any failure at that boundary
+durably leaves the run `FAILED` rather than stranding it in `RUNNING`. The
+process then stays in the foreground until project completion or a durable
+pause.
+
+#### `taskledger controller run-assignment`
+
+Runs the reusable single assignment supervisor. This remains a diagnostic and bounded execution primitive beneath project mode. It is not the project completion path.
+
+#### `taskledger controller resume`
+
+Input is `{"run_id":"...","live":true}`. The command loads the stored mode and limits, validates configured runtime identities before changing the run back to `RUNNING`, reconciles every identified open turn, restores capacity from active sessions, consumes proven results once, and resumes scheduling. It never redispatches an unidentifiable external operation.
+
+#### `taskledger controller show`
+
+Returns the run, project targets, session roles and runtime identities, and a usage report. The report includes completed turn count, missing usage count, and whether totals are complete.
+
+#### `taskledger controller extend-budget`
+
+Records a positive durable grant for worker turns, reviewer turns, tokens, or elapsed seconds. A paused run remains paused until explicitly resumed.
+
 ### 10.2 Specification commands
 
 #### `taskledger spec register`
@@ -1097,7 +1168,7 @@ Supports `all`, `eligible`, `active`, `submitted`, `accepted`, `completed`, `blo
 
 #### `taskledger plan validate`
 
-Runs the validation algorithm in Section 12, stores success or failure with all diagnostics, and returns the new fingerprint. Only the orchestrator may invoke it.
+Runs the validation algorithm in Section 12, stores success or failure with all diagnostics, and returns the new fingerprint. Only the controller or an explicit user planning action may invoke it.
 
 #### `taskledger plan apply`
 
@@ -1118,7 +1189,7 @@ Input:
 ```
 
 `worker_profile` is required and accepts only `routine` or `complex`. It records
-the orchestrator's capability-routing decision; Taskledger does not resolve the
+the approved Task Creator capability routing decision; Taskledger does not resolve the
 profile to a model. The consuming repository's named-agent configuration owns
 that mapping.
 
@@ -1139,10 +1210,11 @@ The service re-evaluates eligibility in the same operation; a stale eligible-lis
 ```
 
 The plaintext credential and full assignment snapshot are intentionally absent
-from model-visible output. The worker reads the owner-only credential file and
-retrieves the persisted assignment snapshot with `worker context`. Conditional
-refreshes independently validate the immutable context hash and the dynamic
-questions/blockers/submissions hash.
+from model-visible command output. In controller mode, Python loads the
+persisted snapshot and current dynamic packet and supplies them in the bounded
+worker prompt. Later turns refresh current corrections, checkpoints, questions,
+and blockers from Taskledger. The model may call the brokered `context` operation
+for a conditional refresh without receiving a credential.
 
 The immutable snapshot also includes active registered specifications as stable
 IDs and repository-relative paths. It does not duplicate their contents. Worker
@@ -1150,8 +1222,10 @@ instructions treat these files as frozen unless the task scope explicitly owns
 the exact specification edit, preventing incidental documentation maintenance
 from repeatedly invalidating an otherwise unchanged execution plan.
 
-The orchestrator selects the task and worker profile. Taskledger does not select
-or substitute either one automatically. The profile is included in worker
+The approved Task Creator plan selects each worker profile and concurrency
+policy. The Python controller selects the next mechanically eligible target by
+stable ordering and persists the assignment; Taskledger does not semantically
+select or substitute a profile. The profile is included in worker
 context, compact/full recovery projections, submission review context, and the
 assignment-activation audit event.
 
@@ -1172,8 +1246,9 @@ Cross-file contracts, sibling-entity rollouts, and generated-client consumer
 migrations remain routine when the approach, ownership, and executable checks
 are frozen. Plans separate a complex semantic core from mechanical followers.
 Manual cache/state reconciliation remains complex unless an executable behavior
-matrix removes the judgment. The primary performs the final integrated audit;
-it creates correction assignments only for defects that audit actually finds.
+matrix removes the judgment. The Python controller dispatches a bounded final
+reviewer for the integrated audit. When that review finds clear implementation
+defects, a new bounded Task Creator job decomposes them into correction tasks.
 
 Before creating concurrent assignments, the orchestrator derives prospective
 write sets from the task scopes and current repository. Shared configuration,
@@ -2007,7 +2082,7 @@ No generic “force continue” command exists.
 
 ## 21. Recovery Snapshot Contract
 
-`project recover` returns one self-contained JSON document suitable as the first input to a new orchestrator session.
+`project recover` returns one complete JSON document suitable for controller restart or a new bounded planning and review session.
 
 ```json
 {
@@ -2124,6 +2199,32 @@ Only one Taskledger Git-mutating operation per project may be `STARTED`. This se
 Every mutation includes expected current revision/state in the service query. SQL updates use state/revision predicates and require one affected row. A mismatch returns `STALE_STATE` rather than overwriting another command’s result.
 
 ---
+
+### 23.5 Project scheduler
+
+The scheduler evaluates targets in stable `(wave, task_id)` order. It considers only the lowest unfinished wave. A target may start only when Taskledger eligibility, dependencies, blockers, plan currency, approved parallel safety, write surface compatibility, and runtime capacity all permit it. A target marked not parallel safe runs alone. Intersecting write surfaces never run together.
+
+Worker capacity is generic. Each assignment uses its persisted routine or complex profile when it acquires a slot. Reviewer capacity is a separate semaphore, so a submitted task can wait for review without consuming a worker slot. The controller creates no more active scheduling jobs than the configured worker and reviewer capacity combined, and every Codex event is routed by exact thread and turn IDs.
+
+An assignment supervisor repeats this state machine after every worker turn:
+
+1. consume a proven terminal transport result;
+2. compute progress from the worktree fingerprint and durable Taskledger mutations;
+3. read the current assignment, task, blocker, correction, and submission state;
+4. queue review only for a current pending immutable submission;
+5. stop a revoked or replaced assignment thread;
+6. pause on a blocking state or exhausted durable budget; or
+7. start another turn on the same thread while the assignment remains active.
+
+A routine assignment revoked by the existing rejection threshold is never resumed. The target is rerouted to complex, a new assignment is created through the existing service, and a new worker thread owns that attempt.
+
+Local blockers pause only their targets. Plan invalidity, pending specification review, unresolved Taskledger operations, integration uncertainty, runtime uncertainty, budget exhaustion, and configuration drift pause global dispatch.
+
+### 23.6 Final semantic boundary
+
+When all approved targets are integrated, the controller records the current canonical OID and plan fingerprint and dispatches one read only requirement Reviewer. Its schema covers every active requirement exactly once and separates implementation defects from product ambiguity.
+
+A satisfied verdict is rechecked against current canonical and plan identity, then applied through `requirement verify` followed by existing completion checks. An implementation defect dispatches one bounded Task Creator job. Its structured correction plan is materialized atomically with stable plan references, validated by Taskledger, appended as a later execution wave, and scheduled normally. Product ambiguity pauses for the user.
 
 ## 24. Error Codes
 
@@ -2370,12 +2471,11 @@ Each slice must include unit and integration tests before the next slice begins.
 
 The implementation must not include:
 
-- LLM API calls;
-- automatic requirement extraction;
-- automatic task generation;
-- automatic prioritization;
-- automatic file-conflict prediction for parallel tasks;
-- autonomous verification;
+- direct model provider integration outside the local Codex app server;
+- a persistent high strength model orchestration loop;
+- Python invented requirements, task routing, or execution waves;
+- automatic file conflict prediction that replaces approved write surfaces;
+- worker self approval or verification without an independent Reviewer;
 - hosted accounts or multi-user permissions;
 - web UI;
 - remote database;
@@ -2383,12 +2483,12 @@ The implementation must not include:
 - CI execution or CI result ingestion;
 - deployment;
 - cloud backup/synchronization;
-- worker process launching or model-provider integration;
-- chat history storage;
+- distributed or permanent worker infrastructure;
+- permanent chat reuse across unrelated assignments;
 - arbitrary plugin systems; or
 - automatic conflict resolution.
 
-The orchestrator may invoke workers by whatever external mechanism it already uses. Taskledger begins at assignment creation and records the durable handoff.
+The bounded Task Creator may use semantic model judgment during an explicit planning job. After approval, the Python controller launches bounded Codex jobs and operates the workflow through existing Taskledger services.
 
 ---
 
@@ -2418,10 +2518,10 @@ state follows the existing recovery proof. Checkpoint approval does not mutate
 task/submission state or credentials. Task/specification changes with a CONTINUE
 disposition supersede checkpoint approvals and refresh worker context.
 
-`project wait` polls audit sequences in the short-lived CLI process with a
+`project wait` polls audit sequences in a short lived CLI process with a
 maximum 60-second timeout. Audit rows are the only cursor authority. The response
-states that host wakeup remains required. No daemon, model-provider call, or
-background service is introduced.
+states that host wakeup remains required for that command. The foreground
+controller instead waits directly on Codex and Taskledger state; it is not a daemon.
 
 `project preflight` performs bounded standard-library checks and a one-second TCP
 connect for each declared service. It reports TOML presence and selected fields,

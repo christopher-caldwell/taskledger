@@ -24,6 +24,10 @@ from .model import (
 from .ports import AgentRuntime, LedgerPort
 
 
+class ConfigurationDrift(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class SupervisorConfig:
     max_worker_turns: int = 20
@@ -62,6 +66,13 @@ class Supervisor:
         runtime: AgentRuntime,
         journal: Journal,
         config: SupervisorConfig | None = None,
+        worker_capacity: asyncio.Semaphore | None = None,
+        reviewer_capacity: asyncio.Semaphore | None = None,
+        run_worker_turn_limit: int | None = None,
+        run_reviewer_turn_limit: int | None = None,
+        worker_token_reserve: int = 0,
+        manage_run: bool = True,
+        reconcile_runtime: bool = True,
     ) -> None:
         self.project_id = project_id
         self.run_id = run_id
@@ -69,6 +80,13 @@ class Supervisor:
         self.runtime = runtime
         self.journal = journal
         self.config = config or SupervisorConfig()
+        self.worker_capacity = worker_capacity
+        self.reviewer_capacity = reviewer_capacity
+        self.run_worker_turn_limit = run_worker_turn_limit
+        self.run_reviewer_turn_limit = run_reviewer_turn_limit
+        self.worker_token_reserve = worker_token_reserve
+        self.manage_run = manage_run
+        self.reconcile_runtime = reconcile_runtime
         self.config.validate()
 
     async def reconcile_open_turns(self) -> list[str]:
@@ -81,11 +99,27 @@ class Supervisor:
                 continue
             inspection = await self.runtime.inspect_turn(RuntimeTurnHandle(turn.thread_id, turn.external_turn_id))
             if inspection.state == "COMPLETED" and inspection.result is not None:
+                self.journal.record_usage_events(turn.id, self.runtime.usage_events(inspection.result.handle))
                 self.journal.complete_turn(turn.id, inspection.result)
             elif inspection.state == "FAILED":
                 self.journal.fail_turn(turn.id, inspection.error or "external turn failed", uncertain=False)
             elif inspection.state == "RUNNING":
-                problems.append(turn.id)
+                handle = RuntimeTurnHandle(turn.thread_id, turn.external_turn_id)
+                try:
+                    result = await asyncio.wait_for(self.runtime.wait_turn(handle), timeout=self.config.turn_timeout_seconds)
+                except Exception as exc:
+                    final = await self.runtime.inspect_turn(handle)
+                    if final.state == "COMPLETED" and final.result is not None:
+                        result = final.result
+                    elif final.state == "FAILED":
+                        self.journal.fail_turn(turn.id, final.error or str(exc), uncertain=False)
+                        continue
+                    else:
+                        self.journal.fail_turn(turn.id, final.error or str(exc), uncertain=True)
+                        problems.append(turn.id)
+                        continue
+                self.journal.record_usage_events(turn.id, self.runtime.usage_events(result.handle))
+                self.journal.complete_turn(turn.id, result)
             else:
                 self.journal.fail_turn(turn.id, inspection.error or "external turn outcome unknown", uncertain=True)
                 problems.append(turn.id)
@@ -93,23 +127,34 @@ class Supervisor:
 
     def reconcile_resolved_reviewer_sessions(self) -> None:
         for session in self.journal.active_sessions(project_id=self.project_id, role=SessionRole.REVIEWER.value):
-            if self.ledger.submission_pending(session.subject_id):
-                continue
             turn = self.journal.terminal_unconsumed_turn(session.id)
+            pending = (
+                self.ledger.checkpoint_pending(session.subject_id)
+                if turn is not None and turn.prompt_kind == "checkpoint-reviewer"
+                else self.ledger.submission_pending(session.subject_id)
+            )
+            if pending:
+                continue
             if turn is not None and turn.state in {"COMPLETED", "FAILED"}:
                 self.journal.consume_turn(turn.id)
             self.journal.close_session(session.id)
 
     async def run_assignment(self, assignment_id: str) -> SupervisorResult:
-        with self.journal.project_lock(self.project_id):
+        if self.manage_run:
+            with self.journal.project_lock(self.project_id):
+                return await self._run_assignment(assignment_id)
+        return await self._run_assignment(assignment_id)
+
+    async def _run_assignment(self, assignment_id: str) -> SupervisorResult:
             new_worker_turns = 0
             new_reviewer_turns = 0
             reviews = 0
             try:
-                recovery = await self.reconcile_open_turns()
-                if recovery:
-                    return self._pause(assignment_id, PauseReason.RUNTIME_UNCERTAIN, f"unresolved external turns: {', '.join(recovery)}")
-                self.reconcile_resolved_reviewer_sessions()
+                if self.reconcile_runtime:
+                    recovery = await self.reconcile_open_turns()
+                    if recovery:
+                        return self._pause(assignment_id, PauseReason.RUNTIME_UNCERTAIN, f"unresolved external turns: {', '.join(recovery)}")
+                    self.reconcile_resolved_reviewer_sessions()
 
                 while True:
                     view = self.ledger.execution_view(assignment_id)
@@ -141,7 +186,12 @@ class Supervisor:
                             preparation = self.ledger.prepare_review(view.pending_submission_id)
                         except Exception as exc:
                             return self._pause(assignment_id, PauseReason.INVALID_STATE, f"submission is not safe to review: {exc}", new_worker_turns, new_reviewer_turns, reviews)
-                        verdict, turn_id, started, error = await self._review(preparation)
+                        try:
+                            if self._run_reviewer_budget_exhausted():
+                                return self._pause(assignment_id, PauseReason.BUDGET_EXHAUSTED, "project reviewer turn budget exhausted", new_worker_turns, new_reviewer_turns, reviews)
+                            verdict, turn_id, started, error = await self._review(preparation)
+                        except ConfigurationDrift as exc:
+                            return self._pause(assignment_id, PauseReason.CONFIGURATION_DRIFT, str(exc), new_worker_turns, new_reviewer_turns, reviews)
                         new_reviewer_turns += started
                         if error == TurnExecutionState.UNCERTAIN:
                             return self._pause(assignment_id, PauseReason.RUNTIME_UNCERTAIN, "reviewer outcome is uncertain", new_worker_turns, new_reviewer_turns, reviews)
@@ -150,6 +200,12 @@ class Supervisor:
                         try:
                             self.ledger.apply_review(preparation.submission_id, verdict)
                         except Exception as exc:
+                            post_error_view = self.ledger.execution_view(assignment_id)
+                            classified = self._terminal_result(
+                                assignment_id, post_error_view, new_worker_turns, new_reviewer_turns, reviews
+                            )
+                            if classified is not None:
+                                return classified
                             return self._pause(assignment_id, PauseReason.INVALID_STATE, f"ledger refused reviewer verdict: {exc}", new_worker_turns, new_reviewer_turns, reviews)
                         self.journal.consume_turn(turn_id)
                         reviewer = self.journal.find_active_session(project_id=self.project_id, role=SessionRole.REVIEWER.value, subject_id=preparation.submission_id)
@@ -158,64 +214,142 @@ class Supervisor:
                         reviews += 1
                         continue
 
+                    if view.status == ExecutionStatus.CHECKPOINT:
+                        if not view.pending_checkpoint_id:
+                            return self._pause(assignment_id, PauseReason.INVALID_STATE, "checkpoint state has no pending checkpoint", new_worker_turns, new_reviewer_turns, reviews)
+                        if self._elapsed_budget_exhausted() or self._token_budget_exhausted():
+                            return self._pause(assignment_id, PauseReason.BUDGET_EXHAUSTED, "controller admission budget exhausted", new_worker_turns, new_reviewer_turns, reviews)
+                        try:
+                            preparation = self.ledger.prepare_checkpoint_review(view.pending_checkpoint_id)
+                            if self._run_reviewer_budget_exhausted():
+                                return self._pause(assignment_id, PauseReason.BUDGET_EXHAUSTED, "project reviewer turn budget exhausted", new_worker_turns, new_reviewer_turns, reviews)
+                            verdict, turn_id, started, error = await self._review(preparation, review_kind="checkpoint")
+                        except ConfigurationDrift as exc:
+                            return self._pause(assignment_id, PauseReason.CONFIGURATION_DRIFT, str(exc), new_worker_turns, new_reviewer_turns, reviews)
+                        except Exception as exc:
+                            return self._pause(assignment_id, PauseReason.INVALID_STATE, f"checkpoint is not safe to review: {exc}", new_worker_turns, new_reviewer_turns, reviews)
+                        new_reviewer_turns += started
+                        if error == TurnExecutionState.UNCERTAIN:
+                            return self._pause(assignment_id, PauseReason.RUNTIME_UNCERTAIN, "checkpoint reviewer outcome is uncertain", new_worker_turns, new_reviewer_turns, reviews)
+                        if verdict is None or turn_id is None:
+                            return self._pause(assignment_id, PauseReason.REVIEWER_FAILURE, "checkpoint reviewer verdict budget exhausted", new_worker_turns, new_reviewer_turns, reviews)
+                        try:
+                            self.ledger.apply_checkpoint_review(preparation.submission_id, verdict)
+                        except Exception as exc:
+                            if not self.ledger.checkpoint_pending(preparation.submission_id):
+                                self.journal.consume_turn(turn_id)
+                                self._close_reviewer(preparation.submission_id)
+                                reviews += 1
+                                continue
+                            return self._pause(assignment_id, PauseReason.INVALID_STATE, f"ledger refused checkpoint verdict: {exc}", new_worker_turns, new_reviewer_turns, reviews)
+                        self.journal.consume_turn(turn_id)
+                        self._close_reviewer(preparation.submission_id)
+                        reviews += 1
+                        continue
+
                     if view.status != ExecutionStatus.ACTIVE:
                         return self._pause(assignment_id, PauseReason.INVALID_STATE, f"unexpected execution status {view.status.value}", new_worker_turns, new_reviewer_turns, reviews)
 
-                    worker = await self._worker_session(assignment_id, view.profile)
-                    if worker.profile != view.profile:
-                        return self._pause(assignment_id, PauseReason.INVALID_STATE, "persisted worker profile changed", new_worker_turns, new_reviewer_turns, reviews)
-                    worker_limit = self.config.max_worker_turns + self.journal.granted_amount(run_id=self.run_id, kind="WORKER_TURNS")
-                    if self.journal.session_turn_count(worker.id) >= worker_limit:
-                        return self._pause(assignment_id, PauseReason.MAX_TURNS, "worker turn budget exhausted", new_worker_turns, new_reviewer_turns, reviews)
-                    if self._token_budget_exhausted() or self._elapsed_budget_exhausted():
-                        return self._pause(assignment_id, PauseReason.BUDGET_EXHAUSTED, "controller admission budget exhausted", new_worker_turns, new_reviewer_turns, reviews)
-
-                    execution = await self._run_turn(
-                        worker,
-                        prompt=self.ledger.worker_prompt(assignment_id, first_turn=self.journal.session_turn_count(worker.id) == 0),
-                        prompt_kind="worker",
-                        progress_before=self.ledger.progress_fingerprint(assignment_id),
-                    )
+                    if self.worker_capacity is None:
+                        worker_result = await self._run_worker_turn(assignment_id, view.profile)
+                    else:
+                        async with self.worker_capacity:
+                            worker_result = await self._run_worker_turn(assignment_id, view.profile)
+                    if isinstance(worker_result, SupervisorResult):
+                        return self._pause(
+                            assignment_id,
+                            worker_result.pause_reason or PauseReason.INVALID_STATE,
+                            worker_result.detail or "worker turn was not admitted",
+                            new_worker_turns,
+                            new_reviewer_turns,
+                            reviews,
+                        )
+                    execution = worker_result
                     new_worker_turns += 1
                     if execution.state == TurnExecutionState.UNCERTAIN:
                         return self._pause(assignment_id, PauseReason.RUNTIME_UNCERTAIN, execution.error or "worker outcome uncertain", new_worker_turns, new_reviewer_turns, reviews)
             except Exception as exc:
-                self.journal.finish_run(self.run_id, "FAILED", reason=PauseReason.INVALID_STATE.value, detail=str(exc))
+                if self.manage_run:
+                    self.journal.finish_run(self.run_id, "FAILED", reason=PauseReason.INVALID_STATE.value, detail=str(exc))
                 raise
 
     async def _worker_session(self, assignment_id: str, profile: str) -> AgentSession:
         existing = self.journal.find_active_session(project_id=self.project_id, role=SessionRole.WORKER.value, subject_id=assignment_id)
         cwd = self.ledger.worker_cwd(assignment_id)
-        config_hash = sha256(canonical({"profile": profile, "cwd": cwd, "writable": True}))
+        identity = self.runtime.session_identity(role=SessionRole.WORKER, profile=profile, subject_id=assignment_id, cwd=cwd, writable=True)
+        runtime_identity = identity.as_dict()
+        config_hash = sha256(canonical(runtime_identity))
         if existing:
-            if existing.config_hash != config_hash:
-                return existing
+            if existing.config_hash != config_hash or existing.runtime_identity != runtime_identity:
+                raise ConfigurationDrift("persisted worker runtime configuration differs from the resolved profile")
             await self.runtime.resume_session(thread_id=existing.thread_id, role=SessionRole.WORKER, profile=profile, subject_id=assignment_id, cwd=cwd, writable=True)
             return existing
         runtime_session = await self.runtime.start_session(role=SessionRole.WORKER, profile=profile, subject_id=assignment_id, cwd=cwd, writable=True)
-        return self.journal.create_session(run_id=self.run_id, project_id=self.project_id, role=SessionRole.WORKER.value, profile=profile, subject_id=assignment_id, external_thread_id=runtime_session.thread_id, config_hash=config_hash)
+        if runtime_session.identity and runtime_session.identity != identity:
+            raise ConfigurationDrift("runtime started a worker with an unexpected semantic configuration")
+        return self.journal.create_session(run_id=self.run_id, project_id=self.project_id, role=SessionRole.WORKER.value, profile=profile, subject_id=assignment_id, external_thread_id=runtime_session.thread_id, config_hash=config_hash, runtime_identity=runtime_identity)
 
-    async def _review(self, preparation: ReviewPreparation) -> tuple[ReviewVerdict | None, str | None, int, TurnExecutionState | None]:
+    async def _run_worker_turn(self, assignment_id: str, profile: str) -> TurnExecution | SupervisorResult:
+        try:
+            worker = await self._worker_session(assignment_id, profile)
+        except ConfigurationDrift as exc:
+            return SupervisorResult(SupervisorStatus.PAUSED, assignment_id, PauseReason.CONFIGURATION_DRIFT, str(exc))
+        worker_limit = self.config.max_worker_turns + self.journal.granted_amount(
+            run_id=self.run_id, kind="WORKER_TURNS"
+        )
+        if self.journal.session_turn_count(worker.id) >= worker_limit:
+            return SupervisorResult(SupervisorStatus.PAUSED, assignment_id, PauseReason.MAX_TURNS, "worker turn budget exhausted")
+        if self.journal.consecutive_stalled_turns(worker.id) >= self.config.max_consecutive_stalled_turns:
+            return SupervisorResult(SupervisorStatus.PAUSED, assignment_id, PauseReason.STALLED, "worker made no durable progress")
+        if self.journal.consecutive_failures(worker.id) >= self.config.max_consecutive_runtime_failures:
+            return SupervisorResult(SupervisorStatus.PAUSED, assignment_id, PauseReason.RUNTIME_FAILED, "worker runtime failure budget exhausted")
+        if self._token_budget_exhausted(self.worker_token_reserve) or self._elapsed_budget_exhausted():
+            return SupervisorResult(SupervisorStatus.PAUSED, assignment_id, PauseReason.BUDGET_EXHAUSTED, "controller admission budget exhausted")
+        if self._run_worker_budget_exhausted():
+            return SupervisorResult(SupervisorStatus.PAUSED, assignment_id, PauseReason.BUDGET_EXHAUSTED, "project worker turn budget exhausted")
+        return await self._run_turn(
+            worker,
+            prompt=self.ledger.worker_prompt(
+                assignment_id, first_turn=self.journal.session_turn_count(worker.id) == 0
+            ),
+            prompt_kind="worker",
+            progress_before=self.ledger.progress_fingerprint(assignment_id),
+        )
+
+    async def _review(self, preparation: ReviewPreparation, *, review_kind: str = "submission") -> tuple[ReviewVerdict | None, str | None, int, TurnExecutionState | None]:
+        if self.reviewer_capacity is None:
+            return await self._review_with_capacity(preparation, review_kind=review_kind)
+        async with self.reviewer_capacity:
+            return await self._review_with_capacity(preparation, review_kind=review_kind)
+
+    async def _review_with_capacity(self, preparation: ReviewPreparation, *, review_kind: str) -> tuple[ReviewVerdict | None, str | None, int, TurnExecutionState | None]:
         subject = preparation.submission_id
         session = self.journal.find_active_session(project_id=self.project_id, role=SessionRole.REVIEWER.value, subject_id=subject)
-        cwd = self.ledger.reviewer_cwd(subject)
-        config_hash = sha256(canonical({"profile": self.config.reviewer_profile, "cwd": cwd, "writable": False}))
+        cwd = self.ledger.checkpoint_reviewer_cwd(subject) if review_kind == "checkpoint" else self.ledger.reviewer_cwd(subject)
+        identity = self.runtime.session_identity(role=SessionRole.REVIEWER, profile=self.config.reviewer_profile, subject_id=subject, cwd=cwd, writable=False)
+        runtime_identity = identity.as_dict()
+        config_hash = sha256(canonical(runtime_identity))
         if session is None:
             runtime_session = await self.runtime.start_session(role=SessionRole.REVIEWER, profile=self.config.reviewer_profile, subject_id=subject, cwd=cwd, writable=False)
-            session = self.journal.create_session(run_id=self.run_id, project_id=self.project_id, role=SessionRole.REVIEWER.value, profile=self.config.reviewer_profile, subject_id=subject, external_thread_id=runtime_session.thread_id, config_hash=config_hash)
-        elif session.config_hash != config_hash:
-            return None, None, 0, TurnExecutionState.KNOWN_FAILED
+            if runtime_session.identity and runtime_session.identity != identity:
+                raise ConfigurationDrift("runtime started a reviewer with an unexpected semantic configuration")
+            session = self.journal.create_session(run_id=self.run_id, project_id=self.project_id, role=SessionRole.REVIEWER.value, profile=self.config.reviewer_profile, subject_id=subject, external_thread_id=runtime_session.thread_id, config_hash=config_hash, runtime_identity=runtime_identity)
+        elif session.config_hash != config_hash or session.runtime_identity != runtime_identity:
+            raise ConfigurationDrift("persisted reviewer runtime configuration differs from the resolved profile")
         else:
             await self.runtime.resume_session(thread_id=session.thread_id, role=SessionRole.REVIEWER, profile=self.config.reviewer_profile, subject_id=subject, cwd=cwd, writable=False)
 
         started = 0
         reviewer_limit = self.config.max_reviewer_turns_per_submission + self.journal.granted_amount(run_id=self.run_id, kind="REVIEWER_TURNS")
+        prompt = self.ledger.checkpoint_reviewer_prompt(preparation) if review_kind == "checkpoint" else self.ledger.reviewer_prompt(preparation)
+        schema = self.ledger.checkpoint_reviewer_output_schema(preparation) if review_kind == "checkpoint" else self.ledger.reviewer_output_schema(preparation)
+        prompt_kind = "checkpoint-reviewer" if review_kind == "checkpoint" else "reviewer"
         while self.journal.session_turn_count(session.id) < reviewer_limit:
             terminal = self.journal.terminal_unconsumed_turn(session.id)
             if terminal is None:
-                if self._token_budget_exhausted():
+                if self._token_budget_exhausted() or self._run_reviewer_budget_exhausted():
                     return None, None, started, TurnExecutionState.KNOWN_FAILED
-                execution = await self._run_turn(session, prompt=self.ledger.reviewer_prompt(preparation), prompt_kind="reviewer", output_schema=self.ledger.reviewer_output_schema(preparation))
+                execution = await self._run_turn(session, prompt=prompt, prompt_kind=prompt_kind, output_schema=schema)
                 started += 1
                 if execution.state == TurnExecutionState.UNCERTAIN:
                     return None, execution.local_turn_id, started, execution.state
@@ -230,6 +364,13 @@ class Supervisor:
                 return verdict, terminal.id, started, None
             self.journal.consume_turn(terminal.id)
         return None, None, started, TurnExecutionState.KNOWN_FAILED
+
+    def _close_reviewer(self, subject_id: str) -> None:
+        reviewer = self.journal.find_active_session(
+            project_id=self.project_id, role=SessionRole.REVIEWER.value, subject_id=subject_id
+        )
+        if reviewer:
+            self.journal.close_session(reviewer.id)
 
     async def _run_turn(self, session: AgentSession, *, prompt: str, prompt_kind: str, progress_before: str | None = None, output_schema: dict[str, Any] | None = None) -> TurnExecution:
         local_id = self.journal.begin_turn(session.id, prompt_kind, progress_before=progress_before)
@@ -251,12 +392,14 @@ class Supervisor:
             else:
                 self.journal.fail_turn(local_id, inspection.error or str(exc), uncertain=True)
                 return TurnExecution(TurnExecutionState.UNCERTAIN, local_id, error=inspection.error or str(exc))
+        self.journal.record_usage_events(local_id, self.runtime.usage_events(result.handle))
         self.journal.complete_turn(local_id, result)
         return TurnExecution(TurnExecutionState.COMPLETED, local_id, result=result)
 
     def _terminal_result(self, assignment_id: str, view, worker_turns: int, reviewer_turns: int, reviews: int) -> SupervisorResult | None:
         if view.status == ExecutionStatus.COMPLETED:
-            self.journal.finish_run(self.run_id, "COMPLETED")
+            if self.manage_run:
+                self.journal.finish_run(self.run_id, "COMPLETED")
             return SupervisorResult(SupervisorStatus.INTEGRATED, assignment_id, worker_turns=worker_turns, reviewer_turns=reviewer_turns, submission_reviews=reviews, usage=self.journal.usage(run_id=self.run_id))
         mapping = {
             ExecutionStatus.BLOCKED: PauseReason.BLOCKED,
@@ -267,24 +410,41 @@ class Supervisor:
         reason = mapping.get(view.status)
         return self._pause(assignment_id, reason, view.detail or view.status.value, worker_turns, reviewer_turns, reviews) if reason else None
 
-    def _token_budget_exhausted(self) -> bool:
+    def _token_budget_exhausted(self, reserve: int = 0) -> bool:
         limit = self.config.max_total_tokens
         if limit is None:
             return False
+        if self.journal.missing_usage_count(run_id=self.run_id):
+            return True
         limit += self.journal.granted_amount(run_id=self.run_id, kind="TOKENS")
-        return self.journal.usage(run_id=self.run_id).total_tokens >= limit
+        return self.journal.usage(run_id=self.run_id).total_tokens >= max(0, limit - reserve)
+
+    def _run_worker_budget_exhausted(self) -> bool:
+        if self.run_worker_turn_limit is None:
+            return False
+        limit = self.run_worker_turn_limit + self.journal.granted_amount(run_id=self.run_id, kind="WORKER_TURNS")
+        return self.journal.run_turn_count(run_id=self.run_id, roles=(SessionRole.WORKER.value,)) >= limit
+
+    def _run_reviewer_budget_exhausted(self) -> bool:
+        if self.run_reviewer_turn_limit is None:
+            return False
+        limit = self.run_reviewer_turn_limit + self.journal.granted_amount(run_id=self.run_id, kind="REVIEWER_TURNS")
+        roles = (SessionRole.REVIEWER.value, SessionRole.REQUIREMENT_REVIEWER.value)
+        return self.journal.run_turn_count(run_id=self.run_id, roles=roles) >= limit
 
     def _elapsed_budget_exhausted(self) -> bool:
         limit = self.config.max_elapsed_seconds + self.journal.granted_amount(run_id=self.run_id, kind="ELAPSED_SECONDS")
         return self.journal.elapsed_seconds(run_id=self.run_id) >= limit
 
     def _pause(self, assignment_id: str, reason: PauseReason, detail: str, worker_turns: int = 0, reviewer_turns: int = 0, reviews: int = 0) -> SupervisorResult:
-        self.journal.finish_run(self.run_id, "PAUSED", reason=reason.value, detail=detail)
+        if self.manage_run:
+            self.journal.finish_run(self.run_id, "PAUSED", reason=reason.value, detail=detail)
         return SupervisorResult(SupervisorStatus.PAUSED, assignment_id, reason, detail, worker_turns, reviewer_turns, reviews, self.journal.usage(run_id=self.run_id))
 
 
 def parse_verdict(payload: dict[str, Any] | None, *, expected_criterion_ids: tuple[str, ...], acceptance_allowed: bool) -> ReviewVerdict | None:
-    if not isinstance(payload, dict):
+    expected_fields = {"outcome", "criterion_results", "behavior_matches_intent", "required_evidence_present", "blocking_issues_remaining", "corrections", "notes", "blocker_id", "blocker"}
+    if not isinstance(payload, dict) or set(payload) != expected_fields:
         return None
     try:
         outcome = ReviewOutcome(payload["outcome"])
@@ -294,7 +454,7 @@ def parse_verdict(payload: dict[str, Any] | None, *, expected_criterion_ids: tup
         normalized: list[dict[str, Any]] = []
         seen: set[str] = set()
         for item in criteria:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or set(item) != {"criterion_id", "satisfied", "evidence"}:
                 return None
             criterion_id, satisfied, evidence = item.get("criterion_id"), item.get("satisfied"), item.get("evidence")
             if not isinstance(criterion_id, str) or criterion_id in seen or not isinstance(satisfied, bool) or not isinstance(evidence, str) or not evidence:
@@ -318,6 +478,14 @@ def parse_verdict(payload: dict[str, Any] | None, *, expected_criterion_ids: tup
             return None
         blocker_id = payload.get("blocker_id")
         blocker = payload.get("blocker")
+        if blocker_id is not None and (not isinstance(blocker_id, str) or not blocker_id):
+            return None
+        if blocker is not None and (
+            not isinstance(blocker, dict)
+            or set(blocker) != {"category", "description"}
+            or not all(isinstance(blocker.get(key), str) and blocker[key] for key in ("category", "description"))
+        ):
+            return None
         if outcome == ReviewOutcome.BLOCKED and bool(blocker_id) == bool(blocker):
             return None
         return ReviewVerdict(outcome, tuple(normalized), behavior, evidence_present, blocking, corrections, notes, blocker_id, blocker)

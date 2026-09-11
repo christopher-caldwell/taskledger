@@ -30,6 +30,7 @@ class AgentSession:
     subject_id: str
     thread_id: str
     config_hash: str
+    runtime_identity: dict[str, Any]
     state: str
 
 
@@ -47,6 +48,7 @@ class TerminalTurn:
     id: str
     session_id: str
     state: str
+    prompt_kind: str
     thread_id: str
     external_turn_id: str | None
     result: RuntimeTurnResult | None
@@ -103,6 +105,26 @@ class Journal:
                 "INSERT INTO controller_runs(id,project_id,mode,state,config_json,created_at,started_at) VALUES(?,?,?,?,?,?,?)",
                 (run_id, project_id, mode, "RUNNING", canonical(config), stamp, stamp),
             )
+        return run_id
+
+    def create_project_run(self, project_id: str, *, config: dict[str, Any], targets: list[dict[str, Any]]) -> str:
+        run_id = new_id()
+        stamp = now()
+        with transaction(self.con):
+            active = self.con.execute(
+                "SELECT id FROM controller_runs WHERE project_id=? AND state='RUNNING' LIMIT 1", (project_id,)
+            ).fetchone()
+            if active:
+                raise RuntimeError(f"controller run {active['id']} is already running for this project")
+            self.con.execute(
+                "INSERT INTO controller_runs(id,project_id,mode,state,config_json,created_at,started_at) VALUES(?,?,?,?,?,?,?)",
+                (run_id, project_id, "PROJECT", "RUNNING", canonical(config), stamp, stamp),
+            )
+            for target in targets:
+                self.con.execute(
+                    "INSERT INTO controller_run_targets(run_id,task_id,wave,worker_profile,parallel_safe,write_surfaces_json,assignment_id,state) VALUES(?,?,?,?,?,?,NULL,'QUEUED')",
+                    (run_id, target["task_id"], target["wave"], target["worker_profile"], int(target["parallel_safe"]), canonical(target["write_surfaces"])),
+                )
         return run_id
 
     def resume_run(self, run_id: str) -> dict[str, Any]:
@@ -169,14 +191,16 @@ class Journal:
         subject_id: str,
         external_thread_id: str,
         config_hash: str,
+        runtime_identity: dict[str, Any] | None = None,
     ) -> AgentSession:
         session_id = new_id()
+        identity = runtime_identity or {}
         with transaction(self.con):
             self.con.execute(
-                "INSERT INTO controller_sessions VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (session_id, run_id, project_id, role, profile, subject_id, external_thread_id, config_hash, "ACTIVE", now(), None),
+                "INSERT INTO controller_sessions(id,run_id,project_id,role,profile,subject_id,external_thread_id,config_hash,runtime_identity_json,state,created_at,closed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (session_id, run_id, project_id, role, profile, subject_id, external_thread_id, config_hash, canonical(identity), "ACTIVE", now(), None),
             )
-        return AgentSession(session_id, run_id, project_id, role, profile, subject_id, external_thread_id, config_hash, "ACTIVE")
+        return AgentSession(session_id, run_id, project_id, role, profile, subject_id, external_thread_id, config_hash, identity, "ACTIVE")
 
     def close_session(self, session_id: str, *, uncertain: bool = False) -> None:
         with transaction(self.con):
@@ -205,6 +229,12 @@ class Journal:
 
     def acknowledge_turn(self, local_turn_id: str, handle: RuntimeTurnHandle) -> None:
         with transaction(self.con):
+            owner = self.con.execute(
+                "SELECT s.external_thread_id FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE t.id=?",
+                (local_turn_id,),
+            ).fetchone()
+            if not owner or owner["external_thread_id"] != handle.thread_id:
+                raise RuntimeError("turn acknowledgement thread does not match its session")
             cur = self.con.execute(
                 "UPDATE controller_turns SET state='RUNNING',external_turn_id=? WHERE id=? AND state='DISPATCHING'",
                 (handle.turn_id, local_turn_id),
@@ -215,16 +245,42 @@ class Journal:
     def complete_turn(self, local_turn_id: str, result: RuntimeTurnResult) -> None:
         payload = canonical(result.structured_output) if result.structured_output is not None else None
         with transaction(self.con):
-            row = self.con.execute("SELECT state,external_turn_id FROM controller_turns WHERE id=?", (local_turn_id,)).fetchone()
+            row = self.con.execute(
+                "SELECT t.*,s.external_thread_id FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE t.id=?",
+                (local_turn_id,),
+            ).fetchone()
             if not row or row["state"] not in {"RUNNING", "COMPLETED"}:
                 raise RuntimeError("completed turn is not reconcilable")
-            if row["external_turn_id"] != result.handle.turn_id:
+            if row["external_turn_id"] != result.handle.turn_id or row["external_thread_id"] != result.handle.thread_id:
                 raise RuntimeError("completed turn identity does not match")
+            if row["state"] == "COMPLETED":
+                persisted = (
+                    row["result_json"], row["final_response"], row["input_tokens"], row["cached_input_tokens"],
+                    row["output_tokens"], row["reasoning_tokens"], row["usage_missing"],
+                )
+                incoming = (
+                    payload, result.final_response, result.usage.input_tokens, result.usage.cached_input_tokens,
+                    result.usage.output_tokens, result.usage.reasoning_tokens, int(result.usage_missing),
+                )
+                if persisted != incoming:
+                    raise RuntimeError("completed turn result conflicts with the persisted result")
+                return
             self.con.execute(
-                "UPDATE controller_turns SET state='COMPLETED',result_json=?,final_response=?,input_tokens=?,cached_input_tokens=?,output_tokens=?,reasoning_tokens=?,finished_at=? WHERE id=?",
+                "UPDATE controller_turns SET state='COMPLETED',result_json=?,final_response=?,input_tokens=?,cached_input_tokens=?,output_tokens=?,reasoning_tokens=?,usage_missing=?,finished_at=? WHERE id=?",
                 (payload, result.final_response, result.usage.input_tokens, result.usage.cached_input_tokens,
-                 result.usage.output_tokens, result.usage.reasoning_tokens, now(), local_turn_id),
+                 result.usage.output_tokens, result.usage.reasoning_tokens, int(result.usage_missing), now(), local_turn_id),
             )
+
+    def record_usage_events(self, local_turn_id: str, events: tuple[dict[str, Any], ...]) -> None:
+        with transaction(self.con):
+            for event in events:
+                raw = canonical(event)
+                event_id = str(event.get("event_id") or hashlib.sha256(raw.encode()).hexdigest())
+                usage = event.get("usage") or {}
+                self.con.execute(
+                    "INSERT OR IGNORE INTO controller_usage_events(id,turn_id,external_event_id,raw_json,input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (new_id(), local_turn_id, event_id, raw, usage.get("input_tokens"), usage.get("cached_input_tokens"), usage.get("output_tokens"), usage.get("reasoning_tokens"), now()),
+                )
 
     def fail_turn(self, local_turn_id: str, error: str, *, uncertain: bool) -> None:
         with transaction(self.con):
@@ -263,6 +319,21 @@ class Journal:
     def session_turn_count(self, session_id: str) -> int:
         return self.con.execute("SELECT COUNT(*) FROM controller_turns WHERE session_id=?", (session_id,)).fetchone()[0]
 
+    def run_turn_count(self, *, run_id: str, roles: tuple[str, ...]) -> int:
+        if not roles:
+            return 0
+        placeholders = ",".join("?" for _ in roles)
+        return int(self.con.execute(
+            f"SELECT COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND s.role IN ({placeholders})",
+            (run_id, *roles),
+        ).fetchone()[0])
+
+    def missing_usage_count(self, *, run_id: str) -> int:
+        return int(self.con.execute(
+            "SELECT COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state='COMPLETED' AND t.usage_missing=1",
+            (run_id,),
+        ).fetchone()[0])
+
     def consecutive_stalled_turns(self, session_id: str) -> int:
         rows = self.con.execute(
             "SELECT progressed FROM controller_turns WHERE session_id=? AND prompt_kind='worker' AND state='COMPLETED' AND consumed_at IS NOT NULL AND progressed IS NOT NULL ORDER BY sequence DESC",
@@ -294,6 +365,91 @@ class Journal:
         ).fetchone()
         return Usage(*map(int, row))
 
+    def usage_report(self, *, run_id: str) -> dict[str, Any]:
+        usage = self.usage(run_id=run_id)
+        missing = self.missing_usage_count(run_id=run_id)
+        turns = int(self.con.execute(
+            "SELECT COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state='COMPLETED'",
+            (run_id,),
+        ).fetchone()[0])
+        return {**usage.__dict__, "completed_turns": turns, "missing_usage_turns": missing, "complete": missing == 0}
+
+    def add_targets(self, run_id: str, targets: list[dict[str, Any]]) -> None:
+        with transaction(self.con):
+            for target in targets:
+                self.con.execute(
+                    "INSERT OR IGNORE INTO controller_run_targets(run_id,task_id,wave,worker_profile,parallel_safe,write_surfaces_json,assignment_id,state) VALUES(?,?,?,?,?,?,NULL,'QUEUED')",
+                    (run_id, target["task_id"], target["wave"], target["worker_profile"], int(target["parallel_safe"]), canonical(target["write_surfaces"])),
+                )
+
+    def targets(self, run_id: str) -> list[dict[str, Any]]:
+        rows = self.con.execute(
+            "SELECT * FROM controller_run_targets WHERE run_id=? ORDER BY wave,task_id", (run_id,)
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["parallel_safe"] = bool(item["parallel_safe"])
+            item["write_surfaces"] = json.loads(item.pop("write_surfaces_json"))
+            result.append(item)
+        return result
+
+    def activate_target(self, run_id: str, task_id: str, assignment_id: str) -> None:
+        with transaction(self.con):
+            cur = self.con.execute(
+                "UPDATE controller_run_targets SET assignment_id=?,state='ACTIVE' WHERE run_id=? AND task_id=? AND state='QUEUED'",
+                (assignment_id, run_id, task_id),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("controller target activation is stale")
+
+    def set_target_state(self, run_id: str, task_id: str, state: str, *, assignment_id: str | None = None) -> None:
+        if state not in {"QUEUED", "ACTIVE", "INTEGRATED", "BLOCKED", "CANCELLED"}:
+            raise ValueError(state)
+        with transaction(self.con):
+            self.con.execute(
+                "UPDATE controller_run_targets SET state=?,assignment_id=COALESCE(?,assignment_id) WHERE run_id=? AND task_id=?",
+                (state, assignment_id, run_id, task_id),
+            )
+
+    def reroute_target(self, run_id: str, task_id: str, *, profile: str, assignment_id: str | None = None) -> None:
+        if profile not in {"routine", "complex"}:
+            raise ValueError(profile)
+        with transaction(self.con):
+            self.con.execute(
+                "UPDATE controller_run_targets SET worker_profile=?,assignment_id=?,state='QUEUED' WHERE run_id=? AND task_id=?",
+                (profile, assignment_id, run_id, task_id),
+            )
+
+    def final_review(self, *, run_id: str, canonical_oid: str, plan_fingerprint: str) -> dict[str, Any] | None:
+        row = self.con.execute(
+            "SELECT * FROM controller_final_reviews WHERE run_id=? AND canonical_oid=? AND plan_fingerprint=? ORDER BY created_at DESC,id DESC LIMIT 1",
+            (run_id, canonical_oid, plan_fingerprint),
+        ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["verdict"] = json.loads(result.pop("verdict_json")) if result["verdict_json"] else None
+        return result
+
+    def create_final_review(self, *, run_id: str, canonical_oid: str, plan_fingerprint: str) -> str:
+        review_id = new_id()
+        with transaction(self.con):
+            self.con.execute(
+                "INSERT INTO controller_final_reviews(id,run_id,canonical_oid,plan_fingerprint,state,verdict_json,created_at,resolved_at) VALUES(?,?,?,?, 'PENDING',NULL,?,NULL)",
+                (review_id, run_id, canonical_oid, plan_fingerprint, now()),
+            )
+        return review_id
+
+    def resolve_final_review(self, review_id: str, *, state: str, verdict: dict[str, Any]) -> None:
+        if state not in {"SATISFIED", "DEFECTS", "AMBIGUOUS", "INVALID"}:
+            raise ValueError(state)
+        with transaction(self.con):
+            self.con.execute(
+                "UPDATE controller_final_reviews SET state=?,verdict_json=?,resolved_at=? WHERE id=? AND state='PENDING'",
+                (state, canonical(verdict), now(), review_id),
+            )
+
     def grant_budget(self, *, run_id: str, kind: str, amount: int, reason: str, principal_id: str) -> str:
         if kind not in {"WORKER_TURNS", "REVIEWER_TURNS", "TOKENS", "ELAPSED_SECONDS"} or not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
             raise ValueError("invalid controller budget grant")
@@ -320,7 +476,7 @@ class Journal:
 
     @staticmethod
     def _session(row) -> AgentSession:
-        return AgentSession(row["id"], row["run_id"], row["project_id"], row["role"], row["profile"], row["subject_id"], row["external_thread_id"], row["config_hash"], row["state"])
+        return AgentSession(row["id"], row["run_id"], row["project_id"], row["role"], row["profile"], row["subject_id"], row["external_thread_id"], row["config_hash"], json.loads(row["runtime_identity_json"]), row["state"])
 
     @staticmethod
     def _terminal(row) -> TerminalTurn:
@@ -332,5 +488,6 @@ class Journal:
                 structured_output=structured,
                 final_response=row["final_response"],
                 usage=Usage(row["input_tokens"], row["cached_input_tokens"], row["output_tokens"], row["reasoning_tokens"]),
+                usage_missing=bool(row["usage_missing"]),
             )
-        return TerminalTurn(row["id"], row["session_id"], row["state"], row["external_thread_id"], row["external_turn_id"], result, row["error"], row["progress_before"], row["progress_after"], None if row["progressed"] is None else bool(row["progressed"]))
+        return TerminalTurn(row["id"], row["session_id"], row["state"], row["prompt_kind"], row["external_thread_id"], row["external_turn_id"], result, row["error"], row["progress_before"], row["progress_after"], None if row["progressed"] is None else bool(row["progressed"]))

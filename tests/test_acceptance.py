@@ -84,8 +84,8 @@ class TaskledgerAcceptance(unittest.TestCase):
 
     def test_skill_declares_context_free_worker_spawn_contract(self):
         skill=(ROOT/"skills"/"taskledger"/"SKILL.md").read_text()
-        self.assertIn('fork_turns: "none"',skill)
-        self.assertIn("context-free spawn message self-contained",skill)
+        self.assertIn("foreground Python controller",skill)
+        self.assertIn("controller run-project",skill)
         self.assertIn("Prefer `routine`",skill)
         self.assertIn("Classify parallel safety separately",skill)
         self.assertIn("prospective write set",skill)
@@ -94,23 +94,23 @@ class TaskledgerAcceptance(unittest.TestCase):
         self.assertIn("`required_checks`",skill)
         self.assertIn("Concrete routing examples",skill)
         self.assertIn("small complex foundation followed by routine rollout tasks",skill)
-        self.assertIn("complete cross-project suite",skill)
+        self.assertIn("complete project suite",skill)
         self.assertIn("registered specifications as frozen",skill)
-        self.assertIn("not a generic “final hardening” worker",skill)
+        self.assertIn("primary purpose is to re-audit already integrated work",skill)
         self.assertIn("exhaustive public command and input registry",skill)
         self.assertIn("safe worktree prerequisites",skill)
         self.assertIn("`project cleanup`",skill)
-        self.assertIn("retaining every assignment branch and commit",skill)
+        self.assertIn("retains every assignment branch and commit",skill)
         self.assertIn("Retained workers and vertical checkpoints",skill)
         self.assertIn("`project wait`",skill)
         self.assertIn("`evidence export`",skill)
         self.assertIn("correction packet",skill)
-        self.assertNotIn('fork_turns: "all"',skill)
+        self.assertNotIn("primary orchestrator remains responsible",skill)
 
         installation=(ROOT/"docs"/"AI_ORCHESTRATED_TOOL_INSTALLATION.md").read_text()
         self.assertIn("Installation is a set of contracts",installation)
         self.assertIn("taskledger@personal",installation)
-        self.assertIn("Blueprint for a similar AI orchestrated tool",installation)
+        self.assertIn("Blueprint for a similar model-assisted tool",installation)
 
         for profile in ("routine","complex"):
             template=(ROOT/"skills"/"taskledger"/"assets"/f"taskledger-worker-{profile}.toml").read_text()
@@ -127,6 +127,9 @@ class TaskledgerAcceptance(unittest.TestCase):
         self.assertIn('name = "taskledger_reviewer"',reviewer)
         self.assertIn('model = "gpt-6-astra"',reviewer)
         self.assertIn("Do not edit files",reviewer)
+        creator=(ROOT/"skills"/"taskledger"/"assets"/"taskledger-task-creator.toml").read_text()
+        self.assertIn('name = "taskledger_task_creator"',creator)
+        self.assertIn("Do not schedule",creator)
 
         commands=(ROOT/"skills"/"taskledger"/"references"/"commands.md").read_text()
         self.assertIn("exhaustive public command and input registry",commands)
@@ -159,7 +162,7 @@ class TaskledgerAcceptance(unittest.TestCase):
 
         migrated=connect(prior_schema_home)
         self.assertEqual(migrated.execute("SELECT worker_profile FROM assignments").fetchone()[0],"complex")
-        self.assertEqual([row[0] for row in migrated.execute("SELECT version FROM schema_migrations ORDER BY version")],[1,2,3,4,5])
+        self.assertEqual([row[0] for row in migrated.execute("SELECT version FROM schema_migrations ORDER BY version")],[1,2,3,4,5,6])
         migrated.close()
 
     def test_task_create_confirms_success_after_post_commit_error(self):
@@ -747,6 +750,55 @@ class TaskledgerAcceptance(unittest.TestCase):
         self.assertEqual(result.status.value,"INTEGRATED")
         self.assertNotEqual(before,adapter.progress_fingerprint(assignment_id))
         self.assertEqual(service.con.execute("SELECT state FROM tasks WHERE id=?",(task_id,)).fetchone()[0],"COMPLETED")
+        service.con.close()
+
+    def test_controller_reviews_lightweight_checkpoint_before_continuing_worker(self):
+        import asyncio
+
+        from taskledger.controller.fakes import FakeRuntime, TurnScript, accepted_verdict
+        from taskledger.controller.journal import Journal
+        from taskledger.controller.supervisor import Supervisor, SupervisorConfig
+        from taskledger.controller.taskledger_adapter import TaskledgerLedgerAdapter
+        from taskledger.db import connect
+        from taskledger.service import Service
+
+        project_id=self.init();_,task_id=self.setup_task(project_id);self.command("plan","validate",{},project=project_id)
+        _,created=self.command("assignment","create",{
+            "task_id":task_id,"worker_profile":"routine","execution_mode":"lightweight",
+            "checkpoints":[{"label":"slice","criteria":["slice exists"]}],
+        },project=project_id)
+        token=self.assignment_token(created);assignment_id=created["data"]["assignment_id"]
+        service=Service(connect(self.home),self.home);project,orchestrator=service.auth_orchestrator(project_id,None)
+        worker=service.authenticate(None,token,"WORKER");worktree=Path(created["data"]["worktree_path"])
+
+        def checkpoint():
+            (worktree/"slice.txt").write_text("slice\n")
+            service.worker_checkpoint(worker,{"summary":"slice","evidence":[{"label":"file","details":"slice exists"}]})
+
+        def submit():
+            (worktree/"README").write_text("complete\n")
+            service.worker_submit(worker,{"summary":"complete","evidence":[{"label":"file","details":"complete"}],"risks":[],"unresolved_questions":[],"follow_up_work":[]})
+
+        def checkpoint_verdict():
+            return accepted_verdict(("checkpoint:1",))
+
+        def submission_verdict():
+            criterion=service.con.execute("SELECT id FROM task_acceptance_criteria WHERE task_id=?",(task_id,)).fetchone()[0]
+            return accepted_verdict((criterion,))
+
+        runtime=FakeRuntime(
+            worker_turns=[TurnScript(effect=checkpoint),TurnScript(effect=submit)],
+            reviewer_turns=[TurnScript(structured_output=checkpoint_verdict),TurnScript(structured_output=submission_verdict)],
+        )
+        config=SupervisorConfig();journal=Journal(service.con,self.home);run_id=journal.create_run(project_id,mode="ASSIGNMENT",config=config.__dict__)
+        result=asyncio.run(Supervisor(
+            project_id=project_id,run_id=run_id,ledger=TaskledgerLedgerAdapter(service,project,orchestrator),
+            runtime=runtime,journal=journal,config=config,
+        ).run_assignment(assignment_id))
+        self.assertEqual(result.status.value,"INTEGRATED")
+        self.assertEqual(result.worker_turns,2)
+        self.assertEqual(result.reviewer_turns,2)
+        self.assertEqual(service.con.execute("SELECT state FROM assignment_checkpoints WHERE assignment_id=?",(assignment_id,)).fetchone()[0],"APPROVED")
         service.con.close()
 
     def test_controller_cli_requires_live_opt_in_and_tracks_budget_grants(self):

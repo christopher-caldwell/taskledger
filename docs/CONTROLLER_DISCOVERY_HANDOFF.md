@@ -1,4 +1,6 @@
-# Taskledger executable controller: discovery handoff
+# Taskledger executable controller: historical discovery handoff
+
+> Historical record, superseded on 2026-09-11. This document preserves the evidence and decisions that led to the executable controller. Its discovery only instructions, source snapshot, exclusions, and statements that the controller is not implemented are not current guidance. The governing product and technical specifications and current source are authoritative.
 
 ## Read this first
 
