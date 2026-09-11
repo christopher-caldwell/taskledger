@@ -94,7 +94,7 @@ class Supervisor:
     async def reconcile_open_turns(self) -> list[str]:
         problems: list[str] = []
         for turn in self.journal.open_turns(project_id=self.project_id):
-            if turn.state == "UNCERTAIN" or turn.external_turn_id is None:
+            if turn.external_turn_id is None:
                 if turn.state != "UNCERTAIN":
                     self.journal.fail_turn(turn.id, "dispatch outcome unknown", uncertain=True)
                 problems.append(turn.id)
@@ -104,7 +104,7 @@ class Supervisor:
                 self.journal.record_usage_events(turn.id, self.runtime.usage_events(inspection.result.handle))
                 self.journal.complete_turn(turn.id, inspection.result)
             elif inspection.state == "FAILED":
-                self.journal.fail_turn(turn.id, inspection.error or "external turn failed", uncertain=False)
+                self.journal.fail_turn(turn.id, inspection.error or "external turn failed", uncertain=False, result=inspection.result)
             elif inspection.state == "RUNNING":
                 handle = RuntimeTurnHandle(turn.thread_id, turn.external_turn_id)
                 try:
@@ -114,7 +114,7 @@ class Supervisor:
                     if final.state == "COMPLETED" and final.result is not None:
                         result = final.result
                     elif final.state == "FAILED":
-                        self.journal.fail_turn(turn.id, final.error or str(exc), uncertain=False)
+                        self.journal.fail_turn(turn.id, final.error or str(exc), uncertain=False, result=final.result)
                         continue
                     else:
                         self.journal.fail_turn(turn.id, final.error or str(exc), uncertain=True)
@@ -431,10 +431,15 @@ class Supervisor:
             if inspection.state == "COMPLETED" and inspection.result:
                 result = inspection.result
             elif inspection.state == "FAILED":
-                self.journal.fail_turn(local_id, inspection.error or str(exc), uncertain=False)
+                self.journal.fail_turn(local_id, inspection.error or str(exc), uncertain=False, result=inspection.result)
                 return TurnExecution(TurnExecutionState.KNOWN_FAILED, local_id, error=inspection.error or str(exc))
             else:
-                self.journal.fail_turn(local_id, inspection.error or str(exc), uncertain=True)
+                self.journal.fail_turn(
+                    local_id,
+                    inspection.error or str(exc),
+                    uncertain=True,
+                    result=inspection.result,
+                )
                 return TurnExecution(TurnExecutionState.UNCERTAIN, local_id, error=inspection.error or str(exc))
         self.journal.record_usage_events(local_id, self.runtime.usage_events(result.handle))
         self.journal.complete_turn(local_id, result)

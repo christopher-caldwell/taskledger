@@ -252,6 +252,9 @@ class Journal:
                     canonical(packet.context_hashes if packet else {}), now(),
                 ),
             )
+            # Dispatch intent is potentially spend-bearing until a compatible
+            # terminal accounting observation proves otherwise.
+            self.con.execute("UPDATE controller_turns SET usage_missing=1 WHERE id=?", (turn_id,))
             session = self.con.execute("SELECT run_id,role,subject_id FROM controller_sessions WHERE id=?", (session_id,)).fetchone()
             self._append_event_locked(
                 session["run_id"], "SESSION", session_id, "TURN_DISPATCHED",
@@ -281,7 +284,7 @@ class Journal:
                 "SELECT t.*,s.external_thread_id,s.role FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE t.id=?",
                 (local_turn_id,),
             ).fetchone()
-            if not row or row["state"] not in {"RUNNING", "COMPLETED"}:
+            if not row or row["state"] not in {"RUNNING", "COMPLETED", "UNCERTAIN"}:
                 raise RuntimeError("completed turn is not reconcilable")
             if row["external_turn_id"] != result.handle.turn_id or row["external_thread_id"] != result.handle.thread_id:
                 raise RuntimeError("completed turn identity does not match")
@@ -329,7 +332,7 @@ class Journal:
     def latest_cumulative_usage(self, session_id: str) -> Usage | None:
         row = self.con.execute(
             "SELECT usage_after_json FROM controller_turns "
-            "WHERE session_id=? AND state='COMPLETED' AND usage_after_json IS NOT NULL "
+            "WHERE session_id=? AND state IN ('COMPLETED','FAILED','UNCERTAIN') AND usage_after_json IS NOT NULL "
             "ORDER BY sequence DESC LIMIT 1",
             (session_id,),
         ).fetchone()
@@ -358,12 +361,69 @@ class Journal:
             (run_id, scope_type, scope_id, event_type, reason_code, local_turn_id, canonical(attributes), now()),
         )
 
-    def fail_turn(self, local_turn_id: str, error: str, *, uncertain: bool) -> None:
+    def fail_turn(
+        self, local_turn_id: str, error: str, *, uncertain: bool,
+        result: RuntimeTurnResult | None = None,
+    ) -> None:
+        """Persist semantic failure and any independently observed spend together.
+
+        A failure result is an accounting observation, not a successful semantic
+        result.  Replays update the same external turn allocation and may improve
+        a missing/partial observation without adding a second allocation.
+        """
         with transaction(self.con):
-            self.con.execute(
-                "UPDATE controller_turns SET state=?,error=?,finished_at=? WHERE id=? AND state IN ('DISPATCHING','RUNNING')",
-                ("UNCERTAIN" if uncertain else "FAILED", error, now(), local_turn_id),
-            )
+            row = self.con.execute("SELECT * FROM controller_turns WHERE id=?", (local_turn_id,)).fetchone()
+            if not row:
+                raise RuntimeError("turn was not found")
+            state = "UNCERTAIN" if uncertain else "FAILED"
+            if row["state"] in {"DISPATCHING", "RUNNING"}:
+                self.con.execute(
+                    "UPDATE controller_turns SET state=?,error=?,finished_at=? WHERE id=?",
+                    (state, error, now(), local_turn_id),
+                )
+            elif row["state"] == "UNCERTAIN" and not uncertain:
+                self.con.execute(
+                    "UPDATE controller_turns SET state='FAILED',error=?,finished_at=? WHERE id=?",
+                    (error, now(), local_turn_id),
+                )
+            elif row["state"] not in {"FAILED", "UNCERTAIN"}:
+                raise RuntimeError("failed turn is not reconcilable")
+            if result is not None:
+                self._persist_usage_locked(local_turn_id, result)
+
+    def reconcile_usage(self, local_turn_id: str, result: RuntimeTurnResult) -> None:
+        """Idempotently reconcile a terminal allocation without changing outcome."""
+        with transaction(self.con):
+            row = self.con.execute("SELECT state FROM controller_turns WHERE id=?", (local_turn_id,)).fetchone()
+            if not row or row["state"] not in {"COMPLETED", "FAILED", "UNCERTAIN"}:
+                raise RuntimeError("usage can only be reconciled for a terminal turn")
+            self._persist_usage_locked(local_turn_id, result)
+
+    def _persist_usage_locked(self, local_turn_id: str, result: RuntimeTurnResult) -> None:
+        row = self.con.execute("SELECT * FROM controller_turns WHERE id=?", (local_turn_id,)).fetchone()
+        before_json = canonical(result.cumulative_before.__dict__) if result.cumulative_before is not None else None
+        after_json = canonical(result.cumulative_after.__dict__) if result.cumulative_after is not None else None
+        missing = result.usage_missing or result.usage_precision in {UsagePrecision.MISSING, UsagePrecision.PARTIAL_OBSERVATION}
+        incoming = (
+            result.usage.input_tokens, result.usage.cached_input_tokens,
+            result.usage.cache_write_input_tokens, result.usage.output_tokens,
+            result.usage.reasoning_tokens, result.usage_precision.value,
+            before_json, after_json, result.exact_response_count, int(missing),
+        )
+        persisted = (
+            row["input_tokens"], row["cached_input_tokens"], row["cache_write_input_tokens"],
+            row["output_tokens"], row["reasoning_tokens"], row["usage_precision"],
+            row["usage_before_json"], row["usage_after_json"], row["exact_response_count"],
+            row["usage_missing"],
+        )
+        if persisted == incoming:
+            return
+        if row["usage_precision"] not in {UsagePrecision.MISSING.value, UsagePrecision.PARTIAL_OBSERVATION.value}:
+            raise RuntimeError("terminal turn usage conflicts with the persisted allocation")
+        self.con.execute(
+            "UPDATE controller_turns SET input_tokens=?,cached_input_tokens=?,cache_write_input_tokens=?,output_tokens=?,reasoning_tokens=?,usage_precision=?,usage_before_json=?,usage_after_json=?,exact_response_count=?,usage_missing=? WHERE id=?",
+            (*incoming, local_turn_id),
+        )
 
     def consume_turn(self, local_turn_id: str, *, progress_after: str | None = None) -> None:
         with transaction(self.con):
@@ -412,7 +472,7 @@ class Journal:
 
     def missing_usage_count(self, *, run_id: str) -> int:
         return int(self.con.execute(
-            "SELECT COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state='COMPLETED' AND t.usage_missing=1",
+            "SELECT COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state IN ('COMPLETED','FAILED','UNCERTAIN') AND t.usage_missing=1",
             (run_id,),
         ).fetchone()[0])
 
@@ -451,14 +511,18 @@ class Journal:
         usage = self.usage(run_id=run_id)
         missing = self.missing_usage_count(run_id=run_id)
         turns = int(self.con.execute(
-            "SELECT COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state='COMPLETED'",
+            "SELECT COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state IN ('COMPLETED','FAILED','UNCERTAIN')",
             (run_id,),
         ).fetchone()[0])
         precision = {row[0]: int(row[1]) for row in self.con.execute(
-            "SELECT usage_precision,COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state='COMPLETED' GROUP BY usage_precision ORDER BY usage_precision",
+            "SELECT usage_precision,COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state IN ('COMPLETED','FAILED','UNCERTAIN') GROUP BY usage_precision ORDER BY usage_precision",
             (run_id,),
         )}
-        return {**usage.__dict__, "completed_turns": turns, "missing_usage_turns": missing, "precision": precision, "complete": missing == 0}
+        completed = int(self.con.execute(
+            "SELECT COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state='COMPLETED'",
+            (run_id,),
+        ).fetchone()[0])
+        return {**usage.__dict__, "terminal_turns": turns, "completed_turns": completed, "missing_usage_turns": missing, "precision": precision, "complete": missing == 0}
 
     def add_targets(self, run_id: str, targets: list[dict[str, Any]]) -> None:
         with transaction(self.con):

@@ -260,13 +260,10 @@ class ProjectController:
         elapsed = self.config.supervisor.max_elapsed_seconds + self.journal.granted_amount(run_id=self.run_id, kind="ELAPSED_SECONDS")
         if self.journal.elapsed_seconds(run_id=self.run_id) >= elapsed:
             return PauseReason.BUDGET_EXHAUSTED, "project elapsed-time budget exhausted"
-        worker_limit = self.config.max_total_worker_turns + self.journal.granted_amount(run_id=self.run_id, kind="WORKER_TURNS")
-        if self.journal.run_turn_count(run_id=self.run_id, roles=(SessionRole.WORKER.value,)) >= worker_limit:
-            return PauseReason.BUDGET_EXHAUSTED, "project worker turn budget exhausted"
-        reviewer_limit = self.config.max_total_reviewer_turns + self.journal.granted_amount(run_id=self.run_id, kind="REVIEWER_TURNS")
-        reviewer_roles = (SessionRole.REVIEWER.value, SessionRole.REQUIREMENT_REVIEWER.value)
-        if self.journal.run_turn_count(run_id=self.run_id, roles=reviewer_roles) >= reviewer_limit:
-            return PauseReason.BUDGET_EXHAUSTED, "project reviewer turn budget exhausted"
+        # Role-specific turn limits are admission limits, not global lifecycle
+        # gates. Supervisors and bounded semantic jobs enforce them immediately
+        # before their respective dispatches. Keeping them here would prevent
+        # non-spending integration/finalization after the last allowed turn.
         return None
 
     def _reconcile_targets(self) -> None:
@@ -570,10 +567,15 @@ class ProjectController:
                 except Exception as exc:
                     inspection = await self.runtime.inspect_turn(handle) if handle is not None else None
                     if inspection and inspection.state == "FAILED":
-                        self.journal.fail_turn(local_id, inspection.error or str(exc), uncertain=False)
+                        self.journal.fail_turn(local_id, inspection.error or str(exc), uncertain=False, result=inspection.result)
                         self.journal.consume_turn(local_id)
                         continue
-                    self.journal.fail_turn(local_id, str(exc), uncertain=True)
+                    self.journal.fail_turn(
+                        local_id,
+                        inspection.error if inspection and inspection.error else str(exc),
+                        uncertain=True,
+                        result=inspection.result if inspection else None,
+                    )
                     raise SemanticJobUncertain("semantic job outcome is uncertain") from exc
                 terminal = self.journal.terminal_unconsumed_turn(session.id)
             if terminal and terminal.state == "COMPLETED":

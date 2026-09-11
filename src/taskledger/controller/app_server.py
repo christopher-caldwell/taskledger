@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -68,6 +71,16 @@ class AppServerRuntime:
     def session_identity(self, *, role: SessionRole, profile: str, subject_id: str, cwd: str | None, writable: bool) -> RuntimeIdentity:
         resolved = self._profile(profile, role)
         sandbox = self._sandbox(subject_id=subject_id, cwd=cwd, writable=writable)
+        tools = self._worker_tool_specs() if writable and subject_id in self.worker_tools else []
+        capability_policy = {
+            "version": "taskledger-capabilities-v1",
+            "agents": False,
+            "collaboration": False,
+            "ambient_mcp_apps_plugins_hooks": False,
+            "writable": writable,
+            "network": False,
+            "dynamic_tool_names": [item["name"] for item in tools],
+        }
         return RuntimeIdentity(
             model=resolved.model,
             effort=resolved.effort,
@@ -79,6 +92,11 @@ class AppServerRuntime:
             profile_source_kind=resolved.source_kind,
             profile_source_file=resolved.source_display,
             profile_hash=resolved.profile_hash,
+            capability_policy_hash=hashlib.sha256(json.dumps(capability_policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+            base_instruction_bytes=len(self.BASE_INSTRUCTIONS.encode("utf-8")),
+            profile_instruction_bytes=len((resolved.developer_instructions or "").encode("utf-8")),
+            dynamic_tool_schema_bytes=len(json.dumps(tools, sort_keys=True, separators=(",", ":")).encode("utf-8")) if tools else 0,
+            dynamic_tool_count=len(tools),
         )
 
     async def start_session(self, *, role: SessionRole, profile: str, subject_id: str, cwd: str | None, writable: bool) -> RuntimeSession:
@@ -199,7 +217,7 @@ class AppServerRuntime:
         try:
             response = await self._request("thread/read", {"threadId": handle.thread_id, "includeTurns": True})
         except Exception as exc:
-            return RuntimeTurnInspection("UNKNOWN", error=str(exc))
+            return RuntimeTurnInspection("UNKNOWN", self._partial_turn_result(handle), str(exc))
         for turn in response.get("thread", {}).get("turns", []):
             if turn.get("id") != handle.turn_id:
                 continue
@@ -209,9 +227,18 @@ class AppServerRuntime:
             if status in {"completed", "interrupted"}:
                 return RuntimeTurnInspection("COMPLETED", self._turn_result(handle, turn))
             if status in {"failed", "error"}:
-                return RuntimeTurnInspection("FAILED", error=self._error_text(turn.get("error")))
-            return RuntimeTurnInspection("UNKNOWN", error=f"unknown Codex turn status {status}")
-        return RuntimeTurnInspection("UNKNOWN", error="Codex thread did not contain the recorded turn")
+                return RuntimeTurnInspection("FAILED", self._turn_result(handle, turn), self._error_text(turn.get("error")))
+            return RuntimeTurnInspection(
+                "UNKNOWN", self._partial_turn_result(handle), f"unknown Codex turn status {status}"
+            )
+        return RuntimeTurnInspection(
+            "UNKNOWN", self._partial_turn_result(handle), "Codex thread did not contain the recorded turn"
+        )
+
+    def _partial_turn_result(self, handle: RuntimeTurnHandle) -> RuntimeTurnResult | None:
+        if handle.turn_id not in self.turn_exact_usage:
+            return None
+        return self._turn_result(handle, {})
 
     def usage_events(self, handle: RuntimeTurnHandle) -> tuple[dict[str, Any], ...]:
         return ()
@@ -273,11 +300,18 @@ class AppServerRuntime:
         async with self.start_lock:
             if self.process and self.process.returncode is None:
                 return
+            mcp_disable_args = self._ambient_mcp_disable_args()
             self.process = await asyncio.create_subprocess_exec(
                 self.codex_executable, "app-server", "--stdio", "--strict-config",
                 "-c", "agents.enabled=false", "-c", "features.multi_agent_v2=false",
                 "-c", "features.collab=false",
                 "-c", "include_collaboration_mode_instructions=false",
+                "-c", "mcp_servers={}", "-c", "apps={}", "-c", "plugins={}",
+                "-c", "hooks={}", "-c", "notify=[]",
+                "-c", "features.apps=false", "-c", "features.plugins=false",
+                "-c", "features.browser_use=false", "-c", "features.computer_use=false",
+                "-c", "features.image_generation=false", "-c", "features.goals=false",
+                *mcp_disable_args,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             self.reader_task = asyncio.create_task(self._read_messages())
@@ -287,6 +321,57 @@ class AppServerRuntime:
                 "capabilities": {"experimentalApi": True},
             })
             await self._notify("initialized", {})
+
+    def _ambient_mcp_disable_args(self) -> list[str]:
+        """Disable every inherited MCP server through Codex's public config CLI.
+
+        An empty-table override is merged with inherited tables by Codex and
+        therefore does not remove named servers. Codex 0.153.4 also replaces a
+        server table for a dotted command-line override, so an override that
+        contains only ``enabled=false`` loses the required transport. Rebuild
+        the minimum non-secret transport shape while disabling the server.
+        """
+        try:
+            result = subprocess.run(
+                [self.codex_executable, "mcp", "list", "--json"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            servers = json.loads(result.stdout)
+            if not isinstance(servers, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]
+                for item in servers
+            ):
+                raise ValueError("invalid MCP inventory")
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError("Codex MCP configuration inventory is unavailable") from exc
+        args: list[str] = []
+        for item in sorted(servers, key=lambda row: row["name"]):
+            name = item["name"]
+            if re.fullmatch(r"[A-Za-z0-9_-]+", name) is None:
+                raise RuntimeError("Codex MCP configuration contains a server name that cannot be safely overridden")
+            transport = item.get("transport")
+            if not isinstance(transport, dict):
+                raise RuntimeError("Codex MCP configuration contains an invalid transport")
+            transport_type = transport.get("type")
+            if transport_type == "stdio":
+                if not isinstance(transport.get("command"), str):
+                    raise RuntimeError("Codex MCP stdio configuration is invalid")
+                fields = [
+                    f"command={json.dumps(sys.executable)}",
+                    f"args={json.dumps(['-c', 'pass'], separators=(',', ':'))}",
+                ]
+            elif transport_type == "streamable_http":
+                if not isinstance(transport.get("url"), str):
+                    raise RuntimeError("Codex MCP HTTP configuration is invalid")
+                fields = [f"url={json.dumps('http://127.0.0.1:9/taskledger-disabled')}"]
+            else:
+                raise RuntimeError("Codex MCP configuration uses an unsupported transport")
+            fields.append("enabled=false")
+            args.extend(["-c", f"mcp_servers.{name}=" + "{" + ",".join(fields) + "}"])
+        return args
 
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.process or not self.process.stdin:
@@ -405,9 +490,6 @@ class AppServerRuntime:
         waiter = self.turn_waiters.setdefault(handle.turn_id, asyncio.get_running_loop().create_future())
         if waiter.done():
             return
-        if turn.get("status") in {"failed", "error"}:
-            waiter.set_exception(RuntimeError(self._error_text(turn.get("error"))))
-            return
         event = self.turn_usage_events.setdefault(handle.turn_id, asyncio.Event())
         if not event.is_set():
             try:
@@ -415,7 +497,10 @@ class AppServerRuntime:
             except asyncio.TimeoutError:
                 pass
         if not waiter.done():
-            waiter.set_result(self._turn_result(handle, turn))
+            if turn.get("status") in {"failed", "error"}:
+                waiter.set_exception(RuntimeError(self._error_text(turn.get("error"))))
+            else:
+                waiter.set_result(self._turn_result(handle, turn))
 
     def _fail_pending(self, error: RuntimeError) -> None:
         for future in list(self.pending.values()):
@@ -577,8 +662,19 @@ class AppServerRuntime:
                     precision = UsagePrecision.EXACT_RESPONSES
             except ValueError:
                 precision = UsagePrecision.MISSING
+        elif (observed := self.turn_exact_usage.get(handle.turn_id)) is not None:
+            # A disconnect can leave response observations without a provable
+            # final cumulative delta. Retain the lower bound, but do not call it
+            # complete accounting.
+            usage = observed
+            precision = UsagePrecision.PARTIAL_OBSERVATION
         return RuntimeTurnResult(
-            handle, structured, text, usage, precision == UsagePrecision.MISSING, precision,
+            handle,
+            structured,
+            text,
+            usage,
+            precision in {UsagePrecision.MISSING, UsagePrecision.PARTIAL_OBSERVATION},
+            precision,
             before, after, len(self.turn_exact_response_ids.get(handle.turn_id, ())),
         )
 

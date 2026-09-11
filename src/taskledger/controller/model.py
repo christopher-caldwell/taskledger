@@ -60,6 +60,7 @@ class TurnExecutionState(str, Enum):
 class UsagePrecision(str, Enum):
     EXACT_RESPONSES = "EXACT_RESPONSES"
     THREAD_TOTAL_DELTA = "THREAD_TOTAL_DELTA"
+    PARTIAL_OBSERVATION = "PARTIAL_OBSERVATION"
     SYNTHETIC_OR_ESTIMATED = "SYNTHETIC_OR_ESTIMATED"
     MISSING = "MISSING"
     LEGACY_LAST_USAGE = "LEGACY_LAST_USAGE"
@@ -124,6 +125,11 @@ class RuntimeIdentity:
     profile_source_kind: str | None = None
     profile_source_file: str | None = None
     profile_hash: str | None = None
+    capability_policy_hash: str | None = None
+    base_instruction_bytes: int = 0
+    profile_instruction_bytes: int = 0
+    dynamic_tool_schema_bytes: int = 0
+    dynamic_tool_count: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +143,11 @@ class RuntimeIdentity:
             "profile_source_kind": self.profile_source_kind,
             "profile_source_file": self.profile_source_file,
             "profile_hash": self.profile_hash,
+            "capability_policy_hash": self.capability_policy_hash,
+            "base_instruction_bytes": self.base_instruction_bytes,
+            "profile_instruction_bytes": self.profile_instruction_bytes,
+            "dynamic_tool_schema_bytes": self.dynamic_tool_schema_bytes,
+            "dynamic_tool_count": self.dynamic_tool_count,
         }
 
 

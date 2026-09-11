@@ -96,14 +96,29 @@ class FakeRuntime:
 
     async def inspect_turn(self, handle):
         state, script = self.turns.get((handle.thread_id, handle.turn_id), ("UNKNOWN", TurnScript()))
+        precision = UsagePrecision.MISSING if script.usage_missing else UsagePrecision.THREAD_TOTAL_DELTA
+        result = RuntimeTurnResult(
+            handle,
+            script.structured_output() if callable(script.structured_output) else script.structured_output,
+            script.final_response,
+            script.usage,
+            script.usage_missing,
+            precision,
+        )
         if script.uncertain or state == "UNKNOWN":
-            return RuntimeTurnInspection("UNKNOWN", error="outcome unknown")
+            partial = result
+            if script.usage.total_tokens or script.usage.cached_input_tokens or script.usage.cache_write_input_tokens or script.usage.reasoning_tokens:
+                partial = RuntimeTurnResult(
+                    handle,
+                    usage=script.usage,
+                    usage_missing=True,
+                    usage_precision=UsagePrecision.PARTIAL_OBSERVATION,
+                )
+            return RuntimeTurnInspection("UNKNOWN", partial if script.usage_missing or script.usage != Usage() else None, "outcome unknown")
         if state == "FAILED":
-            return RuntimeTurnInspection("FAILED", error=script.failure)
+            return RuntimeTurnInspection("FAILED", result, script.failure)
         if state == "COMPLETED":
-            structured = script.structured_output() if callable(script.structured_output) else script.structured_output
-            precision = UsagePrecision.MISSING if script.usage_missing else UsagePrecision.THREAD_TOTAL_DELTA
-            return RuntimeTurnInspection("COMPLETED", RuntimeTurnResult(handle, structured, script.final_response, script.usage, script.usage_missing, precision))
+            return RuntimeTurnInspection("COMPLETED", result)
         return RuntimeTurnInspection("RUNNING")
 
     def usage_events(self, handle):
