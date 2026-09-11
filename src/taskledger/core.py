@@ -77,7 +77,7 @@ def taskledger_home(repository_root: str | Path | None = None, *, create: bool =
     else:
         raise LedgerError(
             "PROJECT_REQUIRED",
-            "Run Taskledger from the repository or set TASKLEDGER_HOME for a legacy shared ledger.",
+            "Run Taskledger from the repository or set TASKLEDGER_HOME to its configured current store.",
         )
     if not create:
         return path

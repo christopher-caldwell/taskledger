@@ -291,8 +291,9 @@ surfacing Git's missing-revision error.
 The default durable store must be `.taskledger/` under the canonical repository
 root. Discovery must not create it. New-project confirmation must require that
 path to be covered by Git ignore rules before writing the database, credentials,
-or assignment state. An explicit `TASKLEDGER_HOME` remains available for legacy
-or intentionally external stores.
+or assignment state. An explicit `TASKLEDGER_HOME` remains available for an
+intentionally external current-version store. Automatic older-version store
+discovery is not supported.
 
 If the repository is in detached-HEAD state or a checked-out branch cannot be determined, initialization must stop and explain that the orchestrator must first select a branch. Taskledger must not substitute `main`, the remote default branch, or any other branch.
 
@@ -1098,6 +1099,56 @@ The implementation must pass the following product-level scenarios.
 6. Taskledger records the canonical completion commit.
 
 ---
+
+## 25A. Human-Authorized v0.6 Capabilities
+
+This section records product decisions authorized after the original v1 review.
+It is human-facing specification authority. The Codex skill and worker templates
+are derived operating guidance and do not supersede these decisions.
+
+Taskledger must deliver rejected-submission corrections through assignment-scoped
+durable worker context. The current packet binds the reviewed submission and
+commit, failed criteria, exact correction text, relevant blockers, verification
+revision, and stable hash. A newer resubmission makes older feedback non-actionable.
+
+Declared local checks may be executed through the CLI. Each observed execution
+records caller class, exact command, cwd, source commit/tree fingerprint, timing,
+status, and retained bounded output. Worker execution cannot satisfy the
+orchestrator's independent-review obligation. Source-changing, failed, timed-out,
+or interrupted checks remain explicit and cannot become successful evidence.
+
+Intentional evidence artifacts may be copied into ledger-managed retained
+storage with hashes and provenance. Registration is scoped to authorized
+worktrees, rejects path escape/symlinks/directories/oversized files, and survives
+assignment-worktree cleanup. A deterministic export must preserve source-use
+claims and distinguish worker claims, observed execution, and reviewer
+conclusions without inventing semantic understanding.
+
+An assignment may define ordered intermediate vertical checkpoints. A worker
+records an immutable checkpoint commit and stops; the orchestrator reviews that
+exact commit and approves or rejects its criteria. Approval unlocks the next
+slice without final acceptance or integration. Definition revisions supersede
+prior approvals. Final submission, independent verification, scoped credentials,
+and canonical integration retain their existing meaning.
+
+The lightweight path uses this same checkpoint state machine to retain one
+worker across a small coherent project. Worker lifecycle, review boundary, task
+granularity, and concurrency remain separate choices.
+
+Project preflight must report local versions, repository prerequisites, profile
+configuration, declared input metadata, and explicitly required service reachability
+without reading secrets. Configuration presence is not proof that a host can
+launch the exact named profile; host availability remains a labeled handshake.
+
+The CLI may wait for selected actionable audit events using durable sequences,
+a bounded timeout, cancellation, and missed-event diagnostics. The host remains
+responsible for waiting outside model reasoning and waking the model.
+
+Usage tooling requires modern per-response telemetry, deduplicates response IDs,
+discovers an explicit root and descendants, attributes actual model/effort, and
+reconciles additive response usage with cumulative thread counters. Reasoning
+tokens are an output subset, and measured tokens are not billing. Missing or
+inconsistent telemetry is reported; legacy token counters are ignored.
 
 ## 26. Scope Boundary for Technical Design
 

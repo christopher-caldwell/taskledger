@@ -19,13 +19,13 @@ A complete Codex installation has three independently maintained components:
 
 The default project state is stored in `<repository>/.taskledger/`. That
 directory contains the SQLite database, orchestrator and worker credentials,
-and assignment metadata. It must be ignored by Git and must not be copied into
-prompts, logs, issue reports, or source control.
+assignment metadata, retained evidence/check output, and deterministic exports.
+It must be ignored by Git and must not be copied into prompts, logs, issue
+reports, or source control.
 
-Taskledger 0.1 projects may instead use the legacy shared
-`~/.taskledger/` directory. Current releases try to discover that store. Use an
-explicit `TASKLEDGER_HOME=~/.taskledger` only for an existing legacy project;
-do not use it to create a second ledger for a repository.
+An explicit `TASKLEDGER_HOME=/absolute/path` may select an intentionally external
+current-version store. Taskledger does not discover or support older shared-home
+stores; each managed project must use the current protocol and schema.
 
 ## Requirements
 
@@ -147,6 +147,12 @@ read. Identify any ignored inputs that worker checks need—such as `.env` files
 local services, certificates, or generated metadata—and provide a safe setup
 command or read-only location. Never place credentials in Git or prompts.
 
+After recording these declarations, the primary runs `project preflight`.
+It checks versions, repository state, profile configuration, declared file
+metadata, and explicitly named TCP services without reading input contents.
+A profile TOML proves configuration only; the host must separately report
+whether it can launch the exact named profile with its configured model/effort.
+
 ### 2. Start the workflow through Codex
 
 Open a new Codex task from the managed repository root and ask:
@@ -210,8 +216,9 @@ The normal lifecycle is:
 4. Approve initialization, materialization, and the first assignment wave.
 5. Route fully specified work to the routine profile and judgment-heavy work to
    the complex profile.
-6. Let each worker submit from its isolated assignment worktree.
-7. Have the primary independently inspect, test, verify, and integrate each
+6. Let each worker progress through declared vertical checkpoints and submit
+   from its scoped assignment worktree.
+7. Have the primary independently inspect, run reviewer checks, verify, and integrate each
    submission.
 8. Have the primary run the integrated final audit, verify requirements, and
    complete the project.
@@ -220,6 +227,46 @@ Do not manually move worker commits, delete assignment worktrees, resolve
 Taskledger merge conflicts, rotate credentials, or edit the database while an
 agent-run workflow is active. Let the primary follow the skill and command
 reference so that every state transition remains recorded.
+
+### Lightweight checkpoint flow
+
+Use a lightweight assignment when one worker can coherently own a small project
+through several early end-to-end slices. Declare ordered checkpoint labels and
+criteria at assignment creation. The worker implements one slice, calls
+`worker checkpoint`, and stops. The primary loads `checkpoint review-context`,
+reviews the exact commit, and records `checkpoint verify`. Approval unlocks the
+next slice; rejection returns exact corrections through `worker context`.
+
+Checkpoint approval never accepts a task or integrates code. A continued task
+or specification revision supersedes prior checkpoint approvals. A replacement
+worker can resume the same assignment after token rotation by loading the
+bounded durable context packet. Use separate isolated assignments when
+concurrent ownership provides value.
+
+### Receipts, retained artifacts, and export
+
+Workers run exact declared required checks with `worker check` and attach receipt
+IDs to their final submission. Taskledger records command, cwd, source commit,
+tree fingerprints, timing, exit status, and bounded retained output. The primary
+runs the same declared checks with `submission check` at the exact submitted
+commit. Worker receipts never satisfy reviewer obligations. A command that
+changes source is marked stale and must be rerun from a clean current state.
+
+Register intentional individual evidence files only. Symlinks, traversal,
+directories, and oversized files are rejected. Retained artifacts live outside
+assignment worktrees and survive completion cleanup. `evidence export` writes
+deterministic JSON that keeps source-use claims, worker claims, observed
+executions, and reviewer conclusions distinct; it generates no semantic verdict.
+
+### Event-driven host loop
+
+`project resume` returns `latest_event_sequence`. Pass it to `project wait` with
+an explicit event filter and a timeout of at most 60 seconds. Reuse the cursor
+after timeout and persist the returned cursor after events. Future cursors are
+rejected. The response reports the retained event floor and states that durable
+audit pruning is not configured, so `missed_events` remains false in this version.
+The CLI blocks outside model reasoning, but the host still has to run the wait
+and wake the model. Bounded waits preserve user interruption and progress updates.
 
 For exact CLI request bodies, authorization, gates, and exit codes, see the
 [command reference](../skills/taskledger/references/commands.md).
@@ -319,7 +366,8 @@ cp -a /absolute/path/to/repository/.taskledger \
   /private/backup/location/taskledger-backup
 ```
 
-For a legacy project, back up the entire configured `TASKLEDGER_HOME` instead.
+For an external current-version store, back up the entire configured
+`TASKLEDGER_HOME` instead.
 Keep normal Git backups as well: the ledger records coordination and evidence,
 while Git owns the implementation commits and assignment branches.
 
@@ -336,16 +384,12 @@ Taskledger to load the project. If Git or ledger state has diverged, do not forc
 an outcome or initialize again; let the primary inspect the recovery document
 and repository facts.
 
-### Roll back an update
+### Version policy
 
-There is no in-place database downgrade. To return to an older Taskledger
-version after a newer CLI has opened and migrated a ledger, stop all related
-processes, preserve the newer ledger, restore the complete pre-update backup,
-and reinstall the exact older CLI, skill, and worker-profile revisions that
-created it. The restored ledger must be paired with the same repository and
-compatible Git history. If you do not have that complete backup and versioned
-source, keep the newer version and diagnose the problem without rewriting the
-database manually.
+There is no database downgrade or older-client compatibility path. Keep the
+CLI, skill, worker profiles, and project schema on the current version. Preserve
+a complete private backup before upgrading and never rewrite the database by
+hand.
 
 ## Troubleshooting
 
@@ -377,10 +421,9 @@ force initialization or commit the ledger directory.
 
 ### Taskledger cannot find the project
 
-Run it from inside the managed repository. If the project was created by
-Taskledger 0.1 in the legacy shared store, retry only that existing project with
-`TASKLEDGER_HOME=~/.taskledger`. Do not use the override to bypass inaccessible
-state or create a duplicate project.
+Run it from inside the managed repository. If the project uses an intentionally
+external current-version store, set its exact configured `TASKLEDGER_HOME`. Do
+not use the override to bypass inaccessible state or create a duplicate project.
 
 ### The canonical repository is dirty or on the wrong branch
 
@@ -407,8 +450,8 @@ operation outcome manually.
 ### Ledger storage is unavailable
 
 Check owner permissions and available disk space for the complete ledger
-directory. For an inaccessible legacy store, grant access to the existing
-`~/.taskledger` directory and retry with the same explicit `TASKLEDGER_HOME`.
+directory. For an inaccessible external current-version store, grant access to
+its configured directory and retry with the same explicit `TASKLEDGER_HOME`.
 Storage failure alone does not mean recovery is required, and it is not
 permission to initialize a replacement ledger.
 

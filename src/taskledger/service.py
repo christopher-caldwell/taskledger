@@ -3,7 +3,12 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import signal
+import socket
 import sqlite3
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,6 +21,13 @@ from .db import transaction
 CATEGORIES = {"MISSING_PRODUCT_DECISION", "AMBIGUOUS_REQUIREMENT", "EXTERNAL_DEPENDENCY",
               "REPOSITORY_STATE", "VERIFICATION_FAILURE", "SPECIFICATION_STATE", "INTERRUPTED_OPERATION"}
 WORKER_PROFILES = {"routine", "complex"}
+ACTIONABLE_EVENTS = {
+    "SUBMISSION_RECORDED", "SUBMISSION_VERIFIED", "CHECKPOINT_RECORDED",
+    "CHECKPOINT_REVIEWED", "WORKER_QUESTION_CREATED", "BLOCKER_CREATED",
+    "ASSIGNMENT_ESCALATION_REQUIRED", "CHECK_EXECUTED", "INTEGRATION_FAILED",
+}
+MAX_RECEIPT_OUTPUT = 10 * 1024 * 1024
+MAX_REGISTERED_ARTIFACT = 50 * 1024 * 1024
 
 
 class Service:
@@ -24,6 +36,144 @@ class Service:
     def audit(self, project: str, principal: str | None, event: str, entity: str, entity_id: str, payload: Any = None) -> None:
         self.con.execute("INSERT INTO audit_events(project_id,principal_id,event_type,entity_type,entity_id,payload_json,created_at) VALUES(?,?,?,?,?,?,?)",
                          (project, principal, event, entity, entity_id, canonical(payload or {}), now()))
+
+    def tree_fingerprint(self, repo: str) -> str:
+        """Fingerprint HEAD plus exact staged, unstaged, and untracked content state."""
+        head = git.oid_or_none(repo, "HEAD")
+        status = git.run(repo, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]).stdout
+        staged=git.run(repo,["diff","--binary","--cached","HEAD"]).stdout
+        unstaged=git.run(repo,["diff","--binary","HEAD"]).stdout
+        untracked=[]
+        for relative in git.run(repo,["ls-files","--others","--exclude-standard","-z"]).stdout.split("\0"):
+            if relative:untracked.append({"path":relative,"object_hash":git.run(repo,["hash-object","--",relative]).stdout.strip()})
+        return sha256(canonical({"head":head,"status":status,"staged":staged,"unstaged":unstaged,"untracked":untracked}))
+
+    def artifact_root(self, project_id: str) -> Path:
+        return self.home / "projects" / project_id / "artifacts"
+
+    def _store_artifact(self, project, principal, source: Path, *, assignment_id: str | None,
+                        provenance_kind: str, original_path: str | None = None,
+                        source_revision: str | None = None) -> dict[str, Any]:
+        try:
+            resolved = source.resolve(strict=True)
+        except OSError:
+            raise LedgerError("ARTIFACT_NOT_FOUND", "Artifact must be a present readable regular file.")
+        if source.is_symlink() or not resolved.is_file():
+            raise LedgerError("ARTIFACT_INVALID", "Artifact must resolve to a regular non-symlink file.")
+        size = resolved.stat().st_size
+        if size > MAX_REGISTERED_ARTIFACT:
+            raise LedgerError("ARTIFACT_TOO_LARGE", "Artifact exceeds the 50 MiB retention limit.")
+        raw = resolved.read_bytes()
+        digest = sha256(raw)
+        artifact_id = new_id()
+        root = self.artifact_root(project["id"])
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        destination = root / f"{artifact_id}-{digest[:16]}.bin"
+        temporary = root / f".{artifact_id}.tmp"
+        temporary.write_bytes(raw)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+        with transaction(self.con):
+            self.con.execute(
+                "INSERT INTO evidence_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (artifact_id, project["id"], assignment_id, principal["id"], provenance_kind,
+                 original_path, str(destination), digest, size, source_revision, now()),
+            )
+            self.audit(project["id"], principal["id"], "ARTIFACT_REGISTERED", "ARTIFACT", artifact_id,
+                       {"provenance_kind": provenance_kind, "sha256": digest, "size_bytes": size})
+        return {"artifact_id": artifact_id, "sha256": digest, "size_bytes": size,
+                "stored_path": str(destination), "provenance_kind": provenance_kind}
+
+    def register_artifact(self, project, principal, data, *, worker: bool = False):
+        require_object(data,{"path"},{"path"})
+        supplied=text(data["path"],"path")
+        assignment=None
+        if worker:
+            _,assignment=self.worker_assignment(principal)
+            allowed_root=Path(assignment["worktree_path"]).resolve()
+        else:
+            allowed_root=Path(project["repository_root"]).resolve()
+        candidate=(allowed_root/supplied) if not Path(supplied).is_absolute() else Path(supplied)
+        try:resolved=candidate.resolve(strict=True)
+        except OSError:raise LedgerError("ARTIFACT_NOT_FOUND","Artifact must be a present readable regular file.")
+        lexical=candidate.absolute();symlink_component=False
+        current=lexical
+        while current!=allowed_root and allowed_root in current.parents:
+            symlink_component=symlink_component or current.is_symlink();current=current.parent
+        if symlink_component or not resolved.is_relative_to(allowed_root):
+            raise LedgerError("ARTIFACT_PATH_INVALID","Artifact path must remain inside the authorized repository worktree.")
+        source_revision=git.oid_or_none(str(allowed_root),"HEAD")
+        return self._store_artifact(project,principal,resolved,assignment_id=assignment["id"] if assignment else None,
+                                    provenance_kind="WORKER_REGISTERED" if worker else "ORCHESTRATOR_REGISTERED",
+                                    original_path=str(candidate.relative_to(allowed_root)),source_revision=source_revision)
+
+    def _execute_check(self, project, principal, assignment, command: str, timeout_seconds: int,
+                       *, role: str, submission_id: str | None = None):
+        cwd=assignment["worktree_path"]
+        source_oid=git.oid(cwd)
+        before=self.tree_fingerprint(cwd)
+        started=now();timed_out=False;interrupted=False
+        process=subprocess.Popen(command,cwd=cwd,shell=True,text=False,stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT,start_new_session=True)
+        try:
+            output,_=process.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out=True;os.killpg(process.pid,signal.SIGTERM)
+            try:output,_=process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid,signal.SIGKILL);output,_=process.communicate()
+        except KeyboardInterrupt:
+            interrupted=True;os.killpg(process.pid,signal.SIGTERM);output,_=process.communicate()
+        finally:
+            ended=now()
+        output=output or b""
+        truncated=len(output)>MAX_RECEIPT_OUTPUT
+        if truncated:output=output[:MAX_RECEIPT_OUTPUT]+b"\n[taskledger output truncated]\n"
+        staging=self.artifact_root(project["id"])/"staging"
+        staging.mkdir(mode=0o700,parents=True,exist_ok=True)
+        receipt_id=new_id();output_path=staging/f"{receipt_id}.log";output_path.write_bytes(output);os.chmod(output_path,0o600)
+        artifact=self._store_artifact(project,principal,output_path,assignment_id=assignment["id"],
+                                      provenance_kind=f"{role}_EXECUTION_OUTPUT",source_revision=source_oid)
+        output_path.unlink(missing_ok=True)
+        after=self.tree_fingerprint(cwd);current_oid=git.oid(cwd)
+        status="INTERRUPTED" if interrupted else ("TIMED_OUT" if timed_out else ("SUCCEEDED" if process.returncode==0 else "FAILED"))
+        stale=before!=after or current_oid!=source_oid
+        with transaction(self.con):
+            self.con.execute("INSERT INTO execution_receipts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                             (receipt_id,project["id"],assignment["id"],submission_id,principal["id"],role,command,cwd,source_oid,before,after,started,ended,status,process.returncode,artifact["artifact_id"],int(stale),canonical({"output_truncated":truncated,"timeout_seconds":timeout_seconds,"measured_execution":True})))
+            self.audit(project["id"],principal["id"],"CHECK_EXECUTED","EXECUTION_RECEIPT",receipt_id,{"role":role,"status":status,"source_revision":source_oid,"stale":stale})
+        return {"receipt_id":receipt_id,"role":role,"command":command,"source_revision":source_oid,
+                "started_at":started,"ended_at":ended,"status":status,"exit_code":process.returncode,
+                "source_changed_during_execution":stale,"output_artifact":artifact}
+
+    def worker_check(self, principal, data):
+        require_object(data,{"command","timeout_seconds"},{"command"})
+        project,a=self.worker_assignment(principal);self.preflight(project)
+        if a["state"]!="ACTIVE":raise LedgerError("ASSIGNMENT_NOT_ACTIVE","Worker assignment is not active.")
+        command=text(data["command"],"command")
+        allowed=[x[0] for x in self.con.execute("SELECT command FROM task_required_checks WHERE task_id=? AND task_revision=?",(a["task_id"],a["task_revision"]))]
+        if command not in allowed:raise LedgerError("CHECK_NOT_DECLARED","Worker may execute only an exact required check for this assignment.")
+        timeout=data.get("timeout_seconds",900)
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=3600:raise LedgerError("INVALID_REQUEST","timeout_seconds must be between 1 and 3600.")
+        if not git.clean(a["worktree_path"]):
+            task=self.con.execute("SELECT * FROM tasks WHERE id=?",(a["task_id"],)).fetchone()
+            self._commit_worker_checkpoint(project,a,task,f"taskledger: evidence checkpoint {task['id']}")
+        if git.oid(a["worktree_path"])==a["base_commit_oid"]:raise LedgerError("GIT_COMMAND_FAILED","A worker check requires a non-empty committed assignment change.")
+        return self._execute_check(project,principal,a,command,timeout,role="WORKER")
+
+    def reviewer_check(self, project, principal, data):
+        require_object(data,{"submission_id","command","timeout_seconds"},{"submission_id","command"})
+        sub=self.con.execute("SELECT s.*,a.task_id,a.task_revision,a.worktree_path,a.id assignment_id FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=? AND s.project_id=?",(data["submission_id"],project["id"])).fetchone()
+        if not sub:raise LedgerError("SUBMISSION_NOT_FOUND","Submission was not found.")
+        command=text(data["command"],"command")
+        allowed=[x[0] for x in self.con.execute("SELECT command FROM task_required_checks WHERE task_id=? AND task_revision=?",(sub["task_id"],sub["task_revision"]))]
+        if command not in allowed:raise LedgerError("CHECK_NOT_DECLARED","Reviewer may execute only an exact required check for this submission.")
+        timeout=data.get("timeout_seconds",900)
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=3600:raise LedgerError("INVALID_REQUEST","timeout_seconds must be between 1 and 3600.")
+        if git.oid(sub["worktree_path"])!=sub["head_commit_oid"] or not git.clean(sub["worktree_path"]):
+            raise LedgerError("SUBMISSION_CHECKOUT_STALE","Reviewer checks require the clean assignment worktree at the exact submitted commit.")
+        assignment=self.con.execute("SELECT * FROM assignments WHERE id=?",(sub["assignment_id"],)).fetchone()
+        return self._execute_check(project,principal,assignment,command,timeout,role="REVIEWER",submission_id=sub["id"])
 
     def project(self, project_id: str | None = None, cwd: str | None = None):
         if project_id:
@@ -314,6 +464,8 @@ class Service:
             if not self.con.execute("SELECT 1 FROM tasks WHERE id=? AND project_id=? AND state<>'CANCELLED'", (tid, project["id"])).fetchone(): raise LedgerError("TASK_NOT_FOUND", "Affected task is not current and non-cancelled.", details={"task_id": tid})
         affected = set(req_ids)
         for tid in task_ids: affected.update(self.current_links(tid))
+        checkpoint_tasks=set(task_ids)
+        for rid in req_ids:checkpoint_tasks.update(task["id"] for task in self.current_tasks_for_requirement(rid))
         with transaction(self.con):
             stamp = now()
             self.con.execute("UPDATE specification_reviews SET state='COMPLETED',resolution=?,affected_requirement_ids_json=?,affected_task_ids_json=?,no_existing_items_affected=?,review_summary=?,reviewer_principal_id=?,completed_at=? WHERE id=?", (data["resolution"], canonical(req_ids), canonical(task_ids), int(none), text(data["summary"], "summary"), principal["id"], stamp, review["id"]))
@@ -322,6 +474,9 @@ class Service:
             else:
                 self.con.execute("UPDATE specifications SET active_revision_id=? WHERE id=?", (rev["id"], review["specification_id"]))
             self.invalid_requirements(sorted(affected), "affected specification review")
+            if checkpoint_tasks:
+                placeholders=",".join("?" for _ in checkpoint_tasks)
+                self.con.execute(f"UPDATE assignment_checkpoints SET state='SUPERSEDED' WHERE assignment_id IN (SELECT id FROM assignments WHERE project_id=? AND task_id IN ({placeholders}) AND state='ACTIVE') AND state IN ('PENDING','APPROVED','REJECTED')",(project["id"],*sorted(checkpoint_tasks)))
             self.invalidate_completion(project["id"], "specification review completed")
             self.audit(project["id"], principal["id"], "SPECIFICATION_REVIEW_COMPLETED", "SPECIFICATION_REVIEW", review["id"], {"affected_requirements": sorted(affected)})
         return {"review_id": review["id"], "state": "COMPLETED", "plan_revalidation_required": True}
@@ -346,7 +501,9 @@ class Service:
         for assignment in active:
             if supplied[assignment["id"]] not in {"CONTINUE", "REVOKE"}: raise LedgerError("INVALID_REQUEST", "Assignment disposition must be CONTINUE or REVOKE.")
             if supplied[assignment["id"]] == "REVOKE": self.revoke_assignment(project, None, assignment, "definition revised")
-            else: self.con.execute("UPDATE assignments SET context_json=? WHERE id=?", (self.context(assignment), assignment["id"]))
+            else:
+                self.con.execute("UPDATE assignment_checkpoints SET state='SUPERSEDED' WHERE assignment_id=? AND state IN ('PENDING','APPROVED','REJECTED')",(assignment["id"],))
+                self.con.execute("UPDATE assignments SET context_json=? WHERE id=?", (self.context(assignment), assignment["id"]))
 
     def create_requirement(self, project, principal, data):
         require_object(data,{"statement","details","implementation_required","sources"},{"statement","details","implementation_required","sources"})
@@ -381,6 +538,8 @@ class Service:
                 for source in sources:self.con.execute("INSERT INTO requirement_source_refs VALUES(?,?,?,?,?)",(row["id"],revision,source["specification_id"],source["locator"],source["excerpt"]))
                 self.con.execute("UPDATE requirements SET current_revision=?,updated_at=? WHERE id=?",(revision,now(),row["id"]))
             self.invalid_requirements([row["id"]],"requirement revised or retired")
+            for assignment in self.con.execute("SELECT * FROM assignments WHERE project_id=? AND task_id IN (%s) AND state='ACTIVE'" % ",".join("?"*max(1,len(affected))),(project["id"],*(affected or [""]))):
+                self.con.execute("UPDATE assignments SET context_json=? WHERE id=?",(self.context(assignment),assignment["id"]))
             self.invalidate_completion(project["id"],"requirement changed")
             self.audit(project["id"],principal["id"],"REQUIREMENT_RETIRED" if retire else "REQUIREMENT_UPDATED","REQUIREMENT",row["id"])
         return {"requirement_id":row["id"],"lifecycle":"RETIRED" if retire else "ACTIVE"}
@@ -528,7 +687,9 @@ class Service:
             self.con.execute("UPDATE tasks SET current_revision=?,state=?,cancellation_reason=NULL,cancelled_at=NULL,updated_at=? WHERE id=?",(revision,state,now(),task["id"]))
             if active:
                 if data["assignment_action"] == "REVOKE": self.revoke_assignment(project,principal,active,"task revised")
-                else: self.con.execute("UPDATE assignments SET task_revision=?,context_json=? WHERE id=?",(revision,self.context(active, task_revision=revision),active["id"]))
+                else:
+                    self.con.execute("UPDATE assignment_checkpoints SET state='SUPERSEDED' WHERE assignment_id=? AND state IN ('PENDING','APPROVED','REJECTED')",(active["id"],))
+                    self.con.execute("UPDATE assignments SET task_revision=?,context_json=? WHERE id=?",(revision,self.context(active, task_revision=revision),active["id"]))
             affected=sorted(set(prior_links) | set(self.current_links(task["id"])));self.invalid_requirements(affected,"supporting task revised")
             self.invalidate_completion(project["id"],"task revised")
             self.audit(project["id"],principal["id"],"TASK_REOPENED" if reopen else "TASK_UPDATED","TASK",task["id"],{"revision":revision})
@@ -701,13 +862,25 @@ class Service:
             )
         ]
         questions=[dict(x) for x in self.con.execute("SELECT id,body,is_blocking,state,answer FROM worker_questions WHERE assignment_id=? ORDER BY asked_at,id",(assignment["id"],))]
-        return canonical({"assignment":{"id":assignment["id"],"attempt_number":assignment["attempt_number"],"worker_profile":assignment["worker_profile"],"base_commit_oid":assignment["base_commit_oid"],"branch_name":assignment["branch_name"],"worktree_path":assignment["worktree_path"]},"task":{"id":task["id"],"revision":revision,"objective":rev["objective"],"implementation_scope":rev["implementation_scope"],"acceptance_criteria":criteria,"required_checks":checks},"requirements":requirements,"registered_specifications":registered_specifications,"questions":questions})
+        return canonical({"assignment":{"id":assignment["id"],"attempt_number":assignment["attempt_number"],"worker_profile":assignment["worker_profile"],"execution_mode":assignment["execution_mode"],"checkpoint_plan":json.loads(assignment["checkpoint_plan_json"]),"base_commit_oid":assignment["base_commit_oid"],"branch_name":assignment["branch_name"],"worktree_path":assignment["worktree_path"]},"task":{"id":task["id"],"revision":revision,"objective":rev["objective"],"implementation_scope":rev["implementation_scope"],"acceptance_criteria":criteria,"required_checks":checks},"requirements":requirements,"registered_specifications":registered_specifications,"questions":questions})
 
     def assignment_create(self,project,principal,data):
-        require_object(data,{"task_id","worker_profile"},{"task_id","worker_profile"})
+        require_object(data,{"task_id","worker_profile","execution_mode","checkpoints"},{"task_id","worker_profile"})
         worker_profile=data["worker_profile"]
         if worker_profile not in WORKER_PROFILES:
             raise LedgerError("INVALID_REQUEST","worker_profile must be routine or complex.")
+        execution_mode=data.get("execution_mode","isolated")
+        if execution_mode not in {"isolated","lightweight"}:
+            raise LedgerError("INVALID_REQUEST","execution_mode must be isolated or lightweight.")
+        checkpoint_plan=array(data.get("checkpoints",[]),"checkpoints")
+        normalized_checkpoints=[]
+        for position,item in enumerate(checkpoint_plan,1):
+            require_object(item,{"label","criteria"},{"label","criteria"})
+            criteria=array(item["criteria"],"checkpoint criteria")
+            if not criteria:raise LedgerError("INVALID_REQUEST","Each checkpoint needs at least one criterion.")
+            normalized_checkpoints.append({"position":position,"label":text(item["label"],"checkpoint label"),"criteria":[text(x,"checkpoint criterion") for x in criteria]})
+        if execution_mode=="lightweight" and not normalized_checkpoints:
+            raise LedgerError("INVALID_REQUEST","Lightweight execution requires at least one durable checkpoint.")
         task=self.con.execute("SELECT * FROM tasks WHERE id=? AND project_id=?",(data["task_id"],project["id"])).fetchone()
         if not task:raise LedgerError("TASK_NOT_FOUND","Task was not found.")
         if worker_profile=="routine":
@@ -734,7 +907,7 @@ class Service:
         stamp=now()
         with transaction(self.con):
             self.ensure_no_operation(project["id"])
-            self.con.execute("INSERT INTO assignments(id,project_id,task_id,task_revision,attempt_number,worker_profile,state,base_commit_oid,branch_name,worktree_path,context_json,created_at,activated_at,closed_at,revoked_at,revocation_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(aid,project["id"],task["id"],task["current_revision"],attempt,worker_profile,"PREPARING",base,branch,str(worktree),"{}",stamp,None,None,None,None))
+            self.con.execute("INSERT INTO assignments(id,project_id,task_id,task_revision,attempt_number,worker_profile,execution_mode,checkpoint_plan_json,state,base_commit_oid,branch_name,worktree_path,context_json,created_at,activated_at,closed_at,revoked_at,revocation_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(aid,project["id"],task["id"],task["current_revision"],attempt,worker_profile,execution_mode,canonical(normalized_checkpoints),"PREPARING",base,branch,str(worktree),"{}",stamp,None,None,None,None))
             op=new_id();self.con.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,?,?,?)",(op,project["id"],"ASSIGNMENT_PREPARATION","ASSIGNMENT",aid,"STARTED",canonical({"base":base,"branch":branch,"worktree":str(worktree)}),None,stamp,None))
         try: git.run(project["repository_root"],["worktree","add","-b",branch,str(worktree),base])
         except LedgerError:
@@ -744,9 +917,9 @@ class Service:
         raw=token();path=self.home/"projects"/project["id"] / "assignments" / aid / "worker-token"; worker=new_id()
         assignment=self.con.execute("SELECT * FROM assignments WHERE id=?",(aid,)).fetchone();ctx=self.context(assignment)
         with transaction(self.con):
-            self.con.execute("UPDATE assignments SET state='ACTIVE',activated_at=?,context_json=? WHERE id=?",(now(),ctx,aid));self.con.execute("UPDATE tasks SET state='ASSIGNED',updated_at=? WHERE id=?",(now(),task["id"]));self.con.execute("INSERT INTO principals VALUES(?,?,?,?,?,?,?)",(worker,project["id"],"WORKER",aid,1,now(),None));self.con.execute("INSERT INTO principal_credentials VALUES(?,?,?,?)",(worker,sha256(raw),now(),None));self.con.execute("UPDATE operations SET state='SUCCEEDED',finished_at=? WHERE id=?",(now(),op));self.audit(project["id"],principal["id"],"ASSIGNMENT_ACTIVATED","ASSIGNMENT",aid,{"worker_profile":worker_profile})
+            self.con.execute("UPDATE assignments SET state='ACTIVE',activated_at=?,context_json=? WHERE id=?",(now(),ctx,aid));self.con.execute("UPDATE tasks SET state='ASSIGNED',updated_at=? WHERE id=?",(now(),task["id"]));self.con.execute("INSERT INTO principals VALUES(?,?,?,?,?,?,?)",(worker,project["id"],"WORKER",aid,1,now(),None));self.con.execute("INSERT INTO principal_credentials VALUES(?,?,?,?)",(worker,sha256(raw),now(),None));self.con.execute("UPDATE operations SET state='SUCCEEDED',finished_at=? WHERE id=?",(now(),op));self.audit(project["id"],principal["id"],"ASSIGNMENT_ACTIVATED","ASSIGNMENT",aid,{"worker_profile":worker_profile,"execution_mode":execution_mode,"checkpoint_count":len(normalized_checkpoints)})
         atomic_secret(path,raw)
-        return {"assignment_id":aid,"task_id":task["id"],"attempt_number":attempt,"worker_profile":worker_profile,"worktree_path":str(worktree),"branch_name":branch,"base_commit_oid":base,"worker_token_path":str(path),"context_hash":sha256(ctx)}
+        return {"assignment_id":aid,"task_id":task["id"],"attempt_number":attempt,"worker_profile":worker_profile,"execution_mode":execution_mode,"checkpoint_count":len(normalized_checkpoints),"worktree_path":str(worktree),"branch_name":branch,"base_commit_oid":base,"worker_token_path":str(path),"context_hash":sha256(ctx)}
 
     def revoke_assignment(self,project,principal,assignment,reason):
         if assignment["state"]=="CLOSED":raise LedgerError("TASK_STATE_INVALID","Closed assignments cannot be revoked.")
@@ -775,12 +948,73 @@ class Service:
         if not a:raise LedgerError("AUTHORIZATION_DENIED","Worker assignment no longer exists.")
         p=self.con.execute("SELECT * FROM projects WHERE id=?",(a["project_id"],)).fetchone();return p,a
 
+    def correction_packet(self, project, assignment) -> dict[str, Any] | None:
+        latest=self.con.execute(
+            "SELECT * FROM submissions WHERE assignment_id=? ORDER BY sequence DESC LIMIT 1",
+            (assignment["id"],),
+        ).fetchone()
+        if not latest or latest["state"] not in {"REJECTED","BLOCKED"}:
+            return None
+        verification=self.con.execute(
+            "SELECT * FROM submission_verifications WHERE submission_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
+            (latest["id"],),
+        ).fetchone()
+        if not verification:
+            return None
+        results=json.loads(verification["criterion_results_json"])
+        failed=[result for result in results if not result["satisfied"]]
+        blockers=[dict(x) for x in self.con.execute(
+            "SELECT id,category,scope_type,scope_id,description FROM blockers WHERE project_id=? AND state='OPEN' "
+            "AND (scope_type='PROJECT' OR (scope_type='TASK' AND scope_id=?) OR "
+            "(scope_type='ASSIGNMENT' AND scope_id=?) OR (scope_type='SUBMISSION' AND scope_id=?)) ORDER BY id",
+            (project["id"],assignment["task_id"],assignment["id"],latest["id"]),
+        )]
+        body={"revision":verification["id"],"reviewed_submission_id":latest["id"],
+              "reviewed_commit_oid":latest["head_commit_oid"],"outcome":verification["outcome"],
+              "failed_criteria":failed,"corrections":verification["corrections"],
+              "notes":verification["notes"],"relevant_blockers":blockers,
+              "created_at":verification["created_at"]}
+        body["packet_hash"]=sha256(canonical(body))
+        return body
+
+    def checkpoint_progress(self, assignment) -> dict[str,Any]:
+        plan=json.loads(assignment["checkpoint_plan_json"])
+        rows=[dict(x) for x in self.con.execute(
+            "SELECT id,sequence,state,label,head_commit_oid,summary,criterion_results_json,corrections,notes,submitted_at FROM assignment_checkpoints WHERE assignment_id=? ORDER BY sequence,submitted_at,id",
+            (assignment["id"],),
+        )]
+        for row in rows:
+            if row["criterion_results_json"]:row["criterion_results"]=json.loads(row.pop("criterion_results_json"))
+            else:row.pop("criterion_results_json");row["criterion_results"]=None
+        latest_by_sequence={}
+        for row in rows:latest_by_sequence[row["sequence"]]=row
+        approved=[]
+        pending=None
+        for step in plan:
+            row=latest_by_sequence.get(step["position"])
+            if row and row["state"]=="APPROVED":approved.append(row)
+            elif row and row["state"]=="PENDING":pending=row;break
+            else:break
+        next_position=len(approved)+1
+        next_step=plan[next_position-1] if next_position<=len(plan) else None
+        latest_correction=None
+        if rows and rows[-1]["state"]=="REJECTED":
+            latest_correction={"checkpoint_id":rows[-1]["id"],"reviewed_commit_oid":rows[-1]["head_commit_oid"],
+                               "sequence":rows[-1]["sequence"],"failed_criteria":[x for x in rows[-1]["criterion_results"] or [] if not x["satisfied"]],
+                               "corrections":rows[-1]["corrections"],"notes":rows[-1]["notes"]}
+            latest_correction["packet_hash"]=sha256(canonical(latest_correction))
+        return {"mode":assignment["execution_mode"],"approved_count":len(approved),"total":len(plan),
+                "pending":pending,"next":next_step if pending is None else None,
+                "final_submission_unlocked":pending is None and len(approved)==len(plan),
+                "latest_correction":latest_correction,
+                "history":rows[-20:],"history_truncated":len(rows)>20}
+
     def worker_context(self, principal, data=None):
         project,a=self.worker_assignment(principal)
         self.preflight(project)
         data=data or {};require_object(data,{"if_none_match","if_dynamic_none_match"})
         context_json=a["context_json"] or self.context(a); context_hash=sha256(context_json)
-        dynamic={"questions":[dict(x) for x in self.con.execute("SELECT id,body,is_blocking,state,answer FROM worker_questions WHERE assignment_id=? ORDER BY asked_at,id",(a["id"],))],"open_blockers":[dict(x) for x in self.con.execute("SELECT id,category,scope_type,scope_id,description FROM blockers WHERE project_id=? AND state='OPEN' AND (scope_type='PROJECT' OR (scope_type='ASSIGNMENT' AND scope_id=?) OR (scope_type='TASK' AND scope_id=?)) ORDER BY id",(project["id"],a["id"],a["task_id"]))],"submissions":[dict(x) for x in self.con.execute("SELECT id,state,head_commit_oid,submitted_at FROM submissions WHERE assignment_id=? ORDER BY sequence",(a["id"],))]}
+        dynamic={"questions":[dict(x) for x in self.con.execute("SELECT id,body,is_blocking,state,answer FROM worker_questions WHERE assignment_id=? ORDER BY asked_at,id",(a["id"],))],"open_blockers":[dict(x) for x in self.con.execute("SELECT id,category,scope_type,scope_id,description FROM blockers WHERE project_id=? AND state='OPEN' AND (scope_type='PROJECT' OR (scope_type='ASSIGNMENT' AND scope_id=?) OR (scope_type='TASK' AND scope_id=?)) ORDER BY id",(project["id"],a["id"],a["task_id"]))],"submissions":[dict(x) for x in self.con.execute("SELECT id,state,head_commit_oid,submitted_at FROM submissions WHERE assignment_id=? ORDER BY sequence",(a["id"],))],"correction_packet":self.correction_packet(project,a),"checkpoint_progress":self.checkpoint_progress(a)}
         dynamic_hash=sha256(canonical(dynamic)); result={"assignment_id":a["id"],"context_hash":context_hash,"dynamic_hash":dynamic_hash}
         if data.get("if_none_match") != context_hash:result["context"]=json.loads(context_json)
         else:result["context_not_modified"]=True
@@ -802,8 +1036,12 @@ class Service:
         raw_diffstat=git.run(repo,["diff","--stat","--no-renames",base,head]).stdout if exists else None
         diffstat=raw_diffstat[:16384] if raw_diffstat is not None else None
         prior=[dict(x) for x in self.con.execute("SELECT id,outcome,notes,created_at FROM submission_verifications WHERE submission_id=? ORDER BY created_at,id",(sub["id"],))]
+        receipts=[]
+        for receipt in self.con.execute("SELECT * FROM execution_receipts WHERE assignment_id=? AND (submission_id IS NULL OR submission_id=?) ORDER BY started_at,id",(sub["assignment_id"],sub["id"])):
+            item=dict(receipt);item["telemetry"]=json.loads(item.pop("telemetry_json"));item["currently_stale"]=bool(item["stale"]) or item["source_revision"]!=head
+            receipts.append(item)
         changed=json.loads(sub["changed_files_json"]);page=changed[:500]
-        return {"submission":{"id":sub["id"],"state":sub["state"],"assignment_id":sub["assignment_id"],"worker_profile":sub["worker_profile"],"task_id":task["id"],"assigned_task_revision":sub["task_revision"],"current_task_revision":task["current_revision"],"definition_stale":sub["task_revision"]!=task["current_revision"],"base_commit_oid":base,"head_commit_oid":head,"head_object_exists":exists,"canonical_head_oid":git.oid_or_none(repo,f"refs/heads/{project['canonical_branch']}")},"diff":{"diffstat":diffstat,"diffstat_truncated":raw_diffstat is not None and len(raw_diffstat)>len(diffstat),"changed_files":page,"changed_files_total":len(changed),"changed_files_omitted":len(changed)-len(page),"complete":len(page)==len(changed),"patch_included":False},"criteria":criteria,"required_checks":required_checks,"requirements":requirements,"worker_claims":{"summary":sub["summary"],"evidence":json.loads(sub["evidence_json"]),"risks":json.loads(sub["risks_json"]),"unresolved_questions":json.loads(sub["unresolved_questions_json"]),"follow_up_work":json.loads(sub["follow_up_work_json"])},"open_blockers":blockers,"prior_verifications":prior,"review_required":{"inspect_exact_diff":True,"run_independent_checks":True,"worker_evidence_is_claim_only":True,"accept_from_incomplete_packet":False}}
+        return {"submission":{"id":sub["id"],"state":sub["state"],"assignment_id":sub["assignment_id"],"worker_profile":sub["worker_profile"],"task_id":task["id"],"assigned_task_revision":sub["task_revision"],"current_task_revision":task["current_revision"],"definition_stale":sub["task_revision"]!=task["current_revision"],"base_commit_oid":base,"head_commit_oid":head,"head_object_exists":exists,"canonical_head_oid":git.oid_or_none(repo,f"refs/heads/{project['canonical_branch']}")},"diff":{"diffstat":diffstat,"diffstat_truncated":raw_diffstat is not None and len(raw_diffstat)>len(diffstat),"changed_files":page,"changed_files_total":len(changed),"changed_files_omitted":len(changed)-len(page),"complete":len(page)==len(changed),"patch_included":False},"criteria":criteria,"required_checks":required_checks,"requirements":requirements,"worker_claims":{"summary":sub["summary"],"evidence":json.loads(sub["evidence_json"]),"risks":json.loads(sub["risks_json"]),"unresolved_questions":json.loads(sub["unresolved_questions_json"]),"follow_up_work":json.loads(sub["follow_up_work_json"])},"execution_receipts":receipts,"receipt_classes":{"worker":"supporting claim only","reviewer":"independent observed execution"},"open_blockers":blockers,"prior_verifications":prior,"review_required":{"inspect_exact_diff":True,"run_independent_checks":True,"worker_evidence_is_claim_only":True,"worker_receipts_do_not_satisfy_reviewer_obligations":True,"accept_from_incomplete_packet":False}}
 
     def worker_question(self,principal,data):
         require_object(data,{"body","blocking"},{"body","blocking"}); project,a=self.worker_assignment(principal)
@@ -835,23 +1073,124 @@ class Service:
         with transaction(self.con):self.con.execute("INSERT INTO follow_up_proposals VALUES(?,?,?,?,?,?,?,?)",(fid,a["id"],None,text(data["body"],"body"),"PROPOSED",now(),None,None));self.audit(project["id"],principal["id"],"FOLLOW_UP_PROPOSED","FOLLOW_UP",fid)
         return {"follow_up_id":fid}
 
+    def _commit_worker_checkpoint(self, project, assignment, task, message: str) -> tuple[str, list[dict[str,str]]]:
+        pre=git.oid(assignment["worktree_path"]);op=new_id()
+        with transaction(self.con):
+            self.con.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,?,?,?)",(op,project["id"],"SUBMISSION_CHECKPOINT","ASSIGNMENT",assignment["id"],"STARTED",canonical({"head":pre,"worktree":assignment["worktree_path"]}),None,now(),None))
+        try:
+            if git.current_branch(assignment["worktree_path"])!=assignment["branch_name"] or git.operation_in_progress(assignment["worktree_path"]):
+                raise LedgerError("GIT_COMMAND_FAILED","Assignment worktree is not in a safe state.")
+            git.run(assignment["worktree_path"],["add","-A"])
+            if git.run(assignment["worktree_path"],["diff","--cached","--quiet"],check=False).returncode:
+                git.run(assignment["worktree_path"],["-c","commit.gpgSign=false","commit","-m",message])
+            if not git.clean(assignment["worktree_path"]):raise LedgerError("GIT_COMMAND_FAILED","Worktree remains dirty after checkpoint.")
+            head=git.oid(assignment["worktree_path"])
+            if not git.ancestor(assignment["worktree_path"],assignment["base_commit_oid"],head) or head==assignment["base_commit_oid"]:
+                raise LedgerError("GIT_COMMAND_FAILED","Checkpoint must contain a non-empty descendant diff.")
+            raw=git.run(assignment["worktree_path"],["diff","--name-status","-z",assignment["base_commit_oid"],head]).stdout
+            changed=[];parts=raw.split("\0");i=0
+            while i<len(parts)-1:
+                status=parts[i];i+=1
+                if not status:continue
+                path=parts[i];i+=1
+                if status[:1] in {"R","C"} and i<len(parts):path=parts[i];i+=1
+                changed.append({"status":status,"path":path})
+        except LedgerError:
+            with transaction(self.con):self.con.execute("UPDATE operations SET state='FAILED',finished_at=? WHERE id=?",(now(),op))
+            raise
+        with transaction(self.con):self.con.execute("UPDATE operations SET state='SUCCEEDED',finished_at=? WHERE id=?",(now(),op))
+        return head,changed
+
+    def worker_checkpoint(self, principal, data):
+        require_object(data,{"summary","evidence"},{"summary","evidence"})
+        project,a=self.worker_assignment(principal);self.preflight(project)
+        task=self.con.execute("SELECT * FROM tasks WHERE id=?",(a["task_id"],)).fetchone()
+        if a["state"]!="ACTIVE" or task["state"]!="ASSIGNED":raise LedgerError("ASSIGNMENT_NOT_ACTIVE","Worker assignment is not active.")
+        if task["current_revision"]!=a["task_revision"]:raise LedgerError("TASK_REVISION_STALE","Assignment task revision is stale.")
+        progress=self.checkpoint_progress(a)
+        if progress["pending"]:raise LedgerError("CHECKPOINT_ALREADY_PENDING","A checkpoint is awaiting review.")
+        step=progress["next"]
+        if not step:raise LedgerError("CHECKPOINT_SEQUENCE_COMPLETE","All planned checkpoints are approved; final submission is available.")
+        evidence=array(data["evidence"],"evidence")
+        for item in evidence:
+            require_object(item,{"label","details","receipt_id"},{"label","details"});text(item["label"],"evidence label");text(item["details"],"evidence details")
+            if item.get("receipt_id") and not self.con.execute("SELECT 1 FROM execution_receipts WHERE id=? AND assignment_id=? AND execution_role='WORKER'",(item["receipt_id"],a["id"])).fetchone():raise LedgerError("EVIDENCE_RECEIPT_INVALID","Checkpoint receipt does not belong to this worker assignment.")
+        head,changed=self._commit_worker_checkpoint(project,a,task,f"taskledger: checkpoint {step['position']} {task['id']}")
+        prior=self.con.execute("SELECT * FROM assignment_checkpoints WHERE assignment_id=? AND sequence=? AND state='REJECTED' ORDER BY submitted_at DESC,id DESC LIMIT 1",(a["id"],step["position"])).fetchone()
+        claim={"summary":data["summary"],"evidence":evidence,"step":step};payload=sha256(canonical_bytes(claim))
+        existing=self.con.execute("SELECT * FROM assignment_checkpoints WHERE assignment_id=? AND sequence=? AND head_commit_oid=? AND payload_hash=?",(a["id"],step["position"],head,payload)).fetchone()
+        if existing:return {"checkpoint_id":existing["id"],"state":existing["state"],"idempotent":True}
+        checkpoint_id=new_id()
+        with transaction(self.con):
+            if prior:self.con.execute("UPDATE assignment_checkpoints SET state='SUPERSEDED' WHERE id=?",(prior["id"],))
+            self.con.execute("INSERT INTO assignment_checkpoints(id,assignment_id,sequence,task_revision,label,criteria_json,state,summary,head_commit_oid,evidence_json,payload_hash,submitted_by_principal_id,submitted_at,resolved_at,reviewer_principal_id,criterion_results_json,corrections,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                             (checkpoint_id,a["id"],step["position"],a["task_revision"],step["label"],canonical(step["criteria"]),"PENDING",text(data["summary"],"summary"),head,canonical(evidence),payload,principal["id"],now(),None,None,None,None,None))
+            self.audit(project["id"],principal["id"],"CHECKPOINT_RECORDED","CHECKPOINT",checkpoint_id,{"sequence":step["position"],"head_commit_oid":head})
+        return {"checkpoint_id":checkpoint_id,"sequence":step["position"],"state":"PENDING","head_commit_oid":head,"changed_files":changed}
+
+    def checkpoint_review_context(self, project, checkpoint_id):
+        row=self.con.execute("SELECT c.*,a.task_id,a.base_commit_oid,a.worktree_path,a.task_revision assigned_revision FROM assignment_checkpoints c JOIN assignments a ON a.id=c.assignment_id WHERE c.id=? AND a.project_id=?",(checkpoint_id,project["id"])).fetchone()
+        if not row:raise LedgerError("CHECKPOINT_NOT_FOUND","Checkpoint was not found.")
+        task=self.con.execute("SELECT * FROM tasks WHERE id=?",(row["task_id"],)).fetchone()
+        exists=git.run(project["repository_root"],["cat-file","-e",f"{row['head_commit_oid']}^{{commit}}"],check=False).returncode==0
+        return {"checkpoint":{"id":row["id"],"assignment_id":row["assignment_id"],"sequence":row["sequence"],"state":row["state"],"label":row["label"],"criteria":json.loads(row["criteria_json"]),"base_commit_oid":row["base_commit_oid"],"head_commit_oid":row["head_commit_oid"],"head_object_exists":exists,"assigned_task_revision":row["assigned_revision"],"current_task_revision":task["current_revision"],"definition_stale":row["assigned_revision"]!=task["current_revision"]},"worker_claims":{"summary":row["summary"],"evidence":json.loads(row["evidence_json"])},"review_required":{"inspect_exact_commit":True,"independent_check":True,"approval_is_intermediate_only":True,"integration_permitted":False}}
+
+    def verify_checkpoint(self, project, principal, data):
+        require_object(data,{"checkpoint_id","outcome","criterion_results","corrections","notes"},{"checkpoint_id","outcome","criterion_results","corrections","notes"})
+        row=self.con.execute("SELECT c.*,a.project_id,a.task_id,a.task_revision assigned_revision,a.state assignment_state FROM assignment_checkpoints c JOIN assignments a ON a.id=c.assignment_id WHERE c.id=? AND a.project_id=?",(data["checkpoint_id"],project["id"])).fetchone()
+        if not row:raise LedgerError("CHECKPOINT_NOT_FOUND","Checkpoint was not found.")
+        if row["state"]!="PENDING" or row["assignment_state"]!="ACTIVE":raise LedgerError("CHECKPOINT_STATE_INVALID","Checkpoint is not awaiting review.")
+        task=self.con.execute("SELECT * FROM tasks WHERE id=?",(row["task_id"],)).fetchone()
+        if task["current_revision"]!=row["assigned_revision"]:raise LedgerError("TASK_REVISION_STALE","Checkpoint cannot be approved against a changed task definition.")
+        outcome=data["outcome"]
+        if outcome not in {"APPROVED","REJECTED"}:raise LedgerError("INVALID_REQUEST","Checkpoint outcome must be APPROVED or REJECTED.")
+        criteria=json.loads(row["criteria_json"]);results=array(data["criterion_results"],"criterion_results")
+        seen=set()
+        for result in results:
+            require_object(result,{"position","satisfied","evidence"},{"position","satisfied","evidence"})
+            position=result["position"]
+            if not isinstance(position,int) or isinstance(position,bool) or position<1 or position>len(criteria) or position in seen or not isinstance(result["satisfied"],bool):raise LedgerError("VERIFICATION_CRITERIA_INCOMPLETE","Checkpoint criterion result is invalid.")
+            seen.add(position);text(result["evidence"],"criterion evidence")
+        if seen!=set(range(1,len(criteria)+1)):raise LedgerError("VERIFICATION_CRITERIA_INCOMPLETE","Every checkpoint criterion needs exactly one result.")
+        satisfied=all(x["satisfied"] for x in results)
+        if outcome=="APPROVED" and not satisfied:raise LedgerError("VERIFICATION_OUTCOME_INVALID","Approved checkpoint has unmet criteria.")
+        if outcome=="REJECTED" and (satisfied or not data["corrections"]):raise LedgerError("VERIFICATION_OUTCOME_INVALID","Rejected checkpoint requires failed criteria and corrections.")
+        with transaction(self.con):
+            self.con.execute("UPDATE assignment_checkpoints SET state=?,corrections=?,reviewer_principal_id=?,criterion_results_json=?,resolved_at=?,notes=? WHERE id=?",(outcome,data["corrections"],principal["id"],canonical(results),now(),text(data["notes"],"notes"),row["id"]))
+            self.audit(project["id"],principal["id"],"CHECKPOINT_REVIEWED","CHECKPOINT",row["id"],{"outcome":outcome,"sequence":row["sequence"],"head_commit_oid":row["head_commit_oid"]})
+        return {"checkpoint_id":row["id"],"outcome":outcome,"assignment_id":row["assignment_id"],"next_action":"worker.checkpoint" if outcome=="REJECTED" else ("worker.submit" if self.checkpoint_progress(self.con.execute("SELECT * FROM assignments WHERE id=?",(row["assignment_id"],)).fetchone())["final_submission_unlocked"] else "worker.checkpoint")}
+
     def worker_submit(self,principal,data):
         require_object(data,{"summary","evidence","risks","unresolved_questions","follow_up_work"},{"summary","evidence","risks","unresolved_questions","follow_up_work"})
         project,a=self.worker_assignment(principal);task=self.con.execute("SELECT * FROM tasks WHERE id=?",(a["task_id"],)).fetchone()
         self.preflight(project)
         if a["state"]!="ACTIVE" or task["state"]!="ASSIGNED":raise LedgerError("ASSIGNMENT_NOT_ACTIVE","Worker assignment is not active.")
+        progress=self.checkpoint_progress(a)
+        if not progress["final_submission_unlocked"]:raise LedgerError("CHECKPOINT_APPROVAL_REQUIRED","Every planned checkpoint must be approved before final submission.",details={"checkpoint_progress":progress})
         if self.ensure_operation_exists(project["id"]):raise LedgerError("RECOVERY_REQUIRED","Submission is blocked while a Git operation is unresolved.")
         evidence=array(data["evidence"],"evidence")
         if not evidence:raise LedgerError("SUBMISSION_EVIDENCE_REQUIRED","At least one evidence item is required.")
         for item in evidence:
-            require_object(item,{"label","details","command","exit_code","artifact_path"},{"label","details"});text(item["label"],"evidence label");text(item["details"],"evidence details")
+            require_object(item,{"label","details","command","exit_code","artifact_path","receipt_id","artifact_id"},{"label","details"});text(item["label"],"evidence label");text(item["details"],"evidence details")
             if "command" in item and item["command"] is not None:text(item["command"],"evidence command")
             if "exit_code" in item and item["exit_code"] is not None and (not isinstance(item["exit_code"],int) or isinstance(item["exit_code"],bool)):raise LedgerError("INVALID_REQUEST","evidence exit_code must be an integer or null.")
             if "artifact_path" in item and item["artifact_path"] is not None:text(item["artifact_path"],"evidence artifact_path")
+            if "receipt_id" in item and item["receipt_id"] is not None:text(item["receipt_id"],"evidence receipt_id")
+            if "artifact_id" in item and item["artifact_id"] is not None:
+                text(item["artifact_id"],"evidence artifact_id")
+                if not self.con.execute("SELECT 1 FROM evidence_artifacts WHERE id=? AND assignment_id=?",(item["artifact_id"],a["id"])).fetchone():raise LedgerError("EVIDENCE_ARTIFACT_INVALID","Artifact does not belong to this worker assignment.")
         required_checks=[x[0] for x in self.con.execute("SELECT command FROM task_required_checks WHERE task_id=? AND task_revision=? ORDER BY position",(task["id"],a["task_revision"]))]
-        successful_commands={item.get("command") for item in evidence if item.get("exit_code")==0}
+        current_head=git.oid(a["worktree_path"]);current_fingerprint=self.tree_fingerprint(a["worktree_path"])
+        successful_commands=set()
+        for item in evidence:
+            receipt_id=item.get("receipt_id")
+            if not receipt_id:continue
+            receipt=self.con.execute("SELECT * FROM execution_receipts WHERE id=? AND assignment_id=? AND execution_role='WORKER'",(receipt_id,a["id"])).fetchone()
+            if not receipt:raise LedgerError("EVIDENCE_RECEIPT_INVALID","Receipt does not belong to this worker assignment.")
+            if receipt["status"]=="SUCCEEDED" and receipt["exit_code"]==0 and not receipt["stale"] and receipt["source_revision"]==current_head and receipt["tree_fingerprint_after"]==current_fingerprint:
+                successful_commands.add(receipt["command"])
         missing_checks=[command for command in required_checks if command not in successful_commands]
-        if missing_checks:raise LedgerError("REQUIRED_CHECK_EVIDENCE_MISSING","Submission evidence is missing a successful required check.",details={"commands":missing_checks})
+        if missing_checks:raise LedgerError("REQUIRED_CHECK_EVIDENCE_MISSING","Submission evidence is missing a current observed worker receipt for a required check.",details={"commands":missing_checks,"prose_claims_do_not_satisfy_checks":True})
         risks=array(data["risks"],"risks");questions=array(data["unresolved_questions"],"unresolved_questions");followups=array(data["follow_up_work"],"follow_up_work")
         for item,body in [(i,"description") for i in risks]+[(i,"body") for i in questions]:
             require_object(item,{body,"blocking","blocker_category"},{body,"blocking","blocker_category"});text(item[body],body)
@@ -918,6 +1257,10 @@ class Service:
         if outcome=="ACCEPTED":
             self.preflight(project)
             if not satisfied or not data["behavior_matches_intent"] or not data["required_evidence_present"] or data["blocking_issues_remaining"]:raise LedgerError("VERIFICATION_OUTCOME_INVALID","Accepted result has unmet verification assertions.")
+            required_checks=[x[0] for x in self.con.execute("SELECT command FROM task_required_checks WHERE task_id=? AND task_revision=? ORDER BY position",(task["id"],task["current_revision"]))]
+            reviewer_checks={x[0] for x in self.con.execute("SELECT command FROM execution_receipts WHERE submission_id=? AND execution_role='REVIEWER' AND status='SUCCEEDED' AND exit_code=0 AND stale=0 AND source_revision=?",(sub["id"],sub["head_commit_oid"]))}
+            missing_reviewer_checks=[command for command in required_checks if command not in reviewer_checks]
+            if missing_reviewer_checks:raise LedgerError("INDEPENDENT_CHECK_EVIDENCE_MISSING","Acceptance requires current orchestrator execution receipts for every required check.",details={"commands":missing_reviewer_checks})
             reasons=self.blocking_reasons(project["id"],"accept",task["id"],sub["assignment_id"],sub["id"])
             if reasons:raise LedgerError("BLOCKER_OPEN","An open blocker prevents acceptance.",details={"blockers":reasons})
             if not self.plan_current(project["id"])[0]:raise LedgerError("PLAN_INVALID","Plan must be valid before acceptance.")
@@ -1172,11 +1515,136 @@ class Service:
             with transaction(self.con):self.audit(project["id"],principal["id"],"ASSIGNMENT_WORKTREES_CLEANED","PROJECT",project["id"],{"removed_assignment_ids":[x["assignment_id"] for x in removed],"skipped":[{"assignment_id":x["assignment_id"],"reason":x["reason"]} for x in skipped]})
         return result
 
+    def preparation_diagnostics(self, project, data):
+        require_object(data,{"profiles","local_inputs","services","host_agent_availability"})
+        profiles=data.get("profiles",["routine","complex"]);profiles=array(profiles,"profiles")
+        if any(profile not in WORKER_PROFILES for profile in profiles):raise LedgerError("INVALID_REQUEST","profiles may contain only routine or complex.")
+        inputs=array(data.get("local_inputs",[]),"local_inputs");services=array(data.get("services",[]),"services")
+        host=data.get("host_agent_availability",{})
+        if not isinstance(host,dict):raise LedgerError("INVALID_REQUEST","host_agent_availability must be an object.")
+        version_checks={}
+        for name,command in (("python",[sys.executable,"--version"]),("git",["git","--version"])):
+            completed=subprocess.run(command,text=True,capture_output=True,check=False)
+            version_checks[name]={"available":completed.returncode==0,"version":(completed.stdout or completed.stderr).strip()[:200]}
+        version_checks["taskledger"]={"available":True,"version":__import__("taskledger").__version__}
+        profile_checks=[]
+        for profile in profiles:
+            name=f"taskledger-worker-{profile}.toml"
+            candidates=[Path(project["repository_root"])/".codex"/"agents"/name,
+                        Path(os.environ.get("CODEX_HOME",str(Path.home()/".codex")))/"agents"/name]
+            path=next((candidate for candidate in candidates if candidate.is_file()),None)
+            configured={"profile":profile,"configuration_present":path is not None,
+                        "configuration_path":str(path) if path else None,
+                        "runtime_capability":"HOST_HANDSHAKE_REQUIRED"}
+            if path:
+                raw=path.read_text(encoding="utf-8",errors="replace")
+                for field in ("model","model_reasoning_effort"):
+                    import re
+                    match=re.search(rf"^\s*{field}\s*=\s*\"([^\"]+)\"",raw,re.MULTILINE)
+                    configured[field]=match.group(1) if match else None
+            if profile in host:
+                if not isinstance(host[profile],bool):raise LedgerError("INVALID_REQUEST","Host availability values must be boolean.")
+                configured["host_reported_available"]=host[profile]
+                configured["runtime_capability"]="HOST_REPORTED_UNVERIFIED"
+            profile_checks.append(configured)
+        input_checks=[]
+        for item in inputs:
+            require_object(item,{"name","path","required"},{"name","path","required"})
+            if not isinstance(item["required"],bool):raise LedgerError("INVALID_REQUEST","local input required must be boolean.")
+            path=Path(text(item["path"],"local input path")).expanduser();exists=path.exists()
+            input_checks.append({"name":text(item["name"],"local input name"),"path":str(path),"required":item["required"],
+                                 "exists":exists,"kind":"directory" if path.is_dir() else ("file" if path.is_file() else "missing"),
+                                 "readable":exists and os.access(path,os.R_OK),"contents_inspected":False})
+        service_checks=[]
+        for item in services:
+            require_object(item,{"name","host","port","required"},{"name","host","port","required"})
+            port=item["port"]
+            if not isinstance(port,int) or isinstance(port,bool) or not 1<=port<=65535 or not isinstance(item["required"],bool):raise LedgerError("INVALID_REQUEST","Service port/required value is invalid.")
+            reachable=False;error=None
+            try:
+                with socket.create_connection((text(item["host"],"service host"),port),timeout=1):reachable=True
+            except OSError as exc:error=exc.__class__.__name__
+            service_checks.append({"name":text(item["name"],"service name"),"host":item["host"],"port":port,"required":item["required"],"reachable":reachable,"error_class":error})
+        info=git.inspect(project["repository_root"])
+        repository={"root":info["root"],"symbolic_branch":info["branch"],"canonical_branch":project["canonical_branch"],
+                    "branch_matches":info["branch"]==project["canonical_branch"],"has_commits":info["has_commits"],
+                    "clean":git.clean(project["repository_root"]),"ledger_directory_ignored":git.ignored(project["repository_root"],".taskledger/")}
+        ready=all(x["available"] for x in version_checks.values()) and all(x["configuration_present"] for x in profile_checks) and repository["branch_matches"] and repository["has_commits"] and repository["ledger_directory_ignored"] and all((not x["required"]) or (x["exists"] and x["readable"]) for x in input_checks) and all((not x["required"]) or x["reachable"] for x in service_checks)
+        host_reported_ready=ready and all(x.get("host_reported_available") is True for x in profile_checks)
+        return {"protocol_version":4,"ready_for_local_preparation":ready,"ready_for_assignment_from_host_report":host_reported_ready,"versions":version_checks,"repository":repository,
+                "profiles":profile_checks,"local_inputs":input_checks,"services":service_checks,
+                "host_contract":{"configuration_is_not_runtime_proof":True,"required_action":"The host must confirm it can launch the selected exact named profile before assignment creation.","silent_model_substitution_forbidden":True},
+                "secrets_read":False}
+
+    def wait_for_events(self, project, data):
+        require_object(data,{"cursor","event_types","timeout_ms","limit"})
+        cursor=data.get("cursor",0);timeout_ms=data.get("timeout_ms",30000);limit=data.get("limit",50)
+        if not isinstance(cursor,int) or isinstance(cursor,bool) or cursor<0:raise LedgerError("INVALID_REQUEST","cursor must be a non-negative audit sequence.")
+        if not isinstance(timeout_ms,int) or isinstance(timeout_ms,bool) or not 0<=timeout_ms<=60000:raise LedgerError("INVALID_REQUEST","timeout_ms must be between 0 and 60000.")
+        if not isinstance(limit,int) or isinstance(limit,bool) or not 1<=limit<=200:raise LedgerError("INVALID_REQUEST","limit must be between 1 and 200.")
+        types=array(data.get("event_types",sorted(ACTIONABLE_EVENTS)),"event_types")
+        if not types or any(not isinstance(value,str) or value not in ACTIONABLE_EVENTS for value in types):raise LedgerError("INVALID_REQUEST","event_types must contain supported actionable event names.")
+        latest_at_start=self.con.execute("SELECT COALESCE(MAX(sequence),0) FROM audit_events WHERE project_id=?",(project["id"],)).fetchone()[0]
+        if cursor>latest_at_start:
+            raise LedgerError("EVENT_CURSOR_INVALID","Event cursor is ahead of the latest durable project event.",details={"cursor":cursor,"latest_event_sequence":latest_at_start})
+        placeholders=",".join("?" for _ in types);deadline=time.monotonic()+timeout_ms/1000
+        cancelled=False;rows=[]
+        try:
+            while True:
+                rows=self.con.execute(f"SELECT sequence,event_type,entity_type,entity_id,payload_json,created_at FROM audit_events WHERE project_id=? AND sequence>? AND event_type IN ({placeholders}) ORDER BY sequence LIMIT ?",(project["id"],cursor,*types,limit)).fetchall()
+                if rows or time.monotonic()>=deadline:break
+                time.sleep(min(0.1,max(0,deadline-time.monotonic())))
+        except KeyboardInterrupt:cancelled=True
+        minimum=self.con.execute("SELECT MIN(sequence) FROM audit_events WHERE project_id=?",(project["id"],)).fetchone()[0]
+        latest=self.con.execute("SELECT COALESCE(MAX(sequence),0) FROM audit_events WHERE project_id=?",(project["id"],)).fetchone()[0]
+        events=[]
+        for row in rows:
+            event=dict(row);event["payload"]=json.loads(event.pop("payload_json"));events.append(event)
+        next_cursor=events[-1]["sequence"] if events else cursor
+        return {"events":events,"event_cursor":next_cursor,"latest_event_sequence":latest,"timed_out":not events and not cancelled,
+                "cancelled":cancelled,"missed_events":False,"retained_event_floor":minimum,
+                "cursor_gap_status":"NO_PRUNING_CONFIGURED",
+                "host_wakeup_required":True,"polling_occurred_outside_model_reasoning":True}
+
+    def evidence_export(self, project, principal, data):
+        require_object(data,{"task_id"})
+        task_id=data.get("task_id")
+        if task_id is not None and not self.con.execute("SELECT 1 FROM tasks WHERE id=? AND project_id=?",(task_id,project["id"])).fetchone():raise LedgerError("TASK_NOT_FOUND","Task was not found.")
+        task_clause=" AND a.task_id=?" if task_id else "";params=(project["id"],task_id) if task_id else (project["id"],)
+        claims=[]
+        for row in self.con.execute("SELECT s.*,a.task_id,a.task_revision FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.project_id=?"+task_clause+" ORDER BY a.task_id,s.assignment_id,s.sequence",params):
+            claims.append({"provenance":"WORKER_CLAIM","submission_id":row["id"],"task_id":row["task_id"],"task_revision":row["task_revision"],"head_commit_oid":row["head_commit_oid"],"summary":row["summary"],"evidence":json.loads(row["evidence_json"]),"risks":json.loads(row["risks_json"]),"unresolved_questions":json.loads(row["unresolved_questions_json"]),"follow_up_work":json.loads(row["follow_up_work_json"])})
+        receipts=[]
+        for row in self.con.execute("SELECT r.* FROM execution_receipts r JOIN assignments a ON a.id=r.assignment_id WHERE r.project_id=?"+task_clause+" ORDER BY r.started_at,r.id",params):
+            item=dict(row);item["provenance"]="OBSERVED_EXECUTION";item["telemetry"]=json.loads(item.pop("telemetry_json"));receipts.append(item)
+        conclusions=[]
+        for row in self.con.execute("SELECT sv.*,s.head_commit_oid,a.task_id FROM submission_verifications sv JOIN submissions s ON s.id=sv.submission_id JOIN assignments a ON a.id=s.assignment_id WHERE s.project_id=?"+task_clause+" ORDER BY sv.created_at,sv.id",params):
+            item=dict(row);item["provenance"]="REVIEWER_CONCLUSION";item["criterion_results"]=json.loads(item.pop("criterion_results_json"));conclusions.append(item)
+        checkpoint_params=(project["id"],task_id) if task_id else (project["id"],)
+        for row in self.con.execute("SELECT c.*,a.task_id FROM assignment_checkpoints c JOIN assignments a ON a.id=c.assignment_id WHERE a.project_id=?"+task_clause+" AND c.reviewer_principal_id IS NOT NULL ORDER BY c.resolved_at,c.id",checkpoint_params):
+            item=dict(row);item["provenance"]="CHECKPOINT_REVIEWER_CONCLUSION";item["criteria"]=json.loads(item.pop("criteria_json"));item["criterion_results"]=json.loads(item.pop("criterion_results_json"));item["evidence"]=json.loads(item.pop("evidence_json"));conclusions.append(item)
+        sources=[]
+        source_query="SELECT rr.requirement_id,rr.requirement_revision,rr.specification_id,rr.locator,rr.excerpt,s.relative_path,sr.content_hash FROM requirement_source_refs rr JOIN specifications s ON s.id=rr.specification_id LEFT JOIN specification_revisions sr ON sr.id=s.active_revision_id JOIN task_requirement_links l ON l.requirement_id=rr.requirement_id JOIN tasks t ON t.id=l.task_id AND t.current_revision=l.task_revision WHERE t.project_id=?"
+        source_params=[project["id"]]
+        if task_id:source_query+=" AND t.id=?";source_params.append(task_id)
+        source_query+=" ORDER BY rr.requirement_id,rr.specification_id,rr.locator"
+        for row in self.con.execute(source_query,source_params):sources.append({**dict(row),"provenance":"REGISTERED_SOURCE_CLAIM","claim_preserved_verbatim":True})
+        artifacts=[dict(x) for x in self.con.execute("SELECT id,assignment_id,provenance_kind,original_path,stored_path,sha256,size_bytes,source_revision,created_at FROM evidence_artifacts WHERE project_id=? AND provenance_kind<>'MECHANICAL_EVIDENCE_EXPORT' ORDER BY created_at,id",(project["id"],))]
+        document={"protocol_version":4,"project_id":project["id"],"task_filter":task_id,"source_use_claims":sources,"worker_claims":claims,"observed_execution_receipts":receipts,"reviewer_conclusions":conclusions,"registered_artifacts":artifacts,"semantic_conclusions_generated":False,"read_or_delivery_telemetry_proves_understanding":False}
+        raw=canonical(document).encode();digest=sha256(raw);export_id=new_id();root=self.home/"projects"/project["id"]/"exports";root.mkdir(mode=0o700,parents=True,exist_ok=True);path=root/f"evidence-{digest}.json"
+        if not path.exists():path.write_bytes(raw);os.chmod(path,0o600)
+        with transaction(self.con):
+            existing=self.con.execute("SELECT id FROM evidence_artifacts WHERE project_id=? AND provenance_kind='MECHANICAL_EVIDENCE_EXPORT' AND sha256=?",(project["id"],digest)).fetchone()
+            if existing:export_id=existing["id"]
+            else:self.con.execute("INSERT INTO evidence_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)",(export_id,project["id"],None,principal["id"],"MECHANICAL_EVIDENCE_EXPORT",None,str(path),digest,len(raw),git.oid_or_none(project["repository_root"],"HEAD"),now()))
+            self.audit(project["id"],principal["id"],"EVIDENCE_EXPORTED","PROJECT",project["id"],{"sha256":digest,"task_id":task_id})
+        return {"export_artifact_id":export_id,"path":str(path),"sha256":digest,"bytes":len(raw),"deterministic_content":True}
+
     def resume(self,project,data):
         require_object(data,{"cursor"});valid,fingerprint,diagnostics=self.plan_current(project["id"]);reqs=self.requirement_rows(project)
         latest=self.con.execute("SELECT COALESCE(MAX(sequence),0) FROM audit_events WHERE project_id=?",(project["id"],)).fetchone()[0]
         operations=[dict(x) for x in self.con.execute("SELECT id,kind,entity_type,entity_id,state,started_at,finished_at FROM operations WHERE project_id=? AND state IN ('STARTED','UNCERTAIN') ORDER BY started_at,id",(project["id"],))]
-        snapshot={"schema_version":2,"project_id":project["id"],"phase":self.phase(project),"canonical_branch":project["canonical_branch"],"canonical_head_oid":git.oid_or_none(project["repository_root"],f"refs/heads/{project['canonical_branch']}"),"plan":{"valid":valid,"fingerprint":fingerprint,"diagnostics":diagnostics},"progress":self.progress(project),"pending_review_ids":[x[0] for x in self.con.execute("SELECT id FROM specification_reviews WHERE project_id=? AND state='PENDING' ORDER BY id",(project["id"],))],"eligible_task_ids":[t["id"] for t in self.con.execute("SELECT * FROM tasks WHERE project_id=? ORDER BY id",(project["id"],)) if self.task_eligible(project,t)[0]],"active_assignments":[dict(x) for x in self.con.execute("SELECT id,task_id,worker_profile,state,worktree_path,base_commit_oid FROM assignments WHERE project_id=? AND state IN ('PREPARING','ACTIVE') ORDER BY id",(project["id"],))],"pending_submissions":[dict(x) for x in self.con.execute("SELECT s.id,s.assignment_id,s.state,s.head_commit_oid FROM submissions s WHERE s.project_id=? AND s.state IN ('PENDING','BLOCKED') ORDER BY s.id",(project["id"],))],"ready_requirement_ids":[r["id"] for r in reqs if r["ready_for_verification"]],"open_blockers":[dict(x) for x in self.con.execute("SELECT id,category,scope_type,scope_id,description FROM blockers WHERE project_id=? AND state='OPEN' ORDER BY id",(project["id"],))],"open_questions":[dict(x) for x in self.con.execute("SELECT q.id,q.assignment_id,q.body,q.is_blocking FROM worker_questions q JOIN assignments a ON a.id=q.assignment_id WHERE a.project_id=? AND q.state='OPEN' ORDER BY q.id",(project["id"],))],"operations":operations,"full_recovery_required":bool(operations),"latest_event_sequence":latest}
+        snapshot={"schema_version":4,"project_id":project["id"],"phase":self.phase(project),"canonical_branch":project["canonical_branch"],"canonical_head_oid":git.oid_or_none(project["repository_root"],f"refs/heads/{project['canonical_branch']}"),"plan":{"valid":valid,"fingerprint":fingerprint,"diagnostics":diagnostics},"progress":self.progress(project),"pending_review_ids":[x[0] for x in self.con.execute("SELECT id FROM specification_reviews WHERE project_id=? AND state='PENDING' ORDER BY id",(project["id"],))],"eligible_task_ids":[t["id"] for t in self.con.execute("SELECT * FROM tasks WHERE project_id=? ORDER BY id",(project["id"],)) if self.task_eligible(project,t)[0]],"active_assignments":[dict(x) for x in self.con.execute("SELECT id,task_id,worker_profile,state,worktree_path,base_commit_oid FROM assignments WHERE project_id=? AND state IN ('PREPARING','ACTIVE') ORDER BY id",(project["id"],))],"pending_submissions":[dict(x) for x in self.con.execute("SELECT s.id,s.assignment_id,s.state,s.head_commit_oid FROM submissions s WHERE s.project_id=? AND s.state IN ('PENDING','BLOCKED') ORDER BY s.id",(project["id"],))],"ready_requirement_ids":[r["id"] for r in reqs if r["ready_for_verification"]],"open_blockers":[dict(x) for x in self.con.execute("SELECT id,category,scope_type,scope_id,description FROM blockers WHERE project_id=? AND state='OPEN' ORDER BY id",(project["id"],))],"open_questions":[dict(x) for x in self.con.execute("SELECT q.id,q.assignment_id,q.body,q.is_blocking FROM worker_questions q JOIN assignments a ON a.id=q.assignment_id WHERE a.project_id=? AND q.state='OPEN' ORDER BY q.id",(project["id"],))],"operations":operations,"full_recovery_required":bool(operations),"latest_event_sequence":latest}
         cursor=sha256(canonical(snapshot)); supplied=data.get("cursor")
         if supplied==cursor:return {"project_id":project["id"],"cursor":cursor,"not_modified":True,"full_recovery_required":bool(operations),"operations":operations}
         snapshot.update({"cursor":cursor,"not_modified":False,"baseline_status":"NEW" if supplied is None else "REFRESHED"})

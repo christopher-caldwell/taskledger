@@ -15,6 +15,8 @@ Use `taskledger <resource> <action> --input -` and supply exactly one JSON objec
 - `project init --repo <absolute-path> --confirm-branch <exact-name>`: initialize.
 - `project show`, `project recover`, `project complete`, `project cleanup`: `{}`. Completion records the canonical commit, then removes clean finalized assignment worktrees. Cleanup retries that removal for an already-completed project. Both retain assignment branches; unsafe worktrees are reported and skipped.
 - `project resume`: `{}` for a compact baseline or `{"cursor":"sha256"}` for a conditional refresh. A response with `full_recovery_required` requires `project recover`.
+- `project wait`: `{"cursor":123,"event_types":["SUBMISSION_RECORDED","CHECKPOINT_RECORDED","WORKER_QUESTION_CREATED"],"timeout_ms":30000,"limit":50}`. The cursor is the `latest_event_sequence` returned by `project resume` or the prior wait. Waiting is bounded to 60 seconds, rejects future cursors, reports the retained event floor and no-pruning status, and requires the host to wake the model after the CLI returns.
+- `project preflight`: `{"profiles":["routine","complex"],"local_inputs":[{"name":"test environment","path":"/safe/path","required":true}],"services":[{"name":"postgres","host":"127.0.0.1","port":5432,"required":true}],"host_agent_availability":{"routine":true,"complex":true}}`. File contents and secrets are not read. Profile files prove configuration only; host availability is a labeled host report, not runtime proof.
 - `project set-canonical-branch`: `{"new_branch":"release/next","confirm_branch":"release/next"}`.
 - `spec register`: `{"relative_path":"docs/product-spec.md"}`.
 - `spec check`: `{}`.
@@ -29,7 +31,7 @@ Use `taskledger <resource> <action> --input -` and supply exactly one JSON objec
 - `requirement list`: `{"filter":"all"}`; filters are `all`, `complete`, `remaining`, `blocked`, `ready`.
 - `requirement verify`: `{"requirement_id":"uuid","evidence":[{"label":"Behavior check","details":"What was checked and the result"}],"notes":"Why this requirement is satisfied"}`.
 - `requirement invalidate`: `{"requirement_id":"uuid","reason":"Why current verification is stale"}`.
-- `task create`: `{"objective":"Bounded outcome","implementation_scope":"Files and behavior in scope","acceptance_criteria":["Observable criterion"],"required_checks":["python3 -m unittest"],"requirement_ids":["uuid"],"dependency_task_ids":[]}`. `required_checks` is optional; each command listed must appear in submission evidence with `exit_code: 0`.
+- `task create`: `{"objective":"Bounded outcome","implementation_scope":"Files and behavior in scope","acceptance_criteria":["Observable criterion"],"required_checks":["python3 -m unittest"],"requirement_ids":["uuid"],"dependency_task_ids":[]}`. `required_checks` is optional. Each exact command must be executed through `worker check`, linked by receipt at submission, and rerun through `submission check` before acceptance.
 - `task update`: complete replacement task definition plus `task_id`; add `assignment_action` as `CONTINUE` or `REVOKE` when an active assignment exists.
 - `task cancel`: `{"task_id":"uuid","reason":"Why cancelled","revoke_assignment":false,"submission_action":null}`. Use the explicit disposition fields required by current state.
 - `task reopen`: complete replacement task definition plus `task_id`.
@@ -39,15 +41,18 @@ Use `taskledger <resource> <action> --input -` and supply exactly one JSON objec
 
 ## Assignment and worker
 
-- `assignment create`: `{"task_id":"uuid","worker_profile":"routine"}`. `worker_profile` is required and must be `routine` or `complex`.
+- `assignment create`: `{"task_id":"uuid","worker_profile":"routine","execution_mode":"lightweight","checkpoints":[{"label":"First vertical slice","criteria":["The slice works end to end"]}]}`. `execution_mode` defaults to `isolated`. `lightweight` requires at least one ordered checkpoint and retains the same scoped assignment/worktree across slices. Checkpoint count, worker profile, task granularity, and assignment isolation are independent choices.
 - `assignment revoke`: `{"assignment_id":"uuid","reason":"Why revoked"}`.
 - `assignment rotate-token`: `{"assignment_id":"uuid"}`.
 - Assignment creation and rotation return only `worker_token_path`; read the credential from that owner-only file. Creation also returns `context_hash`, not the full assignment snapshot.
-- `worker context`: `{}` or `{"if_none_match":"context-hash","if_dynamic_none_match":"dynamic-hash"}`. The static assignment snapshot and live coordination overlay are cached independently.
+- `worker context`: `{}` or `{"if_none_match":"context-hash","if_dynamic_none_match":"dynamic-hash"}`. The static assignment snapshot and live coordination overlay are cached independently. Dynamic context includes the latest applicable submission correction packet and durable checkpoint progression. Correction packets bind the reviewed submission and commit, failed criteria, exact corrections, blockers, verification revision, and packet hash. A newer pending submission supersedes older feedback.
+- `worker check`: `{"command":"python3 -m unittest","timeout_seconds":900}`. Executes only an exact declared required check in the assignment worktree, commits current worker changes first, retains bounded combined output, and records source revision/tree fingerprints, timing, exit status, and stale-source status. Timeout is 1–3600 seconds.
+- `worker checkpoint`: `{"summary":"Slice complete","evidence":[{"label":"Focused test","details":"Observed behavior","receipt_id":"uuid"}]}`. Records an immutable commit for the next checkpoint. A pending checkpoint blocks further progression until orchestrator review; rejection unlocks repair of the same slice.
+- `worker artifact-register`: `{"path":"relative/path"}`. Copies one intentional regular file from the assignment worktree into ledger-managed retained storage with hash and provenance. Symlinks, traversal, directories, and files over 50 MiB are rejected.
 - `worker question`: `{"body":"Question text","blocking":true}`.
 - `worker blocker`: `{"category":"EXTERNAL_DEPENDENCY","scope_type":"TASK","description":"What is blocked"}`. Worker scope is limited to `TASK` or `ASSIGNMENT`; Taskledger derives the ID.
 - `worker follow-up`: `{"body":"Possible later work"}`.
-- `worker submit`: `{"summary":"Implementation summary","evidence":[{"label":"Tests","details":"Relevant tests passed","command":"python -m unittest","exit_code":0,"artifact_path":null}],"risks":[],"unresolved_questions":[],"follow_up_work":[]}`.
+- `worker submit`: `{"summary":"Implementation summary","evidence":[{"label":"Tests","details":"Observed required check","receipt_id":"uuid","artifact_id":"uuid"}],"risks":[],"unresolved_questions":[],"follow_up_work":[]}`. All planned checkpoints must be approved. Prose command/exit-code claims remain claims and never satisfy a required check.
 
 After a routine assignment's second rejected submission, Taskledger revokes that assignment and rejects any new `routine` assignment for the task with `WORKER_PROFILE_ESCALATION_REQUIRED`. Create the next assignment with `worker_profile: "complex"`.
 
@@ -59,6 +64,11 @@ Worker calls use `--token <scoped-worker-token>`. Run them from the assignment w
 
 - `submission verify`: `{"submission_id":"uuid","outcome":"ACCEPTED","criterion_results":[{"criterion_id":"uuid","satisfied":true,"evidence":"Independent check"}],"behavior_matches_intent":true,"required_evidence_present":true,"blocking_issues_remaining":false,"corrections":null,"notes":"Verification summary"}`. Include every current criterion exactly once. `REJECTED` requires corrections and at least one unmet assertion. `BLOCKED` requires exactly one `blocker_id` or `blocker` definition.
 - `submission review-context`: `{"submission_id":"uuid"}`. This orchestrator-only packet binds exact OIDs and claims but never replaces independent diff inspection and tests.
+- `submission check`: `{"submission_id":"uuid","command":"python3 -m unittest","timeout_seconds":900}`. Runs an exact required check only from the clean assignment worktree at the submitted commit and records a `REVIEWER` receipt. Worker receipts never satisfy this obligation. Commands that change source are recorded stale.
+- `checkpoint review-context`: `{"checkpoint_id":"uuid"}`. Binds the intermediate checkpoint to its exact commit, criteria, worker claim, assigned task revision, and current task revision. It does not authorize integration.
+- `checkpoint verify`: `{"checkpoint_id":"uuid","outcome":"APPROVED","criterion_results":[{"position":1,"satisfied":true,"evidence":"Exact commit checked"}],"corrections":null,"notes":"Approved"}`. `REJECTED` requires a failed criterion and exact corrections. Task/specification revision dispositions supersede prior approvals; final acceptance remains separate.
+- `artifact register`: `{"path":"relative/path"}`; `artifact list`: `{}`. Orchestrator registration is limited to intentional regular files inside the canonical repository. Retained copies survive assignment worktree cleanup.
+- `evidence export`: `{}` or `{"task_id":"uuid"}`. Writes deterministic canonical JSON in ledger-managed storage. It preserves registered source-use claims with location/revision/hash and distinguishes worker claims, observed executions, and reviewer conclusions. It generates no semantic conclusion and does not treat delivery/read telemetry as understanding.
 - `task integrate`: `{"task_id":"uuid"}`.
 - `blocker create`: `{"category":"EXTERNAL_DEPENDENCY","scope_type":"PROJECT","scope_id":null,"description":"What is blocked"}`.
 - `blocker resolve`: `{"blocker_id":"uuid","resolution":"How it was resolved"}`.

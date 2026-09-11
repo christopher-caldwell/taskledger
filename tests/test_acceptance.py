@@ -78,7 +78,9 @@ class TaskledgerAcceptance(unittest.TestCase):
         self.assertEqual(result.returncode,0);self.assertEqual(result.stderr,"")
         output=json.loads(result.stdout)
         self.assertEqual(output["command"],"version")
-        self.assertEqual(output["data"]["version"],"0.5.2")
+        self.assertEqual(output["data"]["version"],"0.6.0")
+        manifest=json.loads((ROOT/".codex-plugin"/"plugin.json").read_text())
+        self.assertEqual(manifest["version"],"0.6.0")
 
     def test_skill_declares_context_free_worker_spawn_contract(self):
         skill=(ROOT/"skills"/"taskledger"/"SKILL.md").read_text()
@@ -99,7 +101,16 @@ class TaskledgerAcceptance(unittest.TestCase):
         self.assertIn("safe worktree prerequisites",skill)
         self.assertIn("`project cleanup`",skill)
         self.assertIn("retaining every assignment branch and commit",skill)
+        self.assertIn("Retained workers and vertical checkpoints",skill)
+        self.assertIn("`project wait`",skill)
+        self.assertIn("`evidence export`",skill)
+        self.assertIn("correction packet",skill)
         self.assertNotIn('fork_turns: "all"',skill)
+
+        installation=(ROOT/"docs"/"AI_ORCHESTRATED_TOOL_INSTALLATION.md").read_text()
+        self.assertIn("Installation is a set of contracts",installation)
+        self.assertIn("taskledger@personal",installation)
+        self.assertIn("Blueprint for a similar AI orchestrated tool",installation)
 
         for profile in ("routine","complex"):
             template=(ROOT/"skills"/"taskledger"/"assets"/f"taskledger-worker-{profile}.toml").read_text()
@@ -108,17 +119,23 @@ class TaskledgerAcceptance(unittest.TestCase):
             self.assertIn("registered_specifications",template)
             self.assertIn("focused checks while iterating",template)
             self.assertIn("progress probe",template)
+            self.assertIn("`correction_packet`",template)
+            self.assertIn("taskledger worker checkpoint",template)
+            self.assertIn("taskledger worker check",template)
 
         commands=(ROOT/"skills"/"taskledger"/"references"/"commands.md").read_text()
         self.assertIn("exhaustive public command and input registry",commands)
         self.assertIn("do not probe unlisted commands or flags",commands)
+        self.assertIn("`project preflight`",commands)
+        self.assertIn("`submission check`",commands)
+        self.assertIn("`evidence export`",commands)
 
     def test_existing_assignment_rows_receive_complex_profile_during_schema_upgrade(self):
         from taskledger.db import connect
 
-        legacy_home=Path(self.tmp.name)/"legacy-ledger"
-        legacy_home.mkdir()
-        con=sqlite3.connect(legacy_home/"taskledger.sqlite3")
+        prior_schema_home=Path(self.tmp.name)/"prior-schema-ledger"
+        prior_schema_home.mkdir()
+        con=sqlite3.connect(prior_schema_home/"taskledger.sqlite3")
         con.executescript("""
             CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
             INSERT INTO schema_migrations VALUES(1,'2026-01-01T00:00:00.000Z');
@@ -135,9 +152,9 @@ class TaskledgerAcceptance(unittest.TestCase):
         """)
         con.close()
 
-        migrated=connect(legacy_home)
+        migrated=connect(prior_schema_home)
         self.assertEqual(migrated.execute("SELECT worker_profile FROM assignments").fetchone()[0],"complex")
-        self.assertEqual([row[0] for row in migrated.execute("SELECT version FROM schema_migrations ORDER BY version")],[1,2,3])
+        self.assertEqual([row[0] for row in migrated.execute("SELECT version FROM schema_migrations ORDER BY version")],[1,2,3,4])
         migrated.close()
 
     def test_task_create_confirms_success_after_post_commit_error(self):
@@ -242,57 +259,16 @@ class TaskledgerAcceptance(unittest.TestCase):
         self.assertEqual(blocked["error"]["code"], "LEDGER_DIRECTORY_NOT_IGNORED")
         self.assertFalse(self.home.exists())
 
-    def test_explicit_taskledger_home_preserves_legacy_override(self):
-        legacy_home=Path(self.tmp.name)/"legacy-home"
-        code, detected=self.command("project", "init", repo=str(self.root), ledger_home=legacy_home)
+    def test_explicit_taskledger_home_supports_current_external_store(self):
+        external_home=Path(self.tmp.name)/"external-home"
+        code, detected=self.command("project", "init", repo=str(self.root), ledger_home=external_home)
         self.assertEqual(code, 0)
-        self.assertFalse(legacy_home.exists())
+        self.assertFalse(external_home.exists())
         self.assertTrue(detected["data"]["ledger_directory_ignored"])
-        code, initialized=self.command("project", "init", repo=str(self.root), confirm="feat/ledger", ledger_home=legacy_home)
+        code, initialized=self.command("project", "init", repo=str(self.root), confirm="feat/ledger", ledger_home=external_home)
         self.assertEqual(code, 0)
-        self.assertTrue((legacy_home/"taskledger.sqlite3").is_file())
+        self.assertTrue((external_home/"taskledger.sqlite3").is_file())
         self.assertFalse(self.home.exists())
-
-    def test_default_lookup_can_continue_accessible_legacy_project(self):
-        original_home=os.environ.get("HOME")
-        os.environ["HOME"]=self.tmp.name
-        try:
-            legacy_home=Path.home()/".taskledger"
-            code, initialized=self.command("project", "init", repo=str(self.root), confirm="feat/ledger", ledger_home=legacy_home)
-            self.assertEqual(code, 0)
-            project=initialized["data"]["project_id"]
-            code, discovered=self.command("project", "init", repo=str(self.root))
-            self.assertEqual(code, 0)
-            self.assertEqual(discovered["data"]["project_id"], project)
-            self.assertTrue(discovered["data"]["legacy_shared_store"])
-            code, shown=self.command("project", "show", {}, project=project)
-            self.assertEqual(code, 0)
-            self.assertEqual(shown["data"]["project_id"], project)
-            self.assertFalse(self.home.exists())
-        finally:
-            if original_home is None:os.environ.pop("HOME",None)
-            else:os.environ["HOME"]=original_home
-
-    def test_read_only_legacy_store_never_looks_like_a_new_project(self):
-        original_home=os.environ.get("HOME")
-        os.environ["HOME"]=self.tmp.name
-        legacy_home=Path.home()/".taskledger"
-        try:
-            code, initialized=self.command("project", "init", repo=str(self.root), confirm="feat/ledger", ledger_home=legacy_home)
-            self.assertEqual(code, 0)
-            (legacy_home/"taskledger.sqlite3").chmod(0o400)
-            legacy_home.chmod(0o500)
-            code, blocked=self.command("project", "init", repo=str(self.root))
-            self.assertEqual(code, 3)
-            self.assertEqual(blocked["error"]["code"], "LEDGER_STORAGE_UNAVAILABLE")
-            self.assertEqual(blocked["error"]["allowed_actions"], [])
-            self.assertTrue(blocked["error"]["details"]["legacy_shared_store"])
-            self.assertFalse(self.home.exists())
-        finally:
-            legacy_home.chmod(0o700)
-            (legacy_home/"taskledger.sqlite3").chmod(0o600)
-            if original_home is None:os.environ.pop("HOME",None)
-            else:os.environ["HOME"]=original_home
 
     def test_storage_failure_does_not_claim_recovery_is_required(self):
         self.home.write_text("not a directory")
@@ -346,7 +322,7 @@ class TaskledgerAcceptance(unittest.TestCase):
             [{"id": self.db_scalar("SELECT id FROM specifications"), "relative_path": "spec.md"}],
         )
         _,active_resume=self.command("project","resume",{},project=project)
-        self.assertEqual(active_resume["data"]["schema_version"],2)
+        self.assertEqual(active_resume["data"]["schema_version"],4)
         self.assertEqual(active_resume["data"]["active_assignments"][0]["worker_profile"],"routine")
         _,unchanged=self.command("worker","context",{"if_none_match":context["data"]["context_hash"],"if_dynamic_none_match":context["data"]["dynamic_hash"]},token=worker_token)
         self.assertTrue(unchanged["data"]["context_not_modified"]);self.assertTrue(unchanged["data"]["dynamic_not_modified"])
@@ -380,7 +356,7 @@ class TaskledgerAcceptance(unittest.TestCase):
         _,ready=self.command("requirement","list",{"filter":"ready"},project=project)
         self.assertEqual([x["id"] for x in ready["data"]["requirements"]],[rid])
         _,resume=self.command("project","resume",{},project=project)
-        self.assertEqual(resume["data"]["schema_version"],2)
+        self.assertEqual(resume["data"]["schema_version"],4)
         self.assertEqual(resume["data"]["active_assignments"],[])
         _,same=self.command("project","resume",{"cursor":resume["data"]["cursor"]},project=project)
         self.assertTrue(same["data"]["not_modified"])
@@ -467,26 +443,65 @@ class TaskledgerAcceptance(unittest.TestCase):
         criterion=self.db_scalar("select id from task_acceptance_criteria")
         code, rejected=self.command("submission", "verify", {"submission_id":first["data"]["submission_id"],"outcome":"REJECTED","criterion_results":[{"criterion_id":criterion,"satisfied":False,"evidence":"not sufficient"}],"behavior_matches_intent":False,"required_evidence_present":True,"blocking_issues_remaining":False,"corrections":"Implement the missing behavior.","notes":"rejected"}, project=project)
         self.assertEqual(code, 0); self.assertEqual(rejected["data"]["outcome"], "REJECTED")
+        _,correction_context=self.command("worker","context",{},token=worker_token)
+        packet=correction_context["data"]["dynamic"]["correction_packet"]
+        self.assertEqual(packet["reviewed_submission_id"],first["data"]["submission_id"])
+        self.assertEqual(packet["reviewed_commit_oid"],first["data"]["head_commit_oid"])
+        self.assertEqual(packet["corrections"],"Implement the missing behavior.")
+        self.assertEqual(packet["failed_criteria"][0]["criterion_id"],criterion)
+        self.assertEqual(len(packet["packet_hash"]),64)
         (worktree / "README").write_text("corrected\n")
         code, corrected=self.command("worker", "submit", {"summary":"corrected", "evidence":[{"label":"test","details":"corrected"}],"risks":[],"unresolved_questions":[],"follow_up_work":[]}, token=worker_token)
         self.assertEqual(code, 0); self.assertEqual(corrected["data"]["state"], "PENDING")
+        _,superseded=self.command("worker","context",{},token=worker_token)
+        self.assertIsNone(superseded["data"]["dynamic"]["correction_packet"])
         self.assertEqual(self.db_scalar("select count(*) from submissions"), 2)
 
     def test_required_checks_must_be_reported_as_successful_submission_evidence(self):
         project=self.init()
         _,spec=self.command("spec","register",{"relative_path":"spec.md"},project=project)
         _,req=self.command("requirement","create",{"statement":"Checked change","details":"The change passes its required check","implementation_required":True,"sources":[{"specification_id":spec["data"]["specification_id"],"locator":"1"}]},project=project)
-        required="python3 -m unittest discover -s tests -v"
+        required="python3 -c \"from pathlib import Path; assert Path('README').read_text() == 'checked\\n'\""
         _,task=self.command("task","create",{"objective":"Checked change","implementation_scope":"README","acceptance_criteria":["File changed"],"required_checks":[required],"requirement_ids":[req["data"]["requirement_id"]],"dependency_task_ids":[]},project=project)
         self.command("plan","validate",{},project=project)
         _,assignment=self.command("assignment","create",{"task_id":task["data"]["task_id"],"worker_profile":"routine"},project=project)
         token=self.assignment_token(assignment);(Path(assignment["data"]["worktree_path"])/"README").write_text("checked\n")
         code,missing=self.command("worker","submit",{"summary":"done","evidence":[{"label":"tests","details":"passed"}],"risks":[],"unresolved_questions":[],"follow_up_work":[]},token=token)
         self.assertEqual(code,3);self.assertEqual(missing["error"]["code"],"REQUIRED_CHECK_EVIDENCE_MISSING")
-        code,submitted=self.command("worker","submit",{"summary":"done","evidence":[{"label":"tests","details":"passed","command":required,"exit_code":0,"artifact_path":None}],"risks":[],"unresolved_questions":[],"follow_up_work":[]},token=token)
+        code,claim_only=self.command("worker","submit",{"summary":"done","evidence":[{"label":"tests","details":"reported","command":required,"exit_code":0,"artifact_path":None}],"risks":[],"unresolved_questions":[],"follow_up_work":[]},token=token)
+        self.assertEqual(code,3);self.assertEqual(claim_only["error"]["code"],"REQUIRED_CHECK_EVIDENCE_MISSING")
+        _,receipt=self.command("worker","check",{"command":required,"timeout_seconds":30},token=token)
+        self.assertEqual(receipt["data"]["status"],"SUCCEEDED")
+        code,submitted=self.command("worker","submit",{"summary":"done","evidence":[{"label":"tests","details":"observed","receipt_id":receipt["data"]["receipt_id"]}],"risks":[],"unresolved_questions":[],"follow_up_work":[]},token=token)
         self.assertEqual(code,0)
         _,review=self.command("submission","review-context",{"submission_id":submitted["data"]["submission_id"]},project=project)
         self.assertEqual(review["data"]["required_checks"],[required])
+        self.assertEqual(review["data"]["execution_receipts"][0]["execution_role"],"WORKER")
+        criterion=self.db_scalar("SELECT id FROM task_acceptance_criteria WHERE task_id=?",(task["data"]["task_id"],))
+        verification={"submission_id":submitted["data"]["submission_id"],"outcome":"ACCEPTED","criterion_results":[{"criterion_id":criterion,"satisfied":True,"evidence":"checked"}],"behavior_matches_intent":True,"required_evidence_present":True,"blocking_issues_remaining":False,"corrections":None,"notes":"accepted"}
+        code,missing_review=self.command("submission","verify",verification,project=project)
+        self.assertEqual(code,3);self.assertEqual(missing_review["error"]["code"],"INDEPENDENT_CHECK_EVIDENCE_MISSING")
+        _,reviewer_receipt=self.command("submission","check",{"submission_id":submitted["data"]["submission_id"],"command":required,"timeout_seconds":30},project=project)
+        self.assertEqual(reviewer_receipt["data"]["role"],"REVIEWER")
+        self.assertEqual(self.command("submission","verify",verification,project=project)[0],0)
+
+    def test_correction_packets_are_assignment_scoped(self):
+        project=self.init();_,first_task=self.setup_task(project)
+        spec_id=self.db_scalar("SELECT id FROM specifications")
+        _,requirement=self.command("requirement","create",{"statement":"Second","details":"Second visibly","implementation_required":True,"sources":[{"specification_id":spec_id,"locator":"2"}]},project=project)
+        _,second_task=self.command("task","create",{"objective":"Second","implementation_scope":"code.txt","acceptance_criteria":["Second done"],"requirement_ids":[requirement["data"]["requirement_id"]],"dependency_task_ids":[]},project=project)
+        self.command("plan","validate",{},project=project)
+        _,first_assignment=self.command("assignment","create",{"task_id":first_task,"worker_profile":"complex"},project=project)
+        _,second_assignment=self.command("assignment","create",{"task_id":second_task["data"]["task_id"],"worker_profile":"complex"},project=project)
+        first_token=self.assignment_token(first_assignment);second_token=self.assignment_token(second_assignment)
+        (Path(first_assignment["data"]["worktree_path"])/"README").write_text("first\n")
+        _,submission=self.command("worker","submit",{"summary":"first","evidence":[{"label":"test","details":"claim"}],"risks":[],"unresolved_questions":[],"follow_up_work":[]},token=first_token)
+        criterion=self.db_scalar("SELECT id FROM task_acceptance_criteria WHERE task_id=?",(first_task,))
+        self.command("submission","verify",{"submission_id":submission["data"]["submission_id"],"outcome":"REJECTED","criterion_results":[{"criterion_id":criterion,"satisfied":False,"evidence":"failed"}],"behavior_matches_intent":False,"required_evidence_present":True,"blocking_issues_remaining":False,"corrections":"Private correction","notes":"rejected"},project=project)
+        _,first_context=self.command("worker","context",{},token=first_token)
+        _,second_context=self.command("worker","context",{},token=second_token)
+        self.assertEqual(first_context["data"]["dynamic"]["correction_packet"]["corrections"],"Private correction")
+        self.assertIsNone(second_context["data"]["dynamic"]["correction_packet"])
 
     def test_second_routine_rejection_requires_a_complex_assignment(self):
         project=self.init();_,task_id=self.setup_task(project);self.command("plan","validate",{},project=project)
@@ -601,6 +616,100 @@ class TaskledgerAcceptance(unittest.TestCase):
         self.assertEqual(result["data"]["task_state"], "ACCEPTED")
         self.assertEqual(self.db_scalar("select state from integration_attempts"), "FAILED")
         self.assertEqual(self.git("status", "--porcelain") or b"", b"")
+
+    def test_lightweight_assignment_uses_durable_gated_checkpoints(self):
+        project=self.init();rid,task_id=self.setup_task(project);self.command("plan","validate",{},project=project)
+        checkpoints=[{"label":"Vertical slice one","criteria":["First behavior works"]},{"label":"Vertical slice two","criteria":["Second behavior works"]}]
+        _,assignment=self.command("assignment","create",{"task_id":task_id,"worker_profile":"complex","execution_mode":"lightweight","checkpoints":checkpoints},project=project)
+        token=self.assignment_token(assignment);worktree=Path(assignment["data"]["worktree_path"])
+        (worktree/"README").write_text("slice one\n")
+        _,first=self.command("worker","checkpoint",{"summary":"first slice","evidence":[{"label":"focused","details":"checked"}]},token=token)
+        self.assertEqual(first["data"]["state"],"PENDING")
+        code,pending=self.command("worker","checkpoint",{"summary":"cannot advance","evidence":[{"label":"focused","details":"unchecked"}]},token=token)
+        self.assertEqual(code,3);self.assertEqual(pending["error"]["code"],"CHECKPOINT_ALREADY_PENDING")
+        code,blocked=self.command("worker","submit",{"summary":"too early","evidence":[{"label":"test","details":"checked"}],"risks":[],"unresolved_questions":[],"follow_up_work":[]},token=token)
+        self.assertEqual(code,3);self.assertEqual(blocked["error"]["code"],"CHECKPOINT_APPROVAL_REQUIRED")
+        _,review=self.command("checkpoint","review-context",{"checkpoint_id":first["data"]["checkpoint_id"]},project=project)
+        self.assertTrue(review["data"]["review_required"]["approval_is_intermediate_only"])
+        approved={"checkpoint_id":first["data"]["checkpoint_id"],"outcome":"APPROVED","criterion_results":[{"position":1,"satisfied":True,"evidence":"exact commit inspected"}],"corrections":None,"notes":"approved"}
+        self.assertEqual(self.command("checkpoint","verify",approved,project=project)[0],0)
+        _,rotated=self.command("assignment","rotate-token",{"assignment_id":assignment["data"]["assignment_id"]},project=project)
+        replacement_token=Path(rotated["data"]["worker_token_path"]).read_text().strip()
+        self.assertEqual(self.command("worker","context",{},token=token)[0],4)
+        _,resumed=self.command("worker","context",{},token=replacement_token)
+        self.assertEqual(resumed["data"]["dynamic"]["checkpoint_progress"]["approved_count"],1)
+        (worktree/"README").write_text("slice one\nslice two incomplete\n")
+        _,second=self.command("worker","checkpoint",{"summary":"second slice","evidence":[{"label":"focused","details":"checked"}]},token=replacement_token)
+        rejected={"checkpoint_id":second["data"]["checkpoint_id"],"outcome":"REJECTED","criterion_results":[{"position":1,"satisfied":False,"evidence":"missing edge"}],"corrections":"Add the missing edge case.","notes":"repair"}
+        self.command("checkpoint","verify",rejected,project=project)
+        _,repair_context=self.command("worker","context",{},token=replacement_token)
+        history=repair_context["data"]["dynamic"]["checkpoint_progress"]["history"]
+        self.assertEqual(history[-1]["corrections"],"Add the missing edge case.")
+        (worktree/"README").write_text("slice one\nslice two complete\n")
+        _,repair=self.command("worker","checkpoint",{"summary":"second slice repaired","evidence":[{"label":"focused","details":"checked"}]},token=replacement_token)
+        self.assertEqual(self.db_scalar("SELECT state FROM assignment_checkpoints WHERE id=?",(second["data"]["checkpoint_id"],)),"SUPERSEDED")
+        self.command("checkpoint","verify",{"checkpoint_id":repair["data"]["checkpoint_id"],"outcome":"APPROVED","criterion_results":[{"position":1,"satisfied":True,"evidence":"exact commit inspected"}],"corrections":None,"notes":"approved"},project=project)
+        _,artifact=self.command("worker","artifact-register",{"path":"README"},token=replacement_token)
+        retained=Path(artifact["data"]["stored_path"]);self.assertTrue(retained.is_file())
+        _,submission=self.command("worker","submit",{"summary":"complete","evidence":[{"label":"checkpoints","details":"both approved","artifact_id":artifact["data"]["artifact_id"]}],"risks":[],"unresolved_questions":[],"follow_up_work":[]},token=replacement_token)
+        criterion=self.db_scalar("SELECT id FROM task_acceptance_criteria WHERE task_id=?",(task_id,))
+        self.command("submission","verify",{"submission_id":submission["data"]["submission_id"],"outcome":"ACCEPTED","criterion_results":[{"criterion_id":criterion,"satisfied":True,"evidence":"checked"}],"behavior_matches_intent":True,"required_evidence_present":True,"blocking_issues_remaining":False,"corrections":None,"notes":"accepted"},project=project)
+        _,export_one=self.command("evidence","export",{"task_id":task_id},project=project)
+        _,export_two=self.command("evidence","export",{"task_id":task_id},project=project)
+        self.assertEqual(export_one["data"]["sha256"],export_two["data"]["sha256"])
+        exported=json.loads(Path(export_one["data"]["path"]).read_text())
+        self.assertTrue(any(item["provenance"]=="CHECKPOINT_REVIEWER_CONCLUSION" for item in exported["reviewer_conclusions"]))
+        self.command("requirement","verify",{"requirement_id":rid,"evidence":[{"label":"review","details":"complete"}],"notes":"complete"},project=project)
+        self.command("project","complete",{},project=project)
+        self.assertTrue(retained.is_file())
+
+    def test_preflight_and_event_wait_expose_host_boundary_and_cursor(self):
+        project=self.init();_,task_id=self.setup_task(project);self.command("plan","validate",{},project=project)
+        profile=self.root/".codex"/"agents"/"taskledger-worker-routine.toml";profile.parent.mkdir(parents=True);profile.write_text('name = "taskledger_worker_routine"\nmodel = "configured-model"\nmodel_reasoning_effort = "high"\n')
+        _,preflight=self.command("project","preflight",{"profiles":["routine"],"local_inputs":[{"name":"spec","path":str(self.root/"spec.md"),"required":True}],"services":[],"host_agent_availability":{"routine":True}},project=project)
+        self.assertTrue(preflight["data"]["ready_for_local_preparation"])
+        self.assertEqual(preflight["data"]["profiles"][0]["runtime_capability"],"HOST_REPORTED_UNVERIFIED")
+        self.assertTrue(preflight["data"]["host_contract"]["configuration_is_not_runtime_proof"])
+        _,baseline=self.command("project","resume",{},project=project);cursor=baseline["data"]["latest_event_sequence"]
+        _,assignment=self.command("assignment","create",{"task_id":task_id,"worker_profile":"routine"},project=project)
+        token=self.assignment_token(assignment)
+        _,question=self.command("worker","question",{"body":"Need a decision","blocking":True},token=token)
+        _,events=self.command("project","wait",{"cursor":cursor,"event_types":["WORKER_QUESTION_CREATED"],"timeout_ms":0},project=project)
+        self.assertEqual(events["data"]["events"][0]["entity_id"],question["data"]["question_id"])
+        _,timeout=self.command("project","wait",{"cursor":events["data"]["event_cursor"],"event_types":["WORKER_QUESTION_CREATED"],"timeout_ms":10},project=project)
+        self.assertTrue(timeout["data"]["timed_out"])
+        self.assertEqual(timeout["data"]["cursor_gap_status"],"NO_PRUNING_CONFIGURED")
+        self.assertFalse(timeout["data"]["missed_events"])
+        code,future=self.command("project","wait",{"cursor":timeout["data"]["latest_event_sequence"]+1,"event_types":["WORKER_QUESTION_CREATED"],"timeout_ms":0},project=project)
+        self.assertEqual(code,3);self.assertEqual(future["error"]["code"],"EVENT_CURSOR_INVALID")
+
+    def test_task_revision_supersedes_checkpoint_approval(self):
+        project=self.init();rid,task_id=self.setup_task(project);self.command("plan","validate",{},project=project)
+        _,assignment=self.command("assignment","create",{"task_id":task_id,"worker_profile":"complex","execution_mode":"lightweight","checkpoints":[{"label":"slice","criteria":["slice works"]}]},project=project)
+        token=self.assignment_token(assignment);worktree=Path(assignment["data"]["worktree_path"]);(worktree/"README").write_text("slice\n")
+        _,checkpoint=self.command("worker","checkpoint",{"summary":"slice","evidence":[{"label":"test","details":"checked"}]},token=token)
+        self.command("checkpoint","verify",{"checkpoint_id":checkpoint["data"]["checkpoint_id"],"outcome":"APPROVED","criterion_results":[{"position":1,"satisfied":True,"evidence":"checked"}],"corrections":None,"notes":"approved"},project=project)
+        self.command("task","update",{"task_id":task_id,"objective":"Changed objective","implementation_scope":"README","acceptance_criteria":["Changed behavior"],"required_checks":[],"requirement_ids":[rid],"dependency_task_ids":[],"assignment_action":"CONTINUE"},project=project)
+        self.command("plan","validate",{},project=project)
+        _,context=self.command("worker","context",{},token=token)
+        self.assertEqual(context["data"]["context"]["task"]["revision"],2)
+        progress=context["data"]["dynamic"]["checkpoint_progress"]
+        self.assertEqual(progress["approved_count"],0);self.assertFalse(progress["final_submission_unlocked"])
+        self.assertEqual(self.db_scalar("SELECT state FROM assignment_checkpoints WHERE id=?",(checkpoint["data"]["checkpoint_id"],)),"SUPERSEDED")
+
+    def test_source_changing_and_timed_out_checks_are_retained_but_not_valid(self):
+        changing="python3 -c \"open('generated.txt','w').write('x')\"";timing_out="python3 -c \"import time; time.sleep(2)\""
+        project=self.init();_,spec=self.command("spec","register",{"relative_path":"spec.md"},project=project)
+        _,req=self.command("requirement","create",{"statement":"Check behavior","details":"Observable","implementation_required":True,"sources":[{"specification_id":spec["data"]["specification_id"],"locator":"1"}]},project=project)
+        _,task=self.command("task","create",{"objective":"Check behavior","implementation_scope":"README","acceptance_criteria":["done"],"required_checks":[changing,timing_out],"requirement_ids":[req["data"]["requirement_id"]],"dependency_task_ids":[]},project=project)
+        self.command("plan","validate",{},project=project);_,assignment=self.command("assignment","create",{"task_id":task["data"]["task_id"],"worker_profile":"complex"},project=project)
+        token=self.assignment_token(assignment);(Path(assignment["data"]["worktree_path"])/"README").write_text("done\n")
+        _,changed=self.command("worker","check",{"command":changing,"timeout_seconds":1},token=token)
+        self.assertEqual(changed["data"]["status"],"SUCCEEDED");self.assertTrue(changed["data"]["source_changed_during_execution"])
+        _,timed_out=self.command("worker","check",{"command":timing_out,"timeout_seconds":1},token=token)
+        self.assertEqual(timed_out["data"]["status"],"TIMED_OUT")
+        code,blocked=self.command("worker","submit",{"summary":"done","evidence":[{"label":"changed","details":"observed","receipt_id":changed["data"]["receipt_id"]},{"label":"timeout","details":"observed","receipt_id":timed_out["data"]["receipt_id"]}],"risks":[],"unresolved_questions":[],"follow_up_work":[]},token=token)
+        self.assertEqual(code,3);self.assertEqual(blocked["error"]["code"],"REQUIRED_CHECK_EVIDENCE_MISSING")
 
 
 if __name__ == "__main__": unittest.main()

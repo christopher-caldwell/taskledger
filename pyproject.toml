@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taskledger"
-version = "0.5.2"
+version = "0.6.0"
 description = "Local durable execution ledger"
 readme = "README.md"
 license = {file = "LICENSE"}

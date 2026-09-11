@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -77,51 +76,12 @@ def home_for_repository(info, *, create: bool) -> Path:
     return taskledger_home(repository_root, create=create)
 
 
-def legacy_project_recorded(home: Path, repository_root: str) -> bool:
-    database=home/"taskledger.sqlite3"
-    try:
-        con=sqlite3.connect(database.as_uri()+"?immutable=1",uri=True)
-        try:return con.execute("SELECT 1 FROM projects WHERE repository_root=?",(repository_root,)).fetchone() is not None
-        finally:con.close()
-    except (OSError,sqlite3.Error):
-        return False
-
-
-def legacy_service_for_repository(info) -> Service | None:
-    if os.environ.get("TASKLEDGER_HOME"):
-        return None
-    home=Path.home()/".taskledger"
-    if not (home/"taskledger.sqlite3").is_file():
-        return None
-    recorded=legacy_project_recorded(home,str(info["root"]))
-    try:
-        service=Service(connect(home),home)
-        service.project(cwd=str(info["root"]))
-        return service
-    except LedgerError as exc:
-        if exc.code == "LEDGER_STORAGE_UNAVAILABLE" and recorded:
-            raise LedgerError(
-                "LEDGER_STORAGE_UNAVAILABLE",
-                "This repository uses the legacy shared Taskledger store, but it is not writable from the current environment.",
-                details={"path":str(home),"legacy_shared_store":True},
-            )
-        if exc.code in {"LEDGER_STORAGE_UNAVAILABLE","PROJECT_REQUIRED"}:
-            return None
-        raise
-
-
 def init_project(args, data):
     if data: raise LedgerError("UNKNOWN_FIELD","project init only accepts --repo and --confirm-branch flags.")
     if not args.repo:raise LedgerError("INVALID_REQUEST","project init requires --repo.")
     info=git.inspect(args.repo);home=home_for_repository(info,create=False);database=home/"taskledger.sqlite3"
     local_default=not os.environ.get("TASKLEDGER_HOME")
     ignored=not local_default or git.ignored(info["root"],".taskledger/")
-    if not database.is_file():
-        legacy=legacy_service_for_repository(info)
-        if legacy is not None:
-            result=legacy.init(args.repo,args.confirm_branch)
-            result.update({"ledger_directory":str(legacy.home),"ledger_directory_ignored":True,"legacy_shared_store":True})
-            return result
     if not args.confirm_branch and not database.is_file():
         return {"repository_root":info["root"],"detected_branch":info["branch"],"has_commits":info["has_commits"],"confirmation_required":True,"ledger_directory":str(home),"ledger_directory_ignored":ignored}
     if args.confirm_branch and not database.is_file() and args.confirm_branch != info["branch"]:
@@ -144,12 +104,9 @@ def service_for_command(args) -> Service:
     else:
         try:info=git.inspect(os.getcwd())
         except LedgerError:
-            raise LedgerError("PROJECT_REQUIRED","Run Taskledger from the managed repository or set TASKLEDGER_HOME for a legacy shared ledger.")
+            raise LedgerError("PROJECT_REQUIRED","Run Taskledger from the managed repository or set TASKLEDGER_HOME to its configured current store.")
         home=home_for_repository(info,create=False)
     if not (home/"taskledger.sqlite3").is_file():
-        if not os.environ.get("TASKLEDGER_HOME"):
-            legacy=legacy_service_for_repository(info)
-            if legacy is not None:return legacy
         raise LedgerError("PROJECT_REQUIRED","Taskledger is not initialized for this repository.",details={"ledger_directory":str(home)})
     return Service(connect(home),home)
 
@@ -163,6 +120,9 @@ def dispatch(args, data):
     if worker:
         principal=service.authenticate(None,args.token,"WORKER");project,assignment=service.worker_assignment(principal)
         if command=="worker.context":return service.worker_context(principal,data)
+        if command=="worker.check":return service.worker_check(principal,data)
+        if command=="worker.checkpoint":return service.worker_checkpoint(principal,data)
+        if command=="worker.artifact-register":return service.register_artifact(project,principal,data,worker=True)
         if command=="worker.question":return service.worker_question(principal,data)
         if command=="worker.blocker":return service.blocker_create(project,principal,data,worker=True)
         if command=="worker.follow-up":return service.worker_followup(principal,data)
@@ -175,6 +135,8 @@ def dispatch(args, data):
         return {"project_id":project["id"],"repository_root":project["repository_root"],"canonical_branch":project["canonical_branch"],"effective_phase":service.phase(project),"plan":{"valid":valid,"fingerprint":fingerprint,"diagnostics":diagnostics},"progress":service.progress(project),"pending_reviews":service.con.execute("SELECT COUNT(*) FROM specification_reviews WHERE project_id=? AND state='PENDING'",(project["id"],)).fetchone()[0]}
     if command=="project.recover":require_object(data,{});return service.recover(project)
     if command=="project.resume":return service.resume(project,data)
+    if command=="project.wait":return service.wait_for_events(project,data)
+    if command=="project.preflight":return service.preparation_diagnostics(project,data)
     if command=="project.set-canonical-branch":return service.set_branch(project,principal,data)
     if command=="project.complete":require_object(data,{});return service.complete_project(project,principal)
     if command=="project.cleanup":require_object(data,{});return service.cleanup_worktrees(project,principal)
@@ -200,7 +162,15 @@ def dispatch(args, data):
     if command=="assignment.revoke":return service.assignment_revoke(project,principal,data)
     if command=="assignment.rotate-token":return service.rotate_token(project,principal,data)
     if command=="submission.review-context":require_object(data,{"submission_id"},{"submission_id"});return service.submission_review_context(project,data["submission_id"])
+    if command=="submission.check":return service.reviewer_check(project,principal,data)
     if command=="submission.verify":return service.verify_submission(project,principal,data)
+    if command=="checkpoint.review-context":require_object(data,{"checkpoint_id"},{"checkpoint_id"});return service.checkpoint_review_context(project,data["checkpoint_id"])
+    if command=="checkpoint.verify":return service.verify_checkpoint(project,principal,data)
+    if command=="artifact.register":return service.register_artifact(project,principal,data)
+    if command=="artifact.list":
+        require_object(data,{})
+        return {"artifacts":[dict(x) for x in service.con.execute("SELECT id,assignment_id,provenance_kind,original_path,stored_path,sha256,size_bytes,source_revision,created_at FROM evidence_artifacts WHERE project_id=? ORDER BY created_at,id",(project["id"],))]}
+    if command=="evidence.export":return service.evidence_export(project,principal,data)
     if command=="blocker.create":return service.blocker_create(project,principal,data)
     if command=="blocker.resolve":return service.resolve_blocker(project,principal,data)
     if command=="blocker.list":

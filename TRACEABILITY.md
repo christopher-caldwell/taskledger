@@ -12,7 +12,7 @@ The acceptance suite exercises the end-to-end flows; unit-level coverage is orga
 | PS-050–PS-052 | Dependency reachability and assignment eligibility |
 | PS-060–PS-063 | Worktree assignment context, scoped credentials, explicit worker-profile routing, revocation |
 | PS-070–PS-073 | Worker questions, blockers, risks, and follow-up proposals |
-| PS-080–PS-083 | Checkpoint commits, required-check evidence, immutable submissions, correction/idempotency and routine-escalation rules |
+| PS-080–PS-083, §25A | Submission commits, observed required-check receipts, durable correction packets, immutable submissions, idempotency and routine-escalation rules |
 | PS-090–PS-095 | Orchestrator-only verification and accept/reject/blocked transitions |
 | PS-100–PS-103 | Exact-commit integration, safe abort, integration reachability invalidation |
 | PS-110–PS-112 | Explicit durable blocker scopes and propagation |
@@ -20,6 +20,7 @@ The acceptance suite exercises the end-to-end flows; unit-level coverage is orga
 | PS-130–PS-132 | Requirement-based progress derivation |
 | PS-140–PS-145 | Scoped requirement verification currency, explicit project completion, and safe finalized-worktree cleanup |
 | PS-150–PS-154 | Transactional ledger writes, journalled Git mutations, actionable JSON errors |
+| §25A | Intermediate checkpoint gates, lightweight retained-worker flow, preflight host boundary, bounded audit-event waits, retained artifacts, deterministic evidence export, modern response-usage accounting |
 
 ## End-to-end scenario map
 
@@ -34,6 +35,10 @@ The acceptance suite exercises the end-to-end flows; unit-level coverage is orga
 | I | `test_direct_requirement_and_specification_review_gate` |
 | J, K | `test_recovery_snapshot_and_external_rewrite_remove_credit` |
 | Required checks | `test_required_checks_must_be_reported_as_successful_submission_evidence` |
+| Assignment-scoped correction delivery | `test_rejection_preserves_history_and_allows_correction`, `test_correction_packets_are_assignment_scoped` |
+| Lightweight checkpoints, replacement, retention, export | `test_lightweight_assignment_uses_durable_gated_checkpoints` |
+| Preflight and event cursor | `test_preflight_and_event_wait_expose_host_boundary_and_cursor` |
+| Modern usage accounting | `UsageAccountingTests` |
 | Routine escalation | `test_second_routine_rejection_requires_a_complex_assignment` |
 | Atomic plan batch | `test_plan_apply_batches_new_requirements_tasks_and_local_dependencies` |
 | Requirement replacement | `test_requirement_supersession_preserves_completed_historical_tasks` |

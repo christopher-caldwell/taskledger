@@ -1,6 +1,6 @@
 {
   "name": "taskledger",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Operate a local durable execution ledger for Codex projects",
   "author": {
     "name": "Christopher Caldwell"

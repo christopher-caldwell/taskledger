@@ -16,7 +16,7 @@ review directly. Taskledger begins paying for itself when a specification has
 multiple cohesive tasks, cross-layer/high-risk behavior, independent workers,
 or real durable-recovery value.
 
-> **Status:** Taskledger 0.5.2 is experimental. The CLI happy path is tested,
+> **Status:** Taskledger 0.6.0 is experimental. The CLI happy path is tested,
 > but the full failure-injection and conformance suite is not complete. See
 > [Publishing preflight](PUBLISHING_CHECKLIST.md) before relying on it for
 > critical work.
@@ -228,17 +228,18 @@ For a new or materially changed plan, Taskledger uses two approval gates:
 2. **Execution approval:** exact branch and Git state, initialization and commit
    actions, validation result, and the first assignment wave.
 
-The primary then creates only the approved assignments. Workers implement in
-isolated worktrees and submit through Taskledger; they do not integrate their
-own work. The primary independently checks the exact submitted commit before
-recording verification and integration.
+The primary runs the bounded preparation diagnostic, then creates only the
+approved assignments. Workers implement in scoped worktrees and submit through
+Taskledger; they do not integrate their own work. The primary independently
+checks the exact submitted commit before recording verification and integration.
 
 Task definitions may include exact `required_checks`. Use task-focused checks
 for intermediate slices, put strict lint/generated-contract checks on the first
 slice that can break them, and reserve the complete cross-project suite for the
-integrated final audit. A submission cannot be recorded until its evidence
-reports every required command with exit code zero; the primary still reruns
-those checks independently against each submitted state. For a larger new plan,
+integrated final audit. Workers execute each required command through Taskledger
+and attach the observed receipt; reported command/exit-code prose is not enough.
+The primary reruns each command through the reviewer path against the exact
+submitted commit, and worker receipts cannot satisfy that obligation. For a larger new plan,
 `plan apply` creates a batch of requirements and tasks transactionally using
 short local references, reducing repetitive CLI traffic before `plan validate`.
 
@@ -246,8 +247,24 @@ To resume later, ask Codex to resume the existing Taskledger project. The ledger
 persists the approved plan and completed work; the chat transcript is not the
 source of truth.
 
+Small cohesive projects may keep one worker across ordered vertical slices by
+creating a `lightweight` assignment with checkpoint criteria. Each checkpoint
+records an immutable commit and stops until the primary approves or rejects that
+exact commit. Final submission, independent review, integration, and requirement
+verification stay unchanged. Correction packets, checkpoint progression, and
+replacement-worker handoff state are returned by `worker context`.
+
+Taskledger can retain intentionally registered evidence outside disposable
+worktrees, export provenance-separated evidence deterministically, and wait up
+to 60 seconds for selected actionable audit events. The CLI wait preserves a
+cursor; the surrounding host still has to wake the model when an event arrives.
+
 For installation variants, routine operation, updates, backup and restore,
 troubleshooting, and removal, use the [complete run guide](docs/RUN_GUIDE.md).
+Models designing or installing a similar local tool should use the
+[AI orchestrated tool installation guide](docs/AI_ORCHESTRATED_TOOL_INSTALLATION.md),
+which maps the CLI, skill, plugin, worker profiles, and project state to their
+installed locations and verification steps.
 
 When `project complete` succeeds, Taskledger automatically removes each clean,
 finalized assignment worktree to reclaim the duplicate checkout and build-output
@@ -323,10 +340,9 @@ later mutations are normally driven by the Codex skill after approval. The full
 command and request-body reference is in
 [`skills/taskledger/references/commands.md`](skills/taskledger/references/commands.md).
 
-Repositories created with Taskledger 0.1 may still use a shared
-`~/.taskledger` store. The current version attempts best-effort discovery; set
-`TASKLEDGER_HOME=~/.taskledger` explicitly only when opening one of those legacy
-projects.
+Set `TASKLEDGER_HOME=/absolute/path` only when intentionally using an external
+current-version store. Older shared-home projects are not auto-discovered or
+supported.
 
 ## Development
 
@@ -339,6 +355,7 @@ python3 -m unittest discover -s tests -v
 Documentation and design references:
 
 - [Complete run guide](docs/RUN_GUIDE.md)
+- [Installation architecture for AI orchestrated tools](docs/AI_ORCHESTRATED_TOOL_INSTALLATION.md)
 - [Product specification](taskledger-product-spec.md)
 - [Technical specification](taskledger-technical-spec.md)
 - [Command registry](COMMAND_REGISTRY.md)
@@ -352,8 +369,10 @@ Documentation and design references:
 - The full failure-injection and 71-requirement conformance suite is incomplete.
 - Recovery guarantees should not be trusted for high-risk or irreplaceable work.
 - Windows/WSL and non-Codex orchestration adapters are untested or absent.
-- Taskledger cannot observe provider token counters or prices; token and cost
-  comparisons require measurements from the model host.
+- The included accounting scripts measure modern host `token_usage_record`
+  telemetry with response-ID deduplication and counter reconciliation. These
+  token counts are not billing data; missing/inconsistent telemetry is reported
+  explicitly, and legacy counters are ignored.
 - The plugin is not yet published through a marketplace.
 
 ## Support and maintenance

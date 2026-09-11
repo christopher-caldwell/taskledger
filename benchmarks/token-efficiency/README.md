@@ -41,19 +41,21 @@ waves from an intervening direct repair, verifies two routine/Luna and four
 complex/Terra assignments, and compares the corrected 104.68M input total with
 the earlier UI run.
 
-The collectors now exclude inherited token and compaction records copied into
-full-history subagent rollouts. Checkpoints generated before 2026-08-24 must be
-regenerated before their token totals are reused; the Financial Tracker
-checkpoints have been regenerated. Historical prose reports retain explicit
-correction notices where their original figures were affected.
+The current collectors require modern top-level `token_usage_record` events,
+deduplicate response IDs across root/descendant rollouts, and reconcile response
+sums with final thread counters. Cumulative turn/thread counters are never added.
+Totals are also broken out by thread source and spawned agent role so review or
+guardian usage is never silently blended into implementation usage. Legacy
+`token_count` events are ignored, so older checkpoints must be regenerated from
+modern telemetry before comparison.
 
 ## Comparison protocol
 
 1. Keep the primary model, worker model, reasoning effort, Codex version, and
    task-risk mix unchanged for the cleanest A/B comparison.
-2. Define the measurement window before examining the result. Include the
-   primary task and all worker/reviewer subagents whose working directory is the
-   target repository.
+2. Define the measurement window and explicit root session before examining the
+   result. Root/descendant identity drives selection; a primary whose cwd is a
+   parent of a nested project remains included.
 3. Compare each exact `model|reasoning-effort` cohort separately.
 4. Normalize by durable progress: submissions recorded, submissions verified,
    integrations completed, and requirements verified. Compare both totals and
@@ -80,12 +82,12 @@ python3 scripts/token_usage_checkpoint.py \
   --until 2026-08-30T00:00:00Z \
   --label post-v0.3.0-round-1 \
   --taskledger-version 0.3.0 \
+  --session-id ROOT_SESSION_ID \
   --ledger-db /absolute/path/to/.taskledger/taskledger.sqlite3 \
   --output benchmarks/token-efficiency/post-v0.3.0-round-1.json
 ```
 
-For a legacy shared ledger, pass its SQLite path instead. The script reads the
-database immutably and stores counts only. It does not store prompts, source,
+The script reads the database immutably and stores counts only. It does not store prompts, source,
 tool outputs, credentials, or evidence text.
 
 For a task-level execution reconstruction, pass the completed task IDs to:
@@ -101,7 +103,7 @@ python3 scripts/task_complexity_checkpoint.py \
 ```
 
 This collector reads the ledger and Git history without mutation. It attributes
-repository-scoped session token events to each assignment-activation through
+modern response-usage records to each assignment-activation through
 successful-integration window and reports overlaps explicitly.
 
 ## Decision rule

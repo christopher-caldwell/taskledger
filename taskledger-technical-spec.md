@@ -103,14 +103,9 @@ The worker principal is permanently scoped to its assignment. Deactivating or re
 ## 4. Filesystem Layout
 
 The root directory defaults to `<canonical-repository>/.taskledger` and can be
-overridden explicitly with `TASKLEDGER_HOME` for legacy v0.1 or intentionally
-external stores.
-
-When no repository-local database exists, the CLI may continue a matching
-accessible v0.1 shared-home project. Failure to access that optional legacy
-location must not block discovery of a genuinely new repository or imply an
-interrupted operation. `TASKLEDGER_HOME` remains the explicit compatibility
-path when sandbox or filesystem policy prevents automatic lookup.
+overridden explicitly with `TASKLEDGER_HOME` for an intentionally external
+current-version store. There is no automatic shared-home or older-version
+discovery path; projects must use the current protocol and schema.
 
 ```text
 <repository>/.taskledger/
@@ -459,8 +454,9 @@ FOREIGN KEY(task_id, task_revision)
   REFERENCES task_revisions(task_id, revision)
 ```
 
-Commands are exact strings. A worker submission must contain evidence with the
-same command and `exit_code=0` for every required check in the assigned revision.
+Commands are exact strings. A worker submission must reference a current,
+successful observed worker receipt for every required check in the assigned
+revision. Prose containing a command or exit code never satisfies this gate.
 
 ### 7.14 `task_requirement_links`
 
@@ -1308,10 +1304,9 @@ Input:
   "evidence": [
     {
       "label": "Tests",
-      "details": "All relevant tests passed",
-      "command": "python -m unittest",
-      "exit_code": 0,
-      "artifact_path": null
+      "details": "Required check observed by Taskledger",
+      "receipt_id": "receipt-uuid",
+      "artifact_id": "optional-registered-artifact-uuid"
     }
   ],
   "risks": [
@@ -1328,9 +1323,10 @@ Input:
 
 `blocker_category` must be one of the supported product blocker categories when `blocking=true` and must be null when `blocking=false`. Taskledger creates one durable `SUBMISSION`-scoped blocker for each blocking item. Each follow-up item also creates a durable `follow_up_proposals` row; neither action changes the plan.
 
-Before checkpointing repository state, the service verifies that evidence names
-every required-check command from the assigned task revision with `exit_code=0`.
-Worker evidence remains a claim; the orchestrator independently reruns checks.
+Before checkpointing repository state, the service verifies that evidence
+references a current, successful worker receipt for every required check in the
+assigned task revision. Worker receipts remain supporting evidence only; the
+orchestrator independently creates reviewer receipts at the exact submission.
 
 The exact submission procedure is in Section 14.
 
@@ -2395,6 +2391,47 @@ The implementation must not include:
 The orchestrator may invoke workers by whatever external mechanism it already uses. Taskledger begins at assignment creation and records the durable handoff.
 
 ---
+
+## 30A. v0.6 Protocol and Storage Extension
+
+This section implements Product Specification §25A. Schema migration 4 adds
+assignment execution mode/checkpoint plans, immutable checkpoint records,
+execution receipts, and retained artifact metadata. The public resume packet is
+schema version 4. Projects use the current v0.6 client and schema; older client
+behavior is not supported.
+
+Artifacts and check output live under
+`.taskledger/projects/<project-id>/artifacts/`; deterministic exports live under
+the sibling `exports/` directory. These paths remain outside assignment worktrees.
+Only metadata and hashes enter the database. Cleanup removes finalized worktrees
+only and never follows artifact paths.
+
+Check execution uses the exact orchestrator-declared command and the assignment
+worktree as cwd. It is not general CI or a sandbox. A worker run is bound to its
+assignment; a reviewer run is additionally bound to a pending submission and
+its exact clean commit. Combined output is bounded at 10 MiB and registered as
+an artifact. Receipt validity requires exit zero, unchanged source state, and
+the expected commit.
+
+Checkpoint commits reuse the submission operation journal so interrupted Git
+state follows the existing recovery proof. Checkpoint approval does not mutate
+task/submission state or credentials. Task/specification changes with a CONTINUE
+disposition supersede checkpoint approvals and refresh worker context.
+
+`project wait` polls audit sequences in the short-lived CLI process with a
+maximum 60-second timeout. Audit rows are the only cursor authority. The response
+states that host wakeup remains required. No daemon, model-provider call, or
+background service is introduced.
+
+`project preflight` performs bounded standard-library checks and a one-second TCP
+connect for each declared service. It reports TOML presence and selected fields,
+but never interprets that file as runtime launch proof or substitutes a model.
+
+The usage scripts share `scripts/usage_accounting.py`. Only top-level modern
+`token_usage_record.usage` is additive. `turn_token_usage` and
+`thread_token_usage` are reconciliation counters and are never added. Selection
+uses root/session identity and parent relationships before repository filtering,
+including roots whose cwd is a parent of the managed repository.
 
 ## 31. Definition of Done
 

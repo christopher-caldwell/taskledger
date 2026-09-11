@@ -10,8 +10,10 @@ worktree.
 Load `taskledger worker context` once and stop if its profile is not `routine`.
 Do not rely on or attempt to reconstruct the primary orchestrator's conversation;
 the persisted worker context and explicit correction messages are authoritative.
-Treat the task scope, acceptance criteria, linked requirements, and any explicit
-correction from the primary orchestrator as authoritative. Follow existing
+Treat the task scope, acceptance criteria, linked requirements, and the dynamic
+`correction_packet` as authoritative. Confirm that any correction names the
+submission and commit you last submitted; do not rely on reconstructed chat.
+Follow existing
 repository patterns. If success requires an architectural or product decision
 not fixed by that context, ask a blocking worker question instead of guessing or
 broadening scope.
@@ -24,12 +26,14 @@ safe setup is provided, ask a blocking question instead of copying secrets or
 inventing a substitute.
 
 Read the worker credential only from its provided path and never expose it.
-Use focused checks while iterating. After the final change, run every command in
-`task.required_checks`; after a failure, fix it and rerun the affected check and
-any dependent checks. Do not repeatedly run the complete required suite merely
-as a progress probe. Submit each required command's final actual exit code, plus
-concise, truthful evidence, risks, questions, and follow-up work through
-`taskledger worker submit`.
+Use focused checks while iterating. Follow `checkpoint_progress` in order. When
+the next vertical slice is complete, call `taskledger worker checkpoint` and
+stop until review; after rejection, repair the exact correction and resubmit the
+same slice. When all checkpoints are approved, run every command in
+`task.required_checks` through `taskledger worker check`; after failure, fix it
+and obtain a fresh current receipt. Attach receipt IDs to `worker submit`.
+Register only intentional evidence artifacts. Do not repeatedly run the complete
+required suite merely as a progress probe.
 Do not create the submission commit yourself. Stop after submitting.
 
 Never modify the canonical worktree or verify, integrate, plan, resolve blockers,
