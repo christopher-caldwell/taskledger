@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import os
 import json
+import hashlib
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from taskledger.controller.app_server import AppServerRuntime
-from taskledger.controller.model import SessionRole
+from taskledger.controller.model import SessionRole, UsagePrecision
+from taskledger.controller.reporting import controller_report
 
 
 LIVE = os.environ.get("TASKLEDGER_LIVE_CODEX") == "1"
@@ -26,6 +28,10 @@ def report_usage(case: str, role: str, result) -> None:
         "turn_id": result.handle.turn_id,
         **result.usage.__dict__,
         "usage_missing": result.usage_missing,
+        "usage_precision": result.usage_precision.value,
+        "cumulative_before": result.cumulative_before.__dict__ if result.cumulative_before else None,
+        "cumulative_after": result.cumulative_after.__dict__ if result.cumulative_after else None,
+        "exact_response_count": result.exact_response_count,
     }, sort_keys=True))
 
 
@@ -46,7 +52,7 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    async def test_cx001_cx008_cx009_cx010_cx082_worker_thread_contract(self):
+    async def test_cx001_cx008_cx009_cx010_cx082_cx117_worker_thread_contract(self):
         """Budget: at most two Luna/low worker turns."""
         runtime = AppServerRuntime(repository_root=str(self.root))
         try:
@@ -60,10 +66,9 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runtime.session_config[session.thread_id]["model"], LIVE_MODEL)
             self.assertEqual(runtime.session_config[session.thread_id]["effort"], LIVE_EFFORT)
 
-            first_handle = await runtime.start_turn(
-                thread_id=session.thread_id,
-                prompt="Reply with exactly the single word ALPHA and do nothing else.",
-            )
+            static_assignment = "Complete immutable assignment marker: OBJECTIVE-ALPHA; criteria=reply ALPHA."
+            first_prompt = static_assignment + " Reply with exactly the single word ALPHA and do nothing else."
+            first_handle = await runtime.start_turn(thread_id=session.thread_id, prompt=first_prompt)
             first = await runtime.wait_turn(first_handle)
             self.assertEqual((first.final_response or "").strip(), "ALPHA")
 
@@ -76,13 +81,26 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                 writable=True,
             )
             self.assertEqual(resumed.thread_id, session.thread_id)
-            second_handle = await runtime.start_turn(
-                thread_id=session.thread_id,
-                prompt="Reply only with the exact word you returned in your previous response.",
-            )
+            second_prompt = "Reply only with the exact word you returned in your previous response."
+            second_handle = await runtime.start_turn(thread_id=session.thread_id, prompt=second_prompt)
             second = await runtime.wait_turn(second_handle)
             self.assertEqual((second.final_response or "").strip(), "ALPHA")
             self.assertGreater(first.usage.total_tokens + second.usage.total_tokens, 0)
+            history = await runtime.provider_history(session.thread_id)
+            user_items = [
+                entry["item"] for entry in history["items"]
+                if entry.get("item", {}).get("type") == "userMessage"
+            ]
+            self.assertGreaterEqual(len(user_items), 2)
+            self.assertNotIn("complete immutable assignment marker", json.dumps(user_items[-1]))
+            print("TASKLEDGER_CONTINUATION_AUDIT " + json.dumps({
+                "turn_1_controller_payload_bytes": len(first_prompt.encode("utf-8")),
+                "turn_2_controller_payload_bytes": len(second_prompt.encode("utf-8")),
+                "turn_1_static_bytes": len(static_assignment.encode("utf-8")),
+                "turn_2_static_bytes": 0,
+                "turn_1_dynamic_bytes": 0,
+                "turn_2_dynamic_bytes": 0,
+            }, sort_keys=True))
             report_usage("worker-thread-contract-1", "WORKER", first)
             report_usage("worker-thread-contract-2", "WORKER", second)
         finally:
@@ -126,7 +144,7 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.close()
 
-    async def test_cx012_thread_resume_after_client_restart(self):
+    async def test_cx012_cx115_cx116_thread_resume_after_client_restart(self):
         """Budget: at most two Luna/low worker turns across two clients."""
         first_runtime = AppServerRuntime(repository_root=str(self.root))
         session = await first_runtime.start_session(
@@ -143,6 +161,9 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
             )
             result = await first_runtime.wait_turn(handle)
             self.assertEqual((result.final_response or "").strip(), "STORED")
+            first_total = result.cumulative_after
+            first_turn_id = result.handle.turn_id
+            self.assertIsNotNone(first_total)
             report_usage("restart-before", "WORKER", result)
         finally:
             await first_runtime.close()
@@ -156,6 +177,7 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                 subject_id="live-restart-worker",
                 cwd=str(self.root),
                 writable=True,
+                cumulative_usage_baseline=first_total,
             )
             self.assertEqual(resumed.thread_id, session.thread_id)
             handle = await second_runtime.start_turn(
@@ -165,8 +187,84 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
             result = await second_runtime.wait_turn(handle)
             self.assertEqual((result.final_response or "").strip(), "COBALT")
             report_usage("restart-after", "WORKER", result)
+            self.assertEqual(result.cumulative_before, first_total)
+            self.assertEqual(result.cumulative_after, first_total + result.usage)
+            history = await second_runtime.provider_history(session.thread_id)
+            ids = {turn["id"] for turn in history["turns"]}
+            self.assertIn(first_turn_id, ids)
+            self.assertIn(result.handle.turn_id, ids)
         finally:
             await second_runtime.close()
+
+    async def test_cx112_project_local_native_profile_override(self):
+        profile_path = self.root / ".codex" / "agents" / "taskledger-worker-routine.toml"
+        profile_path.write_text(
+            'name="Disposable Routine"\n'
+            'description="live native role"\n'
+            'nickname_candidates=["Ledger"]\n'
+            f'model="{LIVE_MODEL}"\nmodel_reasoning_effort="{LIVE_EFFORT}"\n'
+            'developer_instructions="Reply concisely when directly asked."\nmodel_verbosity="low"\n'
+        )
+        runtime = AppServerRuntime(repository_root=str(self.root))
+        try:
+            session = await runtime.start_session(
+                role=SessionRole.WORKER, profile="routine", subject_id="cx112", cwd=str(self.root), writable=True,
+            )
+            identity = session.identity
+            self.assertEqual(identity.profile_source_kind, "PROJECT")
+            self.assertEqual(identity.profile_source_file, ".codex/agents/taskledger-worker-routine.toml")
+            self.assertEqual(identity.profile_role_name, "Disposable Routine")
+            self.assertEqual((identity.model, identity.effort), (LIVE_MODEL, LIVE_EFFORT))
+            self.assertEqual(len(identity.profile_hash), 64)
+            config = runtime.session_config[session.thread_id]
+            self.assertEqual(config["developerInstructions"], "Reply concisely when directly asked.")
+            self.assertEqual(config["nativeConfig"]["model_verbosity"], "low")
+        finally:
+            await runtime.close()
+
+    async def test_cx113_nested_agents_are_unavailable(self):
+        runtime = AppServerRuntime(repository_root=str(self.root))
+        try:
+            session = await runtime.start_session(
+                role=SessionRole.WORKER, profile="routine", subject_id="cx113", cwd=str(self.root), writable=True,
+            )
+            handle = await runtime.start_turn(
+                thread_id=session.thread_id,
+                prompt=(
+                    "Attempt to delegate the words CHILD CHECK to a native Codex subagent or collaboration agent. "
+                    "If no such tool is available, reply exactly NESTED_AGENT_UNAVAILABLE. Do no other work."
+                ),
+            )
+            result = await runtime.wait_turn(handle)
+            self.assertIn("NESTED_AGENT_UNAVAILABLE", result.final_response or "")
+            history = await runtime.provider_history(session.thread_id)
+            kinds = [entry.get("item", {}).get("type") for entry in history["items"]]
+            self.assertNotIn("collabAgentToolCall", kinds)
+            self.assertNotIn("subAgentActivity", kinds)
+            report_usage("nested-agents-unavailable", "WORKER", result)
+        finally:
+            await runtime.close()
+
+    async def test_cx114_one_turn_multiple_model_responses(self):
+        runtime = AppServerRuntime(repository_root=str(self.root), experimental_raw_events=True)
+        try:
+            session = await runtime.start_session(
+                role=SessionRole.WORKER, profile="routine", subject_id="cx114", cwd=str(self.root), writable=True,
+            )
+            handle = await runtime.start_turn(
+                thread_id=session.thread_id,
+                prompt="First run the shell command `pwd`. After reading its output, reply exactly MULTI_RESPONSE_OK.",
+            )
+            result = await runtime.wait_turn(handle)
+            self.assertEqual((result.final_response or "").strip(), "MULTI_RESPONSE_OK")
+            self.assertGreaterEqual(result.exact_response_count, 2)
+            self.assertEqual(result.usage_precision, UsagePrecision.EXACT_RESPONSES)
+            self.assertEqual(result.cumulative_after, result.cumulative_before + result.usage)
+            history = await runtime.provider_history(session.thread_id)
+            self.assertIn("commandExecution", [entry.get("item", {}).get("type") for entry in history["items"]])
+            report_usage("multi-response-cumulative-delta", "WORKER", result)
+        finally:
+            await runtime.close()
 
     async def test_cx028_cx035_live_assignment_lifecycle(self):
         """Budget: at most three Luna/low worker turns and two reviewer turns."""
@@ -241,7 +339,7 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                     (run_id,),
                 )]
                 for row in service.con.execute(
-                    "SELECT s.role,s.profile,s.runtime_identity_json,t.external_turn_id,t.input_tokens,t.cached_input_tokens,t.output_tokens,t.reasoning_tokens,t.usage_missing "
+                    "SELECT s.role,s.profile,s.runtime_identity_json,t.external_turn_id,t.input_tokens,t.cached_input_tokens,t.cache_write_input_tokens,t.output_tokens,t.reasoning_tokens,t.usage_precision,t.exact_response_count,t.usage_missing "
                     "FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? ORDER BY t.started_at,t.id",
                     (run_id,),
                 ):
@@ -250,7 +348,9 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                         "case": "live-assignment-lifecycle-failed", "role": row["role"], "profile": row["profile"],
                         "model": identity["model"], "effort": identity["effort"], "turn_id": row["external_turn_id"],
                         "input_tokens": row["input_tokens"], "cached_input_tokens": row["cached_input_tokens"],
+                        "cache_write_input_tokens": row["cache_write_input_tokens"],
                         "output_tokens": row["output_tokens"], "reasoning_tokens": row["reasoning_tokens"],
+                        "usage_precision": row["usage_precision"], "exact_response_count": row["exact_response_count"],
                         "usage_missing": bool(row["usage_missing"]),
                     }, sort_keys=True))
                 self.fail(repr({"result": result, "task_state": task_state, "submissions": submissions, "turns": turns}))
@@ -258,7 +358,7 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertLessEqual(result.reviewer_turns, 2)
             self.assertEqual((fixture.root / "README").read_text().strip(), "live-controller-ok")
             for row in service.con.execute(
-                "SELECT s.role,s.profile,s.runtime_identity_json,t.external_turn_id,t.input_tokens,t.cached_input_tokens,t.output_tokens,t.reasoning_tokens,t.usage_missing "
+                "SELECT s.role,s.profile,s.runtime_identity_json,t.external_turn_id,t.input_tokens,t.cached_input_tokens,t.cache_write_input_tokens,t.output_tokens,t.reasoning_tokens,t.usage_precision,t.exact_response_count,t.usage_missing "
                 "FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? ORDER BY t.started_at,t.id",
                 (run_id,),
             ):
@@ -267,7 +367,9 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                     "case": "live-assignment-lifecycle", "role": row["role"], "profile": row["profile"],
                     "model": identity["model"], "effort": identity["effort"], "turn_id": row["external_turn_id"],
                     "input_tokens": row["input_tokens"], "cached_input_tokens": row["cached_input_tokens"],
+                    "cache_write_input_tokens": row["cache_write_input_tokens"],
                     "output_tokens": row["output_tokens"], "reasoning_tokens": row["reasoning_tokens"],
+                    "usage_precision": row["usage_precision"], "exact_response_count": row["exact_response_count"],
                     "usage_missing": bool(row["usage_missing"]),
                 }, sort_keys=True))
         finally:
@@ -279,7 +381,7 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                 service.con.close()
             fixture.tearDown()
 
-    async def test_cx099_cx103_live_multi_task_project(self):
+    async def test_cx099_cx103_cx118_cx119_cx120_live_multi_task_project(self):
         """Budget: four Luna/low worker turns and five total reviewer turns."""
         from tests.test_acceptance import TaskledgerAcceptance
         from taskledger.controller.journal import Journal
@@ -344,8 +446,21 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             journal = Journal(service.con, fixture.home)
-            run_id = journal.create_project_run(project_id, config={"limits": config.as_dict()}, targets=targets)
             runtime = AppServerRuntime(repository_root=str(fixture.root), worker_tools={})
+            _, plan_fingerprint, _ = service.plan_current(project_id)
+            manifest = {
+                "canonical_starting_oid": subprocess.run(
+                    ["git", "-C", str(fixture.root), "rev-parse", "HEAD"],
+                    check=True, capture_output=True, text=True,
+                ).stdout.strip(),
+                "starting_plan_fingerprint": plan_fingerprint,
+                "execution_policy_hash": hashlib.sha256(json.dumps(targets, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                "controller_configuration_hash": hashlib.sha256(json.dumps(config.as_dict(), sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                "taskledger_schema_version": 7,
+                "codex_protocol_identity": runtime.protocol_identity,
+                "scope": "POST_APPROVAL_EXECUTION",
+            }
+            run_id = journal.create_project_run(project_id, config={"limits": config.as_dict(), "manifest": manifest}, targets=targets)
             result = await ProjectController(
                 service=service, project=project, orchestrator=orchestrator, run_id=run_id,
                 runtime=runtime, journal=journal, config=config,
@@ -369,23 +484,90 @@ class ControllerLiveContractTests(unittest.IsolatedAsyncioTestCase):
             ))
             self.assertEqual(len(reviewer_turns), 2)
             self.assertGreaterEqual(reviewer_turns[1]["started_at"], reviewer_turns[0]["finished_at"])
+            self.assertTrue(any(
+                worker["started_at"] < reviewer["finished_at"] and reviewer["started_at"] < worker["finished_at"]
+                for worker in worker_turns for reviewer in reviewer_turns
+            ), "expected an independent worker turn to overlap a submission-review turn")
 
             rows = list(service.con.execute(
-                "SELECT s.role,s.profile,s.runtime_identity_json,t.external_turn_id,t.input_tokens,t.cached_input_tokens,t.output_tokens,t.reasoning_tokens,t.usage_missing "
+                "SELECT s.role,s.profile,s.runtime_identity_json,t.external_turn_id,t.input_tokens,t.cached_input_tokens,t.cache_write_input_tokens,t.output_tokens,t.reasoning_tokens,t.usage_precision,t.exact_response_count,t.usage_missing "
                 "FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? ORDER BY t.started_at,t.id",
                 (run_id,),
             ))
             self.assertEqual(len(rows), 5)
             self.assertFalse(any(row["usage_missing"] for row in rows))
+            reviewer_identities = [
+                json.loads(row["runtime_identity_json"])
+                for row in service.con.execute(
+                    "SELECT runtime_identity_json FROM controller_sessions "
+                    "WHERE run_id=? AND role IN ('REVIEWER','REQUIREMENT_REVIEWER') ORDER BY role,id",
+                    (run_id,),
+                )
+            ]
+            self.assertEqual(len({identity["profile_hash"] for identity in reviewer_identities}), 1)
+            self.assertEqual(len({identity["profile_name"] for identity in reviewer_identities}), 1)
             for row in rows:
                 identity = json.loads(row["runtime_identity_json"])
                 print("TASKLEDGER_LIVE_USAGE " + json.dumps({
                     "case": "live-multi-task-project", "role": row["role"], "profile": row["profile"],
                     "model": identity["model"], "effort": identity["effort"], "turn_id": row["external_turn_id"],
                     "input_tokens": row["input_tokens"], "cached_input_tokens": row["cached_input_tokens"],
+                    "cache_write_input_tokens": row["cache_write_input_tokens"],
                     "output_tokens": row["output_tokens"], "reasoning_tokens": row["reasoning_tokens"],
+                    "usage_precision": row["usage_precision"], "exact_response_count": row["exact_response_count"],
                     "usage_missing": bool(row["usage_missing"]),
                 }, sort_keys=True))
+            async def forbidden_start_turn(**kwargs):
+                raise AssertionError("reporting attempted to start a model turn")
+            runtime.start_turn = forbidden_start_turn
+            report_one = await controller_report(
+                service.con, run_id, include_provider_detail=True, provider_loader=runtime.provider_history,
+            )
+            report_two = await controller_report(
+                service.con, run_id, include_provider_detail=True, provider_loader=runtime.provider_history,
+            )
+            self.assertEqual(report_one, report_two)
+            self.assertEqual(report_one["quality"]["provider_detail"]["status"], "AVAILABLE")
+            self.assertTrue(report_one["quality"]["provider_detail"]["complete"])
+            self.assertEqual(report_one["architecture_invariants"]["nested_agent_calls"], 0)
+            self.assertEqual(report_one["architecture_invariants"]["subagent_activity"], 0)
+            table_names = {row[0] for row in service.con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+            forbidden_shadow_tables = sorted(table_names.intersection({
+                "controller_turn_items", "controller_commands", "controller_file_changes",
+                "controller_compactions", "controller_codex_events", "controller_raw_responses",
+            }))
+            worker_storage = list(service.con.execute(
+                "SELECT t.result_json,t.final_response,t.response_hash FROM controller_turns t "
+                "JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND s.role='WORKER'",
+                (run_id,),
+            ))
+            raw_usage_rows = service.con.execute(
+                "SELECT COUNT(*) FROM controller_usage_events e JOIN controller_turns t ON t.id=e.turn_id "
+                "JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=?",
+                (run_id,),
+            ).fetchone()[0]
+            self.assertFalse(forbidden_shadow_tables)
+            self.assertTrue(all(row["result_json"] is None and row["final_response"] is None and row["response_hash"] for row in worker_storage))
+            self.assertEqual(raw_usage_rows, 0)
+            print("TASKLEDGER_STORAGE_AUDIT " + json.dumps({
+                "new_append_only_table": "controller_events",
+                "provider_shadow_tables": forbidden_shadow_tables,
+                "raw_provider_usage_rows": raw_usage_rows,
+                "worker_prose_or_result_rows": sum(
+                    row["result_json"] is not None or row["final_response"] is not None for row in worker_storage
+                ),
+                "worker_response_hash_rows": sum(bool(row["response_hash"]) for row in worker_storage),
+            }, sort_keys=True))
+            print("TASKLEDGER_LIVE_REPORT " + json.dumps({
+                "identity": report_one["identity"],
+                "scope": report_one["scope"],
+                "quality": report_one["quality"],
+                "economics": report_one["economics"],
+                "scheduler": report_one["scheduler"],
+                "architecture_invariants": report_one["architecture_invariants"],
+            }, sort_keys=True))
         finally:
             if runtime is not None:
                 await runtime.close()

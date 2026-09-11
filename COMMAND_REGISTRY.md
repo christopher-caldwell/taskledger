@@ -26,4 +26,5 @@ All commands emit the stable JSON envelope in Technical Specification §9. Unkno
 | `controller run-assignment` | orchestrator | assignment ID, `live=true`, optional durable limits | foreground supervision of one existing assignment; live execution requires explicit opt in |
 | `controller resume` | orchestrator | run ID, `live=true` | reconcile recorded thread and turn identities before continuing |
 | `controller show` | orchestrator | run ID | read controller state, sessions, pause reason, and usage without dispatch |
+| `controller report` | orchestrator | run ID, optional provider detail | deterministic local report; reads Codex persisted history but never starts a model turn |
 | `controller extend-budget` | orchestrator | run ID, grant kind, positive amount, reason | audited extension without resetting prior turns or usage |

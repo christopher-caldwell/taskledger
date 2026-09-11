@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -116,7 +117,7 @@ def service_for_command(args) -> Service:
 def project_controller_config(limits):
     from .controller.project import ProjectControllerConfig
     from .controller.supervisor import SupervisorConfig
-    require_object(limits,{"max_workers","max_reviewers","max_total_worker_turns","max_total_reviewer_turns","reviewer_token_reserve","max_final_reviewer_turns","max_task_creator_turns","task_creator_profile","supervisor"})
+    require_object(limits,{"max_workers","max_reviewers","max_total_worker_turns","max_total_reviewer_turns","reviewer_token_reserve","max_final_reviewer_turns","max_task_creator_turns","max_total_task_creator_turns","max_inflight_targets","task_creator_profile","supervisor"})
     supervisor=limits.get("supervisor",{});require_object(supervisor,{"max_worker_turns","max_consecutive_stalled_turns","max_consecutive_runtime_failures","max_reviewer_turns_per_submission","max_total_tokens","max_elapsed_seconds","turn_timeout_seconds","reviewer_profile"})
     try:
         config=ProjectControllerConfig(
@@ -124,6 +125,7 @@ def project_controller_config(limits):
             max_total_worker_turns=limits.get("max_total_worker_turns",100),max_total_reviewer_turns=limits.get("max_total_reviewer_turns",50),
             reviewer_token_reserve=limits.get("reviewer_token_reserve",0),
             max_final_reviewer_turns=limits.get("max_final_reviewer_turns",2),max_task_creator_turns=limits.get("max_task_creator_turns",2),
+            max_total_task_creator_turns=limits.get("max_total_task_creator_turns",6),max_inflight_targets=limits.get("max_inflight_targets"),
             task_creator_profile=limits.get("task_creator_profile","taskledger_task_creator"),supervisor=SupervisorConfig(**supervisor),
         );config.validate();return config
     except (TypeError,ValueError) as exc:raise LedgerError("INVALID_REQUEST",str(exc))
@@ -160,7 +162,7 @@ def dispatch(args, data):
         if command=="worker.submit":return service.worker_submit(principal,data)
         raise LedgerError("INVALID_REQUEST","Unknown worker command.")
     project,principal=service.auth_orchestrator(args.project,args.token)
-    if command not in {"project.show","project.recover","controller.show"}:service.preflight(project)
+    if command not in {"project.show","project.recover","controller.show","controller.report"}:service.preflight(project)
     if command=="project.show":
         service.preflight(project);valid,fingerprint,diagnostics=service.plan_current(project["id"])
         return {"project_id":project["id"],"repository_root":project["repository_root"],"canonical_branch":project["canonical_branch"],"effective_phase":service.phase(project),"plan":{"valid":valid,"fingerprint":fingerprint,"diagnostics":diagnostics},"progress":service.progress(project),"pending_reviews":service.con.execute("SELECT COUNT(*) FROM specification_reviews WHERE project_id=? AND state='PENDING'",(project["id"],)).fetchone()[0]}
@@ -189,7 +191,18 @@ def dispatch(args, data):
         runtime.session_identity(role=SessionRole.REQUIREMENT_REVIEWER,profile=config.supervisor.reviewer_profile,subject_id="preflight",cwd=project["repository_root"],writable=False)
         runtime.session_identity(role=SessionRole.TASK_CREATOR,profile=config.task_creator_profile,subject_id="preflight",cwd=project["repository_root"],writable=False)
         journal=Journal(service.con,service.home)
-        try:run_id=journal.create_project_run(project["id"],config={"limits":config.as_dict()},targets=targets)
+        valid,plan_fingerprint,_=service.plan_current(project["id"])
+        if not valid or not plan_fingerprint:raise LedgerError("PLAN_INVALID","Approved Taskledger plan is not current.")
+        manifest={
+            "canonical_starting_oid":git.oid(project["repository_root"],f"refs/heads/{project['canonical_branch']}"),
+            "starting_plan_fingerprint":plan_fingerprint,
+            "execution_policy_hash":hashlib.sha256(canonical(targets).encode()).hexdigest(),
+            "controller_configuration_hash":hashlib.sha256(canonical(config.as_dict()).encode()).hexdigest(),
+            "taskledger_schema_version":service.con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+            "codex_protocol_identity":runtime.protocol_identity,
+            "scope":"POST_APPROVAL_EXECUTION",
+        }
+        try:run_id=journal.create_project_run(project["id"],config={"limits":config.as_dict(),"manifest":manifest},targets=targets)
         except RuntimeError as exc:raise LedgerError("INVALID_REQUEST",str(exc))
         result=run_project_controller(service,project,principal,run_id,config,runtime)
         return asdict(result)
@@ -214,7 +227,12 @@ def dispatch(args, data):
         runtime=AppServerRuntime(repository_root=project["repository_root"],worker_tools={assignment_id:broker.dispatch})
         runtime.session_identity(role=SessionRole.WORKER,profile=assignment["worker_profile"],subject_id=assignment_id,cwd=assignment["worktree_path"],writable=True)
         journal=Journal(service.con,service.home)
-        try:run_id=journal.create_run(project["id"],mode="ASSIGNMENT",config={"assignment_id":assignment_id,"limits":asdict(config)})
+        valid,plan_fingerprint,_=service.plan_current(project["id"])
+        manifest={"canonical_starting_oid":git.oid(project["repository_root"]),"starting_plan_fingerprint":plan_fingerprint if valid else None,
+                  "execution_policy_hash":None,"controller_configuration_hash":hashlib.sha256(canonical(asdict(config)).encode()).hexdigest(),
+                  "taskledger_schema_version":service.con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+                  "codex_protocol_identity":runtime.protocol_identity,"scope":"POST_APPROVAL_EXECUTION"}
+        try:run_id=journal.create_run(project["id"],mode="ASSIGNMENT",config={"assignment_id":assignment_id,"limits":asdict(config),"manifest":manifest})
         except RuntimeError as exc:raise LedgerError("INVALID_REQUEST",str(exc))
         async def execute():
             try:
@@ -278,8 +296,25 @@ def dispatch(args, data):
         if not run or run["project_id"]!=project["id"]:raise LedgerError("INVALID_REQUEST","Controller run was not found.")
         sessions=[]
         for row in service.con.execute("SELECT id,role,profile,subject_id,external_thread_id,runtime_identity_json,state,created_at,closed_at FROM controller_sessions WHERE run_id=? ORDER BY created_at,id",(run["id"],)):
-            item=dict(row);item["runtime_identity"]=json.loads(item.pop("runtime_identity_json"));sessions.append(item)
+            item=dict(row);identity=json.loads(item.pop("runtime_identity_json"));item["runtime_identity"]=identity
+            item["profile_resolution"]={"role":item["role"],"profile":identity.get("profile_name",item["profile"]),"native_role_name":identity.get("profile_role_name"),"source":identity.get("profile_source_kind"),"source_file":identity.get("profile_source_file"),"model":identity.get("model"),"effort":identity.get("effort"),"config_hash":identity.get("agent_config_hash"),"profile_hash":identity.get("profile_hash"),"protocol_identity":identity.get("protocol_identity"),"sandbox":identity.get("sandbox")}
+            sessions.append(item)
         return {"run":run,"targets":journal.targets(run["id"]) if run["mode"]=="PROJECT" else [],"sessions":sessions,"usage":journal.usage_report(run_id=run["id"])}
+    if command=="controller.report":
+        require_object(data,{"run_id","include_provider_detail"},{"run_id"})
+        from .controller.reporting import controller_report
+        run_id=text(data["run_id"],"run_id")
+        run=service.con.execute("SELECT project_id FROM controller_runs WHERE id=?",(run_id,)).fetchone()
+        if not run or run["project_id"]!=project["id"]:raise LedgerError("INVALID_REQUEST","Controller run was not found.")
+        include=data.get("include_provider_detail",True)
+        if not isinstance(include,bool):raise LedgerError("INVALID_REQUEST","include_provider_detail must be boolean.")
+        async def build_report():
+            if not include:return await controller_report(service.con,run_id,include_provider_detail=False)
+            from .controller.app_server import AppServerRuntime
+            runtime=AppServerRuntime(repository_root=project["repository_root"])
+            try:return await controller_report(service.con,run_id,include_provider_detail=True,provider_loader=runtime.provider_history)
+            finally:await runtime.close()
+        return asyncio.run(build_report())
     if command=="controller.extend-budget":
         require_object(data,{"run_id","kind","amount","reason"},{"run_id","kind","amount","reason"})
         from .controller.journal import Journal

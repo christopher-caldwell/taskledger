@@ -57,12 +57,34 @@ class TurnExecutionState(str, Enum):
     UNCERTAIN = "UNCERTAIN"
 
 
+class UsagePrecision(str, Enum):
+    EXACT_RESPONSES = "EXACT_RESPONSES"
+    THREAD_TOTAL_DELTA = "THREAD_TOTAL_DELTA"
+    SYNTHETIC_OR_ESTIMATED = "SYNTHETIC_OR_ESTIMATED"
+    MISSING = "MISSING"
+    LEGACY_LAST_USAGE = "LEGACY_LAST_USAGE"
+
+
+class DispatchReason(str, Enum):
+    INITIAL_WORK = "INITIAL_WORK"
+    ACTIVE_CONTINUATION = "ACTIVE_CONTINUATION"
+    CORRECTION = "CORRECTION"
+    CHECKPOINT_CONTINUATION = "CHECKPOINT_CONTINUATION"
+    QUESTION_ANSWERED = "QUESTION_ANSWERED"
+    STRUCTURED_OUTPUT_RETRY = "STRUCTURED_OUTPUT_RETRY"
+    SUBMISSION_REVIEW = "SUBMISSION_REVIEW"
+    CHECKPOINT_REVIEW = "CHECKPOINT_REVIEW"
+    FINAL_REVIEW = "FINAL_REVIEW"
+    CORRECTION_PLANNING = "CORRECTION_PLANNING"
+
+
 @dataclass(frozen=True)
 class Usage:
     input_tokens: int = 0
     cached_input_tokens: int = 0
     output_tokens: int = 0
     reasoning_tokens: int = 0
+    cache_write_input_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -74,7 +96,20 @@ class Usage:
             self.cached_input_tokens + other.cached_input_tokens,
             self.output_tokens + other.output_tokens,
             self.reasoning_tokens + other.reasoning_tokens,
+            self.cache_write_input_tokens + other.cache_write_input_tokens,
         )
+
+    def subtract(self, before: "Usage") -> "Usage":
+        values = (
+            self.input_tokens - before.input_tokens,
+            self.cached_input_tokens - before.cached_input_tokens,
+            self.output_tokens - before.output_tokens,
+            self.reasoning_tokens - before.reasoning_tokens,
+            self.cache_write_input_tokens - before.cache_write_input_tokens,
+        )
+        if any(value < 0 for value in values):
+            raise ValueError("cumulative token usage moved backwards")
+        return Usage(*values)
 
 
 @dataclass(frozen=True)
@@ -84,6 +119,11 @@ class RuntimeIdentity:
     agent_config_hash: str
     sandbox: dict[str, Any]
     protocol_identity: str
+    profile_name: str | None = None
+    profile_role_name: str | None = None
+    profile_source_kind: str | None = None
+    profile_source_file: str | None = None
+    profile_hash: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -92,7 +132,26 @@ class RuntimeIdentity:
             "agent_config_hash": self.agent_config_hash,
             "sandbox": self.sandbox,
             "protocol_identity": self.protocol_identity,
+            "profile_name": self.profile_name,
+            "profile_role_name": self.profile_role_name,
+            "profile_source_kind": self.profile_source_kind,
+            "profile_source_file": self.profile_source_file,
+            "profile_hash": self.profile_hash,
         }
+
+
+@dataclass(frozen=True)
+class PromptPacket:
+    text: str
+    dispatch_reason: DispatchReason
+    prompt_builder_version: str = "controller-prompt-v2"
+    controller_payload_bytes: int = 0
+    static_assignment_bytes: int = 0
+    dynamic_state_bytes: int = 0
+    correction_bytes: int = 0
+    output_schema_bytes: int = 0
+    dynamic_state_hash: str | None = None
+    context_hashes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -114,6 +173,10 @@ class RuntimeTurnResult:
     final_response: str | None = None
     usage: Usage = Usage()
     usage_missing: bool = False
+    usage_precision: UsagePrecision = UsagePrecision.MISSING
+    cumulative_before: Usage | None = None
+    cumulative_after: Usage | None = None
+    exact_response_count: int = 0
 
 
 @dataclass(frozen=True)

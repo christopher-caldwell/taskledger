@@ -6,7 +6,7 @@ from typing import Any
 from taskledger import git
 from taskledger.core import canonical, sha256
 
-from .model import ExecutionStatus, ExecutionView, ReviewOutcome, ReviewPreparation, ReviewVerdict
+from .model import DispatchReason, ExecutionStatus, ExecutionView, PromptPacket, ReviewOutcome, ReviewPreparation, ReviewVerdict
 
 
 class TaskledgerLedgerAdapter:
@@ -111,20 +111,46 @@ class TaskledgerLedgerAdapter:
         return sha256(canonical(snapshot))
 
     def worker_prompt(self, assignment_id: str, *, first_turn: bool) -> str:
+        return self.worker_prompt_packet(assignment_id, first_turn=first_turn).text
+
+    def worker_prompt_packet(
+        self, assignment_id: str, *, first_turn: bool, previous_hashes: dict[str, str] | None = None
+    ) -> PromptPacket:
         assignment = self._assignment(assignment_id)
         context = json.loads(assignment["context_json"] or self.service.context(assignment))
-        dynamic = {
+        categories = {
             "correction_packet": self.service.correction_packet(self.project, assignment),
             "checkpoint_progress": self.service.checkpoint_progress(assignment),
             "questions": [dict(row) for row in self.service.con.execute(
                 "SELECT id,body,is_blocking,state,answer FROM worker_questions WHERE assignment_id=? ORDER BY asked_at,id", (assignment_id,)
             )],
         }
+        hashes = {key: sha256(canonical(value)) for key, value in categories.items()}
+        hashes.update({
+            f"question:{item['id']}": sha256(canonical(item))
+            for item in categories["questions"]
+        })
+        dynamic_hash = sha256(canonical(categories))
+        previous_hashes = previous_hashes or {}
+        if first_turn:
+            changed = categories
+        else:
+            changed = {
+                key: value
+                for key, value in categories.items()
+                if key != "questions" and hashes[key] != previous_hashes.get(key)
+            }
+            changed_questions = [
+                item for item in categories["questions"]
+                if hashes[f"question:{item['id']}"] != previous_hashes.get(f"question:{item['id']}")
+            ]
+            if changed_questions:
+                changed["questions"] = changed_questions
         instruction = (
             "Load this persisted Taskledger assignment context. Continue all authorized work until you submit, create a blocking question or blocker, or the task becomes invalid. "
             "A normal turn ending is not completion. Use only assignment scoped worker operations. Do not load Codex skill files or invoke the Taskledger CLI; the current context is already included below."
             if first_turn
-            else "Continue the same Taskledger assignment. Recheck the current correction and checkpoint state below, then keep working until submission or a durable blocker. Do not reload Codex skill files."
+            else "Continue the same Task Ledger assignment. The assignment remains ACTIVE. Continue until submission or a durable blocker. Do not reload Codex skill files."
         )
         broker = ""
         if self.worker_socket:
@@ -134,7 +160,36 @@ class TaskledgerLedgerAdapter:
             )
         elif self.worker_tool_enabled:
             broker = "\nUse the assignment-scoped `taskledger_*` tools for context, checks, checkpoints, evidence, questions, blockers, follow-up work, and submission. No credential is available in the model environment."
-        return instruction + broker + "\n\n" + canonical({"context": context, "dynamic": dynamic})
+        static_payload = canonical(context) if first_turn else ""
+        dynamic_payload = canonical(changed) if changed else ""
+        if first_turn:
+            payload = canonical({"context": context, "dynamic": categories})
+            reason = DispatchReason.INITIAL_WORK
+        elif changed:
+            payload = canonical({"dynamic_delta": changed})
+            if "correction_packet" in changed and changed["correction_packet"] is not None:
+                reason = DispatchReason.CORRECTION
+            elif "checkpoint_progress" in changed:
+                reason = DispatchReason.CHECKPOINT_CONTINUATION
+            elif "questions" in changed and any(item.get("state") == "ANSWERED" for item in changed["questions"]):
+                reason = DispatchReason.QUESTION_ANSWERED
+            else:
+                reason = DispatchReason.ACTIVE_CONTINUATION
+        else:
+            payload = ""
+            reason = DispatchReason.ACTIVE_CONTINUATION
+        prompt = instruction + broker + (("\n\n" + payload) if payload else "")
+        correction_payload = canonical(changed.get("correction_packet")) if "correction_packet" in changed and changed.get("correction_packet") is not None else ""
+        return PromptPacket(
+            text=prompt,
+            dispatch_reason=reason,
+            controller_payload_bytes=len(prompt.encode("utf-8")),
+            static_assignment_bytes=len(static_payload.encode("utf-8")),
+            dynamic_state_bytes=len(dynamic_payload.encode("utf-8")),
+            correction_bytes=len(correction_payload.encode("utf-8")),
+            dynamic_state_hash=dynamic_hash,
+            context_hashes=hashes,
+        )
 
     def worker_cwd(self, assignment_id: str) -> str:
         return self._assignment(assignment_id)["worktree_path"]

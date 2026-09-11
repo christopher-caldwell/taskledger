@@ -206,6 +206,44 @@ class ProjectControllerTests(unittest.TestCase):
         journal.finish_run(run_id, "PAUSED")
         service.con.close()
 
+    def test_nc209_task_creator_project_budget_pauses_before_second_planning_turn(self):
+        _, task_ids = self.build_plan()
+        service = Service(connect(self.fixture.home), self.fixture.home)
+        project, orchestrator = service.auth_orchestrator(self.project_id, None)
+        runtime = FakeRuntime(
+            worker_turns=[], reviewer_turns=[],
+            task_creator_turns=[TurnScript(structured_output={"invalid": True}), TurnScript(structured_output={"ok": True})],
+        )
+        targets = validate_execution_policy(service, project, [
+            {"task_id": task_id, "wave": 1, "worker_profile": "routine", "parallel_safe": False, "write_surfaces": [task_id]}
+            for task_id in task_ids.values()
+        ])
+        config = ProjectControllerConfig(max_task_creator_turns=2, max_total_task_creator_turns=1)
+        journal = Journal(service.con, self.fixture.home)
+        run_id = journal.create_project_run(self.project_id, config={"limits": config.as_dict()}, targets=targets)
+        controller = ProjectController(
+            service=service, project=project, orchestrator=orchestrator, run_id=run_id,
+            runtime=runtime, journal=journal, config=config,
+        )
+
+        async def execute():
+            return await controller._semantic_job(
+                role=SessionRole.TASK_CREATOR,
+                profile=config.task_creator_profile,
+                subject_id="creator-budget-test",
+                prompt="plan corrections",
+                schema={"type": "object"},
+                max_turns=2,
+                prompt_kind="correction-planning",
+                validator=lambda value: value if isinstance(value, dict) and value.get("ok") else None,
+            )
+
+        with self.assertRaisesRegex(SemanticJobBudgetExhausted, "task creator turn budget"):
+            asyncio.run(execute())
+        self.assertEqual(runtime.turns_started, 1)
+        journal.finish_run(run_id, "PAUSED")
+        service.con.close()
+
     def test_final_and_correction_contracts_reject_inconsistent_semantics(self):
         requirement_ids, _ = self.build_plan()
         service = Service(connect(self.fixture.home), self.fixture.home)

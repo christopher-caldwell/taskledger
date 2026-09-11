@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
-import os
 import shutil
 import subprocess
-import tomllib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,7 +15,9 @@ from .model import (
     RuntimeTurnResult,
     SessionRole,
     Usage,
+    UsagePrecision,
 )
+from .profiles import ProfileResolver
 
 
 class AppServerRuntime:
@@ -30,7 +29,7 @@ class AppServerRuntime:
         "integration. Durable Taskledger state, not prose or turn completion, determines workflow state."
     )
 
-    def __init__(self, *, repository_root: str, codex_executable: str | None = None, worker_sockets: dict[str, str] | None = None, worker_tools: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] | None = None):
+    def __init__(self, *, repository_root: str, codex_executable: str | None = None, worker_sockets: dict[str, str] | None = None, worker_tools: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] | None = None, experimental_raw_events: bool = False):
         self.repository_root = Path(repository_root)
         self.codex_executable = codex_executable or shutil.which("codex")
         if not self.codex_executable:
@@ -45,29 +44,41 @@ class AppServerRuntime:
         self.turn_waiters: dict[str, asyncio.Future[RuntimeTurnResult]] = {}
         self.turn_threads: dict[str, str] = {}
         self.turn_text: dict[str, str] = {}
-        self.turn_usage: dict[str, Usage] = {}
-        self.turn_usage_events: dict[str, list[dict[str, Any]]] = {}
-        self.turn_usage_event_ids: dict[str, set[str]] = {}
+        self.thread_usage: dict[str, Usage] = {}
+        self.thread_usage_offsets: dict[str, Usage] = {}
+        self.thread_usage_events: dict[str, asyncio.Event] = {}
+        self.thread_usage_synthetic: dict[str, bool] = {}
+        self.turn_usage_before: dict[str, Usage | None] = {}
+        self.turn_usage_events: dict[str, asyncio.Event] = {}
+        self.turn_exact_usage: dict[str, Usage] = {}
+        self.turn_exact_response_ids: dict[str, set[str]] = {}
         self.session_config: dict[str, dict[str, Any]] = {}
+        self.profiles = ProfileResolver(self.repository_root)
         self.worker_sockets = worker_sockets or {}
         self.worker_tools = worker_tools or {}
+        self.experimental_raw_events = experimental_raw_events
         try:
             version = subprocess.run(
                 [self.codex_executable, "--version"], check=True, capture_output=True, text=True, timeout=10
             ).stdout.strip()
         except (OSError, subprocess.SubprocessError) as exc:
             raise RuntimeError("Codex version identity is unavailable") from exc
-        self.protocol_identity = f"{version};app-server-v2-jsonrpc+experimental-dynamic-tools;taskledger-client-0.4.0"
+        self.protocol_identity = f"{version};app-server-v2-jsonrpc+experimental-dynamic-tools;taskledger-client-0.6.0"
 
     def session_identity(self, *, role: SessionRole, profile: str, subject_id: str, cwd: str | None, writable: bool) -> RuntimeIdentity:
         resolved = self._profile(profile, role)
         sandbox = self._sandbox(subject_id=subject_id, cwd=cwd, writable=writable)
         return RuntimeIdentity(
-            model=resolved["model"],
-            effort=resolved["effort"],
-            agent_config_hash=resolved["config_hash"],
+            model=resolved.model,
+            effort=resolved.effort,
+            agent_config_hash=resolved.effective_config_hash,
             sandbox=sandbox,
             protocol_identity=self.protocol_identity,
+            profile_name=resolved.logical_name,
+            profile_role_name=resolved.role_name,
+            profile_source_kind=resolved.source_kind,
+            profile_source_file=resolved.source_display,
+            profile_hash=resolved.profile_hash,
         )
 
     async def start_session(self, *, role: SessionRole, profile: str, subject_id: str, cwd: str | None, writable: bool) -> RuntimeSession:
@@ -82,46 +93,89 @@ class AppServerRuntime:
             "sandbox": "workspace-write" if writable else "read-only",
             "serviceName": "taskledger_controller",
             "baseInstructions": self.BASE_INSTRUCTIONS,
+            "experimentalRawEvents": self.experimental_raw_events,
         }
-        if resolved.get("developer_instructions"):
-            params["developerInstructions"] = resolved["developer_instructions"]
+        runtime_config = self._runtime_config(resolved, sandbox, cwd)
+        params["config"] = runtime_config
+        if resolved.developer_instructions:
+            params["developerInstructions"] = resolved.developer_instructions
         if writable and subject_id in self.worker_tools:
             params["dynamicTools"] = self._worker_tool_specs()
+        self._assert_controller_config(params["config"])
         response = await self._request("thread/start", params)
+        if response.get("model") != identity.model or response.get("reasoningEffort") not in {None, identity.effort}:
+            raise RuntimeError("CONFIGURATION_CONFLICT: Codex did not apply the resolved model/effort")
         thread = response["thread"]
         thread_id = thread["id"]
+        self.thread_usage[thread_id] = Usage()
+        self.thread_usage_offsets[thread_id] = Usage()
+        self.thread_usage_events.setdefault(thread_id, asyncio.Event()).set()
         self.session_config[thread_id] = {
             **identity.as_dict(), "cwd": cwd, "sandboxPolicy": sandbox, "subject_id": subject_id,
-            "writable": writable, "developerInstructions": resolved.get("developer_instructions"),
+            "writable": writable, "developerInstructions": resolved.developer_instructions,
+            "nativeConfig": runtime_config,
         }
         return RuntimeSession(thread_id, identity)
 
-    async def resume_session(self, *, thread_id: str, role: SessionRole, profile: str, subject_id: str, cwd: str | None, writable: bool) -> RuntimeSession:
+    async def resume_session(self, *, thread_id: str, role: SessionRole, profile: str, subject_id: str, cwd: str | None, writable: bool, cumulative_usage_baseline: Usage | None = None) -> RuntimeSession:
         await self._ensure_started()
         identity = self.session_identity(role=role, profile=profile, subject_id=subject_id, cwd=cwd, writable=writable)
         resolved = self._profile(profile, role)
         if thread_id not in self.session_config:
             self.session_config[thread_id] = {
                 **identity.as_dict(), "cwd": cwd, "sandboxPolicy": identity.sandbox, "subject_id": subject_id,
-                "writable": writable, "developerInstructions": resolved.get("developer_instructions"),
+                "writable": writable, "developerInstructions": resolved.developer_instructions,
+                "nativeConfig": self._runtime_config(resolved, identity.sandbox, cwd),
             }
-        params: dict[str, Any] = {"threadId": thread_id}
+        # Codex 0.153.4 only guarantees token-usage replay for legacy rollout
+        # threads when resume hydrates their turns. That replay, cross-checked
+        # against Task Ledger's durable total below, is the only acceptable
+        # restart baseline. Provider reporting remains paginated and read-only.
+        params: dict[str, Any] = {"threadId": thread_id, "excludeTurns": False}
         config = self.session_config.get(thread_id)
         if config:
             params.update({
                 "model": config["model"], "cwd": cwd,
                 "sandbox": "workspace-write" if writable else "read-only",
                 "baseInstructions": self.BASE_INSTRUCTIONS,
+                "config": config["nativeConfig"],
             })
             if config.get("developerInstructions"):
                 params["developerInstructions"] = config["developerInstructions"]
+            self._assert_controller_config(config["nativeConfig"])
         response = await self._request("thread/resume", params)
         if response["thread"]["id"] != thread_id:
             raise RuntimeError("Codex resumed a different thread")
+        if response.get("model") not in {None, identity.model} or response.get("reasoningEffort") not in {None, identity.effort}:
+            raise RuntimeError("CONFIGURATION_CONFLICT: Codex resumed the thread with a different model/effort")
+        event = self.thread_usage_events.setdefault(thread_id, asyncio.Event())
+        if not event.is_set():
+            try:
+                await asyncio.wait_for(event.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                pass
+        replayed = self.thread_usage.get(thread_id)
+        if cumulative_usage_baseline is not None:
+            if replayed is None:
+                # Some locally created legacy rollouts have no persisted TokenCount
+                # record even though Task Ledger durably recorded the prior exact
+                # cumulative result. Codex then starts its live cumulative counter
+                # at zero (rather than silently reconstructing a different value).
+                # Preserve the proven durable total as a coordinate-system offset;
+                # every subsequent turn still uses a field-by-field delta of the
+                # provider's cumulative counter.
+                self.thread_usage_offsets[thread_id] = cumulative_usage_baseline
+                self.thread_usage[thread_id] = cumulative_usage_baseline
+                event.set()
+            elif replayed != cumulative_usage_baseline:
+                raise RuntimeError("Codex cumulative usage does not match the durable controller baseline")
+            else:
+                self.thread_usage_offsets[thread_id] = Usage()
         return RuntimeSession(thread_id, identity)
 
     async def start_turn(self, *, thread_id: str, prompt: str, output_schema: dict[str, Any] | None = None) -> RuntimeTurnHandle:
         await self._ensure_started()
+        cumulative_before = self.thread_usage.get(thread_id)
         params: dict[str, Any] = {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]}
         config = self.session_config.get(thread_id)
         if config:
@@ -131,6 +185,8 @@ class AppServerRuntime:
         response = await self._request("turn/start", params)
         turn_id = response["turn"]["id"]
         self.turn_threads[turn_id] = thread_id
+        self.turn_usage_before[turn_id] = cumulative_before
+        self.turn_usage_events.setdefault(turn_id, asyncio.Event())
         self.turn_waiters.setdefault(turn_id, asyncio.get_running_loop().create_future())
         return RuntimeTurnHandle(thread_id, turn_id)
 
@@ -158,10 +214,43 @@ class AppServerRuntime:
         return RuntimeTurnInspection("UNKNOWN", error="Codex thread did not contain the recorded turn")
 
     def usage_events(self, handle: RuntimeTurnHandle) -> tuple[dict[str, Any], ...]:
-        return tuple(self.turn_usage_events.get(handle.turn_id, ()))
+        return ()
+
+    async def provider_history(self, thread_id: str) -> dict[str, Any]:
+        """Read persisted provider history without starting or resuming a model turn."""
+        await self._ensure_started()
+        turns: list[dict[str, Any]] = []
+        cursor = None
+        while True:
+            params: dict[str, Any] = {"threadId": thread_id, "limit": 100, "sortDirection": "asc", "itemsView": "summary"}
+            if cursor:
+                params["cursor"] = cursor
+            page = await self._request("thread/turns/list", params)
+            turns.extend(page.get("data", []))
+            cursor = page.get("nextCursor")
+            if not cursor:
+                break
+        items: list[dict[str, Any]] = []
+        cursor = None
+        while True:
+            params = {"threadId": thread_id, "limit": 200, "sortDirection": "asc"}
+            if cursor:
+                params["cursor"] = cursor
+            page = await self._request("thread/items/list", params)
+            items.extend(page.get("data", []))
+            cursor = page.get("nextCursor")
+            if not cursor:
+                break
+        return {"turns": turns, "items": items}
 
     async def close(self) -> None:
         if self.process and self.process.returncode is None:
+            # Core emits turn/completed before its final terminal-event rollout
+            # flush barrier. Give a normal controller shutdown a bounded grace
+            # period for that barrier; a hard crash remains fail-closed on resume
+            # when Codex cannot replay the durable cumulative baseline.
+            if self.turn_waiters and all(waiter.done() for waiter in self.turn_waiters.values()):
+                await asyncio.sleep(0.25)
             self.process.terminate()
             try:
                 await asyncio.wait_for(self.process.wait(), timeout=5)
@@ -186,12 +275,15 @@ class AppServerRuntime:
                 return
             self.process = await asyncio.create_subprocess_exec(
                 self.codex_executable, "app-server", "--stdio", "--strict-config",
+                "-c", "agents.enabled=false", "-c", "features.multi_agent_v2=false",
+                "-c", "features.collab=false",
+                "-c", "include_collaboration_mode_instructions=false",
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             self.reader_task = asyncio.create_task(self._read_messages())
             self.stderr_task = asyncio.create_task(self._drain_stderr())
             await self._request("initialize", {
-                "clientInfo": {"name": "taskledger_controller", "title": "Taskledger Controller", "version": "0.4.0"},
+                "clientInfo": {"name": "taskledger_controller", "title": "Taskledger Controller", "version": "0.6.0"},
                 "capabilities": {"experimentalApi": True},
             })
             await self._notify("initialized", {})
@@ -249,34 +341,45 @@ class AppServerRuntime:
                     if turn_id and item.get("type") in {"agentMessage", "agent_message"}:
                         self.turn_text[turn_id] = item.get("text", "")
                 elif method == "thread/tokenUsage/updated":
+                    thread_id = params.get("threadId")
                     turn_id = params.get("turnId")
                     token_usage = params.get("tokenUsage") or params.get("usage") or {}
-                    if turn_id:
-                        usage = self._usage(token_usage)
-                        raw = json.dumps(params, sort_keys=True, separators=(",", ":"))
-                        event_id = hashlib.sha256(raw.encode()).hexdigest()
-                        seen = self.turn_usage_event_ids.setdefault(turn_id, set())
-                        if event_id in seen:
-                            continue
-                        seen.add(event_id)
-                        self.turn_usage[turn_id] = self.turn_usage.get(turn_id, Usage()) + usage
-                        self.turn_usage_events.setdefault(turn_id, []).append({
-                            "event_id": event_id,
-                            "usage": usage.__dict__,
-                            "raw": params,
-                        })
+                    if thread_id:
+                        total = token_usage.get("total") or token_usage.get("totalUsage")
+                        last = token_usage.get("last") or token_usage.get("lastUsage")
+                        if isinstance(total, dict):
+                            provider_total = self._usage(total)
+                            offset = self.thread_usage_offsets.get(thread_id, Usage())
+                            self.thread_usage[thread_id] = offset + provider_total
+                            window = token_usage.get("modelContextWindow")
+                            self.thread_usage_synthetic[thread_id] = bool(
+                                isinstance(window, int)
+                                and window > 0
+                                and self.thread_usage[thread_id].total_tokens >= window
+                                and isinstance(last, dict)
+                                and self._usage(last).total_tokens >= window
+                            )
+                            self.thread_usage_events.setdefault(thread_id, asyncio.Event()).set()
+                            if turn_id:
+                                self.turn_usage_events.setdefault(turn_id, asyncio.Event()).set()
+                elif method == "rawResponse/completed":
+                    turn_id = params.get("turnId")
+                    response_id = params.get("responseId")
+                    raw_usage = params.get("usage")
+                    if turn_id and response_id and isinstance(raw_usage, dict):
+                        seen = self.turn_exact_response_ids.setdefault(turn_id, set())
+                        if response_id not in seen:
+                            seen.add(response_id)
+                            self.turn_exact_usage[turn_id] = self.turn_exact_usage.get(turn_id, Usage()) + self._usage(raw_usage)
                 elif method == "turn/completed":
                     turn = params.get("turn", {})
                     turn_id = turn.get("id") or params.get("turnId")
                     if turn_id:
                         thread_id = params.get("threadId") or self.turn_threads.get(turn_id, "")
                         handle = RuntimeTurnHandle(thread_id, turn_id)
-                        waiter = self.turn_waiters.setdefault(turn_id, asyncio.get_running_loop().create_future())
-                        if not waiter.done():
-                            if turn.get("status") in {"failed", "error"}:
-                                waiter.set_exception(RuntimeError(self._error_text(turn.get("error"))))
-                            else:
-                                waiter.set_result(self._turn_result(handle, turn))
+                        task = asyncio.create_task(self._finish_turn_after_usage(handle, turn))
+                        self.server_tasks.add(task)
+                        task.add_done_callback(self._server_task_done)
                 elif method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/tool/requestUserInput"}:
                     turn_id = params.get("turnId")
                     if turn_id and (waiter := self.turn_waiters.get(turn_id)) and not waiter.done():
@@ -297,6 +400,22 @@ class AppServerRuntime:
         error = task.exception()
         if error is not None:
             self._fail_pending(RuntimeError(f"Codex app server tool response failed: {error}"))
+
+    async def _finish_turn_after_usage(self, handle: RuntimeTurnHandle, turn: dict[str, Any]) -> None:
+        waiter = self.turn_waiters.setdefault(handle.turn_id, asyncio.get_running_loop().create_future())
+        if waiter.done():
+            return
+        if turn.get("status") in {"failed", "error"}:
+            waiter.set_exception(RuntimeError(self._error_text(turn.get("error"))))
+            return
+        event = self.turn_usage_events.setdefault(handle.turn_id, asyncio.Event())
+        if not event.is_set():
+            try:
+                await asyncio.wait_for(event.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                pass
+        if not waiter.done():
+            waiter.set_result(self._turn_result(handle, turn))
 
     def _fail_pending(self, error: RuntimeError) -> None:
         for future in list(self.pending.values()):
@@ -441,13 +560,31 @@ class AppServerRuntime:
                     structured = parsed
             except json.JSONDecodeError:
                 pass
-        raw_usage = turn.get("usage")
-        usage = self._usage(raw_usage) if isinstance(raw_usage, dict) else self.turn_usage.get(handle.turn_id)
-        return RuntimeTurnResult(handle, structured, text, usage or Usage(), usage_missing=usage is None)
+        before = self.turn_usage_before.get(handle.turn_id)
+        after = self.thread_usage.get(handle.thread_id)
+        usage = Usage()
+        precision = UsagePrecision.MISSING
+        if before is not None and after is not None:
+            try:
+                usage = after.subtract(before)
+                precision = (
+                    UsagePrecision.SYNTHETIC_OR_ESTIMATED
+                    if self.thread_usage_synthetic.get(handle.thread_id)
+                    else UsagePrecision.THREAD_TOTAL_DELTA
+                )
+                exact = self.turn_exact_usage.get(handle.turn_id)
+                if exact is not None and exact == usage and precision == UsagePrecision.THREAD_TOTAL_DELTA:
+                    precision = UsagePrecision.EXACT_RESPONSES
+            except ValueError:
+                precision = UsagePrecision.MISSING
+        return RuntimeTurnResult(
+            handle, structured, text, usage, precision == UsagePrecision.MISSING, precision,
+            before, after, len(self.turn_exact_response_ids.get(handle.turn_id, ())),
+        )
 
     @staticmethod
     def _usage(value: dict[str, Any]) -> Usage:
-        last = value.get("last") or value.get("lastUsage") or value
+        last = value
         details = last.get("inputTokensDetails") or last.get("input_tokens_details") or {}
         output_details = last.get("outputTokensDetails") or last.get("output_tokens_details") or {}
         return Usage(
@@ -455,36 +592,36 @@ class AppServerRuntime:
             int(last.get("cachedInputTokens", details.get("cached_tokens", 0)) or 0),
             int(last.get("outputTokens", last.get("output_tokens", 0)) or 0),
             int(last.get("reasoningTokens", last.get("reasoningOutputTokens", output_details.get("reasoning_tokens", 0))) or 0),
+            int(last.get("cacheWriteInputTokens", last.get("cache_write_input_tokens", details.get("cache_write_tokens", 0))) or 0),
         )
 
-    def _profile(self, profile: str, role: SessionRole) -> dict[str, str]:
-        filenames = []
-        if role in {SessionRole.REVIEWER, SessionRole.REQUIREMENT_REVIEWER}:
-            filenames.append("taskledger-reviewer.toml")
-        elif role == SessionRole.TASK_CREATOR:
-            filenames.append("taskledger-task-creator.toml")
-        else:
-            filenames.append(f"taskledger-worker-{profile}.toml")
-        codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-        roots = [
-            self.repository_root / ".codex" / "agents",
-            codex_home / "agents",
-            codex_home / "skills" / "taskledger" / "assets",
-            Path(__file__).parents[3] / "skills" / "taskledger" / "assets",
-        ]
-        for root in roots:
-            for filename in filenames:
-                path = root / filename
-                if path.is_file():
-                    raw = path.read_bytes()
-                    data = tomllib.loads(raw.decode())
-                    model, effort = data.get("model"), data.get("model_reasoning_effort")
-                    if isinstance(model, str) and isinstance(effort, str):
-                        result = {"model": model, "effort": effort, "config_hash": hashlib.sha256(raw).hexdigest()}
-                        if isinstance(data.get("developer_instructions"), str):
-                            result["developer_instructions"] = data["developer_instructions"]
-                        return result
-        raise RuntimeError(f"Codex profile configuration is missing for {profile}")
+    def _profile(self, profile: str, role: SessionRole):
+        return self.profiles.resolve(profile, role)
+
+    @staticmethod
+    def _runtime_config(resolved, sandbox: dict[str, Any], cwd: str | None = None) -> dict[str, Any]:
+        config = json.loads(json.dumps(resolved.effective_config))
+        if sandbox.get("type") == "workspaceWrite":
+            config["sandbox_workspace_write"] = {
+                "network_access": False,
+                "writable_roots": sandbox.get("writableRoots", []),
+            }
+        if cwd:
+            config["projects"] = {str(Path(cwd).resolve()): {"trust_level": "trusted"}}
+        return config
+
+    @staticmethod
+    def _assert_controller_config(config: dict[str, Any]) -> None:
+        agents = config.get("agents") or {}
+        features = config.get("features") or {}
+        multi = features.get("multi_agent_v2")
+        if (
+            agents.get("enabled") is not False
+            or multi is not False
+            or features.get("collab") is not False
+            or config.get("include_collaboration_mode_instructions") is not False
+        ):
+            raise RuntimeError("CONFIGURATION_CONFLICT: controller-owned multi-agent capabilities are not disabled")
 
     def _sandbox(self, *, subject_id: str, cwd: str | None, writable: bool) -> dict[str, Any]:
         if not writable:

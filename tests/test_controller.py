@@ -235,8 +235,8 @@ os._exit(23)
             runtime.process.stdout.feed_data((json.dumps(message) + "\n").encode())
         runtime.process.stdout.feed_eof()
         await runtime._read_messages()
-        self.assertEqual(runtime.turn_usage["turn"], Usage(18, 6, 5, 1))
-        self.assertEqual(len(runtime.turn_usage_events["turn"]), 2)
+        self.assertEqual(runtime.thread_usage["thread"], Usage(18, 6, 5, 1))
+        self.assertEqual(runtime.usage_events(RuntimeTurnHandle("thread", "turn")), ())
 
     def test_dynamic_worker_tools_publish_strict_operation_schemas(self):
         specs = {item["name"]: item["inputSchema"] for item in AppServerRuntime._worker_tool_specs()}
@@ -282,7 +282,7 @@ os._exit(23)
         turn = self.con.execute("SELECT id FROM controller_turns ORDER BY started_at LIMIT 1").fetchone()[0]
         event = {"event_id": "duplicate", "usage": {"input_tokens": 1}, "raw": {"kind": "test"}}
         self.journal.record_usage_events(turn, (event, event))
-        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM controller_usage_events WHERE turn_id=? AND external_event_id='duplicate'", (turn,)).fetchone()[0], 1)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM controller_usage_events WHERE turn_id=?", (turn,)).fetchone()[0], 0)
 
     async def test_blocking_state_does_not_start_reviewer(self):
         ledger = FakeLedger()

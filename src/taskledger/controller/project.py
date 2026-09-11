@@ -9,7 +9,7 @@ from taskledger import git
 from taskledger.core import LedgerError, canonical, sha256
 
 from .journal import AgentSession, Journal
-from .model import PauseReason, RuntimeTurnHandle, SessionRole, SupervisorStatus
+from .model import DispatchReason, PauseReason, PromptPacket, RuntimeTurnHandle, SessionRole, SupervisorStatus
 from .supervisor import ConfigurationDrift, Supervisor, SupervisorConfig
 from .taskledger_adapter import TaskledgerLedgerAdapter
 from .worker_broker import WorkerBroker
@@ -36,12 +36,16 @@ class ProjectControllerConfig:
     reviewer_token_reserve: int = 0
     max_final_reviewer_turns: int = 2
     max_task_creator_turns: int = 2
+    max_total_task_creator_turns: int = 6
+    max_inflight_targets: int | None = None
     task_creator_profile: str = "taskledger_task_creator"
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
 
     def validate(self) -> None:
-        if min(self.max_workers, self.max_reviewers, self.max_total_worker_turns, self.max_total_reviewer_turns, self.max_final_reviewer_turns, self.max_task_creator_turns) <= 0:
+        if min(self.max_workers, self.max_reviewers, self.max_total_worker_turns, self.max_total_reviewer_turns, self.max_final_reviewer_turns, self.max_task_creator_turns, self.max_total_task_creator_turns) <= 0:
             raise ValueError("project controller capacities and semantic-job limits must be positive")
+        if self.max_inflight_targets is not None and self.max_inflight_targets <= 0:
+            raise ValueError("max_inflight_targets must be positive")
         if self.reviewer_token_reserve < 0:
             raise ValueError("reviewer_token_reserve must not be negative")
         if self.supervisor.max_total_tokens is not None and self.reviewer_token_reserve > self.supervisor.max_total_tokens:
@@ -49,7 +53,12 @@ class ProjectControllerConfig:
         self.supervisor.validate()
 
     def as_dict(self) -> dict[str, Any]:
-        return {**asdict(self), "supervisor": asdict(self.supervisor)}
+        return {**asdict(self), "max_inflight_targets": self.effective_max_inflight_targets, "supervisor": asdict(self.supervisor)}
+
+    @property
+    def effective_max_inflight_targets(self) -> int:
+        # One target can occupy each worker and reviewer slot concurrently.
+        return self.max_inflight_targets or self.max_workers + self.max_reviewers
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ProjectControllerConfig":
@@ -159,56 +168,78 @@ class ProjectController:
                 if unresolved:
                     return self._pause(PauseReason.RUNTIME_UNCERTAIN, f"unresolved external turns: {', '.join(unresolved)}")
                 probe.reconcile_resolved_reviewer_sessions()
-                while True:
-                    gate = self._global_gate()
-                    if gate:
-                        return self._pause(*gate)
-                    self._reconcile_targets()
-                    targets = self.journal.targets(self.run_id)
-                    remaining = [target for target in targets if target["state"] not in {"INTEGRATED", "CANCELLED"}]
-                    if not remaining:
-                        return await self._finalize_project()
-                    wave = min(target["wave"] for target in remaining)
-                    wave_targets = [target for target in remaining if target["wave"] == wave]
-                    runnable: list[dict[str, Any]] = []
-                    local_blocked: list[str] = []
-                    for target in wave_targets:
-                        task = self.service.con.execute("SELECT * FROM tasks WHERE id=?", (target["task_id"],)).fetchone()
-                        if target["state"] == "BLOCKED":
-                            local_blocked.append(target["task_id"])
-                            continue
-                        if task["state"] == "PLANNED":
-                            allowed, reason = self.service.task_eligible(self.project, task)
-                            if not allowed:
-                                if reason in {"PLAN_INVALID", "RECOVERY_REQUIRED", "INITIAL_COMMIT_REQUIRED"}:
-                                    return self._pause(PauseReason.PLAN_INVALID if reason == "PLAN_INVALID" else PauseReason.RUNTIME_UNCERTAIN, reason)
-                                if reason == "TASK_BLOCKED":
-                                    self.journal.set_target_state(self.run_id, target["task_id"], "BLOCKED")
-                                    local_blocked.append(target["task_id"])
-                                    continue
-                                if reason in {"DEPENDENCIES_UNSATISFIED", "ASSIGNMENT_ALREADY_ACTIVE", "TASK_STATE_INVALID"}:
-                                    if reason == "DEPENDENCIES_UNSATISFIED":
-                                        continue
-                        runnable.append(target)
-                    batch = self._compatible_batch(runnable)
-                    if not batch:
-                        return self._pause(PauseReason.BLOCKED, f"execution wave {wave} has no mechanically runnable targets; blocked={sorted(local_blocked)}")
-                    results = await asyncio.gather(*(self._run_target(target) for target in batch), return_exceptions=True)
-                    for target, result in zip(batch, results):
-                        if isinstance(result, Exception):
-                            return self._pause(PauseReason.INVALID_STATE, f"target {target['task_id']} failed: {result}")
-                        if result.status == SupervisorStatus.INTEGRATED:
-                            self.journal.set_target_state(self.run_id, target["task_id"], "INTEGRATED")
-                            continue
-                        reason = result.pause_reason or PauseReason.INVALID_STATE
-                        if reason == PauseReason.ESCALATION_REQUIRED and self._escalate(target):
-                            continue
-                        if reason in self.GLOBAL_PAUSES:
-                            return self._pause(reason, result.detail or reason.value)
-                        self.journal.set_target_state(self.run_id, target["task_id"], "BLOCKED")
+                return await self._run_loop()
             except Exception as exc:
                 self.journal.finish_run(self.run_id, "FAILED", reason=PauseReason.INVALID_STATE.value, detail=str(exc))
                 raise
+
+    async def _run_loop(self) -> ProjectControllerResult:
+        while True:
+            gate = self._global_gate()
+            if gate:
+                return self._pause(*gate)
+            self._reconcile_targets()
+            targets = self.journal.targets(self.run_id)
+            remaining = [target for target in targets if target["state"] not in {"INTEGRATED", "CANCELLED"}]
+            if not remaining:
+                result = await self._finalize_project()
+                if result is None:
+                    continue
+                return result
+            wave = min(target["wave"] for target in remaining)
+            runnable: list[dict[str, Any]] = []
+            blocked: list[str] = []
+            for target in remaining:
+                if target["wave"] != wave:
+                    self._target_event(target, "TARGET_WAITING_FOR_WAVE", "WAITING_FOR_WAVE")
+                    continue
+                if target["state"] == "BLOCKED":
+                    blocked.append(target["task_id"])
+                    self._target_event(target, "TARGET_BLOCKED", "BLOCKED_BY_TASKLEDGER")
+                    continue
+                task = self.service.con.execute("SELECT * FROM tasks WHERE id=?", (target["task_id"],)).fetchone()
+                if task["state"] == "PLANNED":
+                    allowed, reason = self.service.task_eligible(self.project, task)
+                    if not allowed:
+                        if reason in {"PLAN_INVALID", "RECOVERY_REQUIRED", "INITIAL_COMMIT_REQUIRED"}:
+                            return self._pause(PauseReason.PLAN_INVALID if reason == "PLAN_INVALID" else PauseReason.RUNTIME_UNCERTAIN, reason)
+                        if reason == "TASK_BLOCKED":
+                            self.journal.set_target_state(self.run_id, target["task_id"], "BLOCKED")
+                            blocked.append(target["task_id"])
+                            self._target_event(target, "TARGET_BLOCKED", "BLOCKED_BY_TASKLEDGER")
+                        elif reason == "DEPENDENCIES_UNSATISFIED":
+                            self._target_event(target, "TARGET_WAITING_FOR_DEPENDENCY", "WAITING_FOR_DEPENDENCY")
+                        continue
+                runnable.append(target)
+                self._target_event(target, "TARGET_BECAME_RUNNABLE", "RUNNABLE")
+            batch = self._compatible_batch(runnable)
+            selected = {target["task_id"] for target in batch}
+            for target in runnable:
+                if target["task_id"] not in selected:
+                    reason = "WAITING_FOR_WRITE_SURFACE" if any(
+                        self._write_surfaces_overlap(set(target["write_surfaces"]), set(item["write_surfaces"])) for item in batch
+                    ) else "WAITING_FOR_WORKER_CAPACITY"
+                    self._target_event(target, "TARGET_" + reason, reason)
+            if not batch:
+                return self._pause(PauseReason.BLOCKED, f"execution wave {wave} has no mechanically runnable targets; blocked={sorted(blocked)}")
+            results = await asyncio.gather(*(self._run_target(target) for target in batch), return_exceptions=True)
+            for target, result in zip(batch, results):
+                if isinstance(result, Exception):
+                    return self._pause(PauseReason.INVALID_STATE, f"target {target['task_id']} failed: {result}")
+                if result.status == SupervisorStatus.INTEGRATED:
+                    self.journal.set_target_state(self.run_id, target["task_id"], "INTEGRATED")
+                elif result.pause_reason == PauseReason.ESCALATION_REQUIRED and self._escalate(target):
+                    continue
+                elif result.pause_reason in self.GLOBAL_PAUSES:
+                    return self._pause(result.pause_reason, result.detail or result.pause_reason.value)
+                else:
+                    self.journal.set_target_state(self.run_id, target["task_id"], "BLOCKED")
+
+    def _target_event(self, target: dict[str, Any], event_type: str, reason: str) -> None:
+        self.journal.append_event(
+            run_id=self.run_id, scope_type="TARGET", scope_id=target["task_id"],
+            event_type=event_type, reason_code=reason, transition_only=True,
+        )
 
     def _global_gate(self) -> tuple[PauseReason, str] | None:
         valid, _, _ = self.service.plan_current(self.project["id"])
@@ -243,21 +274,32 @@ class ProjectController:
             task = self.service.con.execute("SELECT * FROM tasks WHERE id=?", (target["task_id"],)).fetchone()
             if task["state"] == "COMPLETED" and self.service.current_integration(self.project, task["id"]):
                 self.journal.set_target_state(self.run_id, task["id"], "INTEGRATED")
+                self._close_target_worker(target)
             elif task["state"] == "CANCELLED":
                 self.journal.set_target_state(self.run_id, task["id"], "CANCELLED")
-            elif target["assignment_id"] and task["state"] == "PLANNED" and target["worker_profile"] == "routine":
+                self._close_target_worker(target)
+            elif target["assignment_id"] and task["state"] == "PLANNED":
                 assignment = self.service.con.execute(
                     "SELECT state,revocation_reason FROM assignments WHERE id=?", (target["assignment_id"],)
                 ).fetchone()
-                if assignment and assignment["state"] == "REVOKED" and assignment["revocation_reason"] == "routine rejection limit reached":
-                    session = self.journal.find_active_session(
-                        project_id=self.project["id"], role=SessionRole.WORKER.value, subject_id=target["assignment_id"]
-                    )
-                    if session:
-                        self.journal.close_session(session.id)
-                    self.journal.reroute_target(self.run_id, task["id"], profile="complex")
+                if assignment and assignment["state"] in {"REVOKED", "CLOSED"}:
+                    self._close_target_worker(target)
+                    profile = "complex" if (
+                        target["worker_profile"] == "routine"
+                        and assignment["revocation_reason"] == "routine rejection limit reached"
+                    ) else target["worker_profile"]
+                    self.journal.reroute_target(self.run_id, task["id"], profile=profile)
             elif target["state"] == "BLOCKED" and not self.service.blocking_reasons(self.project["id"], "assign", task_id=task["id"], assignment_id=target["assignment_id"]):
                 self.journal.set_target_state(self.run_id, task["id"], "ACTIVE" if target["assignment_id"] else "QUEUED")
+
+    def _close_target_worker(self, target: dict[str, Any]) -> None:
+        if not target.get("assignment_id"):
+            return
+        session = self.journal.find_active_session(
+            project_id=self.project["id"], role=SessionRole.WORKER.value, subject_id=target["assignment_id"]
+        )
+        if session:
+            self.journal.close_session(session.id)
 
     def _restore_worker_tools_for_recovery(self) -> None:
         for target in self.journal.targets(self.run_id):
@@ -273,7 +315,7 @@ class ProjectController:
     def _compatible_batch(self, targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         chosen: list[dict[str, Any]] = []
         surfaces: set[str] = set()
-        limit = self.config.max_workers + self.config.max_reviewers
+        limit = self.config.effective_max_inflight_targets
         for target in sorted(targets, key=lambda item: item["task_id"]):
             own = set(target["write_surfaces"])
             if chosen and (not target["parallel_safe"] or any(not item["parallel_safe"] for item in chosen)):
@@ -354,7 +396,7 @@ class ProjectController:
         self.journal.reroute_target(self.run_id, target["task_id"], profile="complex")
         return True
 
-    async def _finalize_project(self) -> ProjectControllerResult:
+    async def _finalize_project(self) -> ProjectControllerResult | None:
         valid, fingerprint, _ = self.service.plan_current(self.project["id"])
         if not valid or not fingerprint:
             return self._pause(PauseReason.PLAN_INVALID, "plan changed before final integrated review")
@@ -410,13 +452,13 @@ class ProjectController:
         self.journal.finish_run(self.run_id, "COMPLETED")
         return ProjectControllerResult("COMPLETED", self.run_id, integrated_tasks=sum(t["state"] == "INTEGRATED" for t in self.journal.targets(self.run_id)), usage=self.journal.usage_report(run_id=self.run_id))
 
-    async def _create_corrections(self, review_id: str, verdict: dict[str, Any]) -> ProjectControllerResult:
+    async def _create_corrections(self, review_id: str, verdict: dict[str, Any]) -> ProjectControllerResult | None:
         try:
             payload, turn_id = await self._semantic_job(
                 role=SessionRole.TASK_CREATOR,
                 profile=self.config.task_creator_profile,
                 subject_id=review_id,
-                prompt="Create the smallest bounded correction tasks for these final-review implementation defects. Do not change product behavior. Return only structured tasks.\n\n" + canonical({"findings": verdict["findings"], "plan": self.service.plan_object(self.project["id"])}),
+                prompt="Create the smallest bounded correction tasks for these final-review implementation defects. Do not change product behavior. Return only structured tasks.\n\n" + canonical(self._correction_projection(verdict)),
                 schema=self._correction_schema(),
                 max_turns=self.config.max_task_creator_turns,
                 prompt_kind="correction-planning",
@@ -450,49 +492,7 @@ class ProjectController:
         } for task in tasks])
         self.journal.consume_turn(turn_id)
         self._close_session(SessionRole.TASK_CREATOR, review_id)
-        return await self.run_without_lock()
-
-    async def run_without_lock(self) -> ProjectControllerResult:
-        """Continue after correction planning while retaining the current project lock."""
-        while True:
-            gate = self._global_gate()
-            if gate:
-                return self._pause(*gate)
-            self._reconcile_targets()
-            targets = self.journal.targets(self.run_id)
-            remaining = [target for target in targets if target["state"] not in {"INTEGRATED", "CANCELLED"}]
-            if not remaining:
-                return await self._finalize_project()
-            wave = min(target["wave"] for target in remaining)
-            runnable = []
-            for target in remaining:
-                if target["wave"] != wave or target["state"] == "BLOCKED":
-                    continue
-                task = self.service.con.execute("SELECT * FROM tasks WHERE id=?", (target["task_id"],)).fetchone()
-                if task["state"] == "PLANNED":
-                    allowed, reason = self.service.task_eligible(self.project, task)
-                    if not allowed:
-                        if reason == "TASK_BLOCKED":
-                            self.journal.set_target_state(self.run_id, target["task_id"], "BLOCKED")
-                        if reason in {"PLAN_INVALID", "RECOVERY_REQUIRED", "INITIAL_COMMIT_REQUIRED"}:
-                            return self._pause(PauseReason.PLAN_INVALID if reason == "PLAN_INVALID" else PauseReason.RUNTIME_UNCERTAIN, reason)
-                        continue
-                runnable.append(target)
-            batch = self._compatible_batch(runnable)
-            if not batch:
-                return self._pause(PauseReason.BLOCKED, f"correction wave {wave} has no runnable targets")
-            results = await asyncio.gather(*(self._run_target(target) for target in batch), return_exceptions=True)
-            for target, result in zip(batch, results):
-                if isinstance(result, Exception):
-                    return self._pause(PauseReason.INVALID_STATE, f"target {target['task_id']} failed: {result}")
-                if result.status == SupervisorStatus.INTEGRATED:
-                    self.journal.set_target_state(self.run_id, target["task_id"], "INTEGRATED")
-                elif result.pause_reason == PauseReason.ESCALATION_REQUIRED and self._escalate(target):
-                    continue
-                elif result.pause_reason in self.GLOBAL_PAUSES:
-                    return self._pause(result.pause_reason, result.detail or result.pause_reason.value)
-                else:
-                    self.journal.set_target_state(self.run_id, target["task_id"], "BLOCKED")
+        return None
 
     async def _semantic_job(self, *, role: SessionRole, profile: str, subject_id: str, prompt: str, schema: dict[str, Any], max_turns: int, prompt_kind: str, validator) -> tuple[Any, str]:
         cwd = self.project["repository_root"]
@@ -503,7 +503,11 @@ class ProjectController:
         if session:
             if session.config_hash != config_hash or session.runtime_identity != identity_dict:
                 raise ConfigurationDrift("persisted semantic-job runtime configuration differs from the resolved profile")
-            await self.runtime.resume_session(thread_id=session.thread_id, role=role, profile=profile, subject_id=subject_id, cwd=cwd, writable=False)
+            await self.runtime.resume_session(
+                thread_id=session.thread_id, role=role, profile=profile, subject_id=subject_id,
+                cwd=cwd, writable=False,
+                cumulative_usage_baseline=self.journal.latest_cumulative_usage(session.id),
+            )
         else:
             runtime_session = await self.runtime.start_session(role=role, profile=profile, subject_id=subject_id, cwd=cwd, writable=False)
             if runtime_session.identity and runtime_session.identity != identity:
@@ -513,6 +517,7 @@ class ProjectController:
                 subject_id=subject_id, external_thread_id=runtime_session.thread_id, config_hash=config_hash,
                 runtime_identity=identity_dict,
             )
+        original_prompt = prompt
         while self.journal.session_turn_count(session.id) < max_turns:
             terminal = self.journal.terminal_unconsumed_turn(session.id)
             if terminal is None:
@@ -521,6 +526,12 @@ class ProjectController:
                     reviewer_roles = (SessionRole.REVIEWER.value, SessionRole.REQUIREMENT_REVIEWER.value)
                     if self.journal.run_turn_count(run_id=self.run_id, roles=reviewer_roles) >= limit:
                         raise SemanticJobBudgetExhausted("project reviewer turn budget exhausted")
+                if role == SessionRole.TASK_CREATOR:
+                    limit = self.config.max_total_task_creator_turns + self.journal.granted_amount(
+                        run_id=self.run_id, kind="TASK_CREATOR_TURNS"
+                    )
+                    if self.journal.run_turn_count(run_id=self.run_id, roles=(SessionRole.TASK_CREATOR.value,)) >= limit:
+                        raise SemanticJobBudgetExhausted("project task creator turn budget exhausted")
                 if self.config.supervisor.max_total_tokens is not None:
                     if self.journal.missing_usage_count(run_id=self.run_id):
                         raise SemanticJobBudgetExhausted("token admission is unsafe because completed turn usage is missing")
@@ -534,11 +545,24 @@ class ProjectController:
                 )
                 if self.journal.elapsed_seconds(run_id=self.run_id) >= elapsed_limit:
                     raise SemanticJobBudgetExhausted("project elapsed-time budget exhausted")
-                local_id = self.journal.begin_turn(session.id, prompt_kind)
+                retry = self.journal.session_completed_turn_count(session.id) > 0
+                turn_prompt = (
+                    "Your previous result did not satisfy the required output schema. Return a corrected structured result only. Do not redo the review or planning unless necessary."
+                    if retry else original_prompt
+                )
+                reason = DispatchReason.STRUCTURED_OUTPUT_RETRY if retry else (
+                    DispatchReason.FINAL_REVIEW if role == SessionRole.REQUIREMENT_REVIEWER else DispatchReason.CORRECTION_PLANNING
+                )
+                packet = PromptPacket(
+                    text=turn_prompt, dispatch_reason=reason,
+                    controller_payload_bytes=len(turn_prompt.encode("utf-8")),
+                    output_schema_bytes=len(canonical(schema).encode("utf-8")),
+                )
+                local_id = self.journal.begin_turn(session.id, prompt_kind, packet=packet)
                 handle = None
                 try:
                     async with self.reviewer_capacity:
-                        handle = await self.runtime.start_turn(thread_id=session.thread_id, prompt=prompt, output_schema=schema)
+                        handle = await self.runtime.start_turn(thread_id=session.thread_id, prompt=turn_prompt, output_schema=schema)
                         self.journal.acknowledge_turn(local_id, handle)
                         result = await asyncio.wait_for(self.runtime.wait_turn(handle), timeout=self.config.supervisor.turn_timeout_seconds)
                     self.journal.record_usage_events(local_id, self.runtime.usage_events(handle))
@@ -563,7 +587,72 @@ class ProjectController:
         raise SemanticJobInvalidOutput("semantic job did not produce valid structured output within its turn budget")
 
     def _final_review_prompt(self, oid: str, fingerprint: str, requirements: list[dict[str, Any]]) -> str:
-        return "Independently review the complete integrated canonical repository against every active requirement and registered specification. Inspect cross-task seams and actual code. Classify implementation defects separately from genuine product ambiguity. Return every requirement exactly once.\n\n" + canonical({"canonical_oid": oid, "plan_fingerprint": fingerprint, "requirements": requirements, "plan": self.service.plan_object(self.project["id"])})
+        return "Independently review the complete integrated canonical repository against every active requirement and registered specification. Inspect cross-task seams and actual code. Classify implementation defects separately from genuine product ambiguity. Return every requirement exactly once.\n\n" + canonical(self._final_review_projection(oid, fingerprint, requirements))
+
+    def _final_review_projection(self, oid: str, fingerprint: str, requirements: list[dict[str, Any]]) -> dict[str, Any]:
+        plan = self.service.plan_object(self.project["id"])
+        tasks = {task["id"]: task for task in plan["tasks"]}
+        projected_requirements = []
+        mapping: list[dict[str, Any]] = []
+        for requirement in plan["requirements"]:
+            covering = sorted(task["id"] for task in tasks.values() if requirement["id"] in task["requirements"] and task["state"] != "CANCELLED")
+            integrated = []
+            for task_id in covering:
+                attempt = self.service.current_integration(self.project, task_id)
+                if attempt:
+                    integrated.append({"task_id": task_id, "canonical_oid": attempt["canonical_after_oid"]})
+                mapping.append({"task_id": task_id, "requirement_id": requirement["id"]})
+            projected_requirements.append({
+                "id": requirement["id"], "statement": requirement["statement"], "details": requirement["details"],
+                "implementation_required": requirement["implementation_required"], "sources": requirement["sources"],
+                "covering_task_ids": covering, "integrated_tasks": integrated,
+            })
+        return {
+            "canonical_oid": oid, "plan_fingerprint": fingerprint,
+            "requirements": projected_requirements,
+            "task_requirement_mapping": sorted(mapping, key=lambda item: (item["task_id"], item["requirement_id"])),
+            "specifications": [
+                {"id": item["id"], "relative_path": item["relative_path"], "content_hash": item["content_hash"]}
+                for item in plan["specifications"] if item["lifecycle"] == "ACTIVE"
+            ],
+        }
+
+    def _correction_projection(self, verdict: dict[str, Any]) -> dict[str, Any]:
+        affected = sorted({rid for finding in verdict["findings"] for rid in finding["requirement_ids"]})
+        plan = self.service.plan_object(self.project["id"])
+        all_tasks = {task["id"]: task for task in plan["tasks"]}
+        affected_task_ids = {
+            task["id"] for task in plan["tasks"]
+            if set(task["requirements"]).intersection(affected)
+        }
+        dependency_ids = {
+            dependency
+            for task_id in affected_task_ids
+            for dependency in all_tasks[task_id]["dependencies"]
+        }
+        relevant_task_ids = affected_task_ids | dependency_ids
+        tasks = [
+            {
+                "id": task["id"], "state": task["state"],
+                "requirements": task["requirements"], "dependencies": task["dependencies"],
+                "relationship": "AFFECTED" if task["id"] in affected_task_ids else "DEPENDENCY",
+            }
+            for task in plan["tasks"] if task["id"] in relevant_task_ids
+        ]
+        policy = [
+            {key: target[key] for key in ("task_id", "wave", "worker_profile", "parallel_safe", "write_surfaces")}
+            for target in self.journal.targets(self.run_id) if target["task_id"] in relevant_task_ids
+        ]
+        return {
+            "findings": verdict["findings"],
+            "affected_requirements": [req for req in plan["requirements"] if req["id"] in affected],
+            "relevant_tasks": tasks,
+            "execution_policy": policy,
+            "active_specifications": [
+                {"id": spec["id"], "relative_path": spec["relative_path"], "content_hash": spec["content_hash"]}
+                for spec in plan["specifications"] if spec["lifecycle"] == "ACTIVE"
+            ],
+        }
 
     @staticmethod
     def _final_review_schema(requirements: list[dict[str, Any]]) -> dict[str, Any]:

@@ -12,7 +12,7 @@ from typing import Any, Iterator
 from taskledger.core import canonical, new_id, now
 from taskledger.db import transaction
 
-from .model import RuntimeTurnHandle, RuntimeTurnResult, Usage
+from .model import DispatchReason, PromptPacket, RuntimeTurnHandle, RuntimeTurnResult, Usage, UsagePrecision
 
 try:
     import fcntl
@@ -105,6 +105,7 @@ class Journal:
                 "INSERT INTO controller_runs(id,project_id,mode,state,config_json,created_at,started_at) VALUES(?,?,?,?,?,?,?)",
                 (run_id, project_id, mode, "RUNNING", canonical(config), stamp, stamp),
             )
+            self._append_event_locked(run_id, "RUN", run_id, "RUN_STARTED", "INITIAL_START", None, {})
         return run_id
 
     def create_project_run(self, project_id: str, *, config: dict[str, Any], targets: list[dict[str, Any]]) -> str:
@@ -120,6 +121,7 @@ class Journal:
                 "INSERT INTO controller_runs(id,project_id,mode,state,config_json,created_at,started_at) VALUES(?,?,?,?,?,?,?)",
                 (run_id, project_id, "PROJECT", "RUNNING", canonical(config), stamp, stamp),
             )
+            self._append_event_locked(run_id, "RUN", run_id, "RUN_STARTED", "INITIAL_START", None, {})
             for target in targets:
                 self.con.execute(
                     "INSERT INTO controller_run_targets(run_id,task_id,wave,worker_profile,parallel_safe,write_surfaces_json,assignment_id,state) VALUES(?,?,?,?,?,?,NULL,'QUEUED')",
@@ -144,6 +146,7 @@ class Journal:
                 "UPDATE controller_runs SET state='RUNNING',pause_reason=NULL,pause_detail=NULL,finished_at=NULL WHERE id=?",
                 (run_id,),
             )
+            self._append_event_locked(run_id, "RUN", run_id, "RUN_RESUMED", "EXPLICIT_RESUME", None, {})
         result = dict(row)
         result["config"] = json.loads(result.pop("config_json"))
         return result
@@ -155,6 +158,10 @@ class Journal:
             self.con.execute(
                 "UPDATE controller_runs SET state=?,pause_reason=?,pause_detail=?,finished_at=? WHERE id=?",
                 (state, reason, detail, now(), run_id),
+            )
+            self._append_event_locked(
+                run_id, "RUN", run_id, "RUN_" + state,
+                reason, None, {"detail_hash": hashlib.sha256((detail or "").encode()).hexdigest() if detail else None},
             )
 
     def run(self, run_id: str) -> dict[str, Any] | None:
@@ -209,7 +216,16 @@ class Journal:
                 ("UNCERTAIN" if uncertain else "CLOSED", now(), session_id),
             )
 
-    def begin_turn(self, session_id: str, prompt_kind: str, *, progress_before: str | None = None) -> str:
+    def begin_turn(
+        self,
+        session_id: str,
+        prompt_kind: str,
+        *,
+        progress_before: str | None = None,
+        packet: PromptPacket | None = None,
+        dispatch_reason: DispatchReason | None = None,
+        output_schema_bytes: int = 0,
+    ) -> str:
         turn_id = new_id()
         with transaction(self.con):
             pending = self.con.execute(
@@ -221,9 +237,26 @@ class Journal:
             sequence = self.con.execute(
                 "SELECT COALESCE(MAX(sequence),0)+1 FROM controller_turns WHERE session_id=?", (session_id,)
             ).fetchone()[0]
+            reason = dispatch_reason or (packet.dispatch_reason if packet else None)
             self.con.execute(
-                "INSERT INTO controller_turns(id,session_id,sequence,state,prompt_kind,progress_before,started_at) VALUES(?,?,?,?,?,?,?)",
-                (turn_id, session_id, sequence, "DISPATCHING", prompt_kind, progress_before, now()),
+                "INSERT INTO controller_turns(id,session_id,sequence,state,prompt_kind,progress_before,dispatch_reason,prompt_builder_version,controller_payload_bytes,static_assignment_bytes,dynamic_state_bytes,correction_bytes,output_schema_bytes,dynamic_state_hash,context_hashes_json,started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    turn_id, session_id, sequence, "DISPATCHING", prompt_kind, progress_before,
+                    reason.value if reason else None, packet.prompt_builder_version if packet else "controller-prompt-v2",
+                    packet.controller_payload_bytes if packet else 0,
+                    packet.static_assignment_bytes if packet else 0,
+                    packet.dynamic_state_bytes if packet else 0,
+                    packet.correction_bytes if packet else 0,
+                    output_schema_bytes or (packet.output_schema_bytes if packet else 0),
+                    packet.dynamic_state_hash if packet else None,
+                    canonical(packet.context_hashes if packet else {}), now(),
+                ),
+            )
+            session = self.con.execute("SELECT run_id,role,subject_id FROM controller_sessions WHERE id=?", (session_id,)).fetchone()
+            self._append_event_locked(
+                session["run_id"], "SESSION", session_id, "TURN_DISPATCHED",
+                reason.value if reason else None, turn_id,
+                {"role": session["role"], "subject_id": session["subject_id"], "prompt_kind": prompt_kind},
             )
         return turn_id
 
@@ -243,44 +276,87 @@ class Journal:
                 raise RuntimeError("turn acknowledgement is stale")
 
     def complete_turn(self, local_turn_id: str, result: RuntimeTurnResult) -> None:
-        payload = canonical(result.structured_output) if result.structured_output is not None else None
         with transaction(self.con):
             row = self.con.execute(
-                "SELECT t.*,s.external_thread_id FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE t.id=?",
+                "SELECT t.*,s.external_thread_id,s.role FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE t.id=?",
                 (local_turn_id,),
             ).fetchone()
             if not row or row["state"] not in {"RUNNING", "COMPLETED"}:
                 raise RuntimeError("completed turn is not reconcilable")
             if row["external_turn_id"] != result.handle.turn_id or row["external_thread_id"] != result.handle.thread_id:
                 raise RuntimeError("completed turn identity does not match")
+            payload = (
+                canonical(result.structured_output)
+                if row["role"] != "WORKER" and result.structured_output is not None
+                else None
+            )
+            response_hash = hashlib.sha256((result.final_response or "").encode()).hexdigest() if result.final_response is not None else None
+            before_json = canonical(result.cumulative_before.__dict__) if result.cumulative_before is not None else None
+            after_json = canonical(result.cumulative_after.__dict__) if result.cumulative_after is not None else None
+            usage_missing = result.usage_missing or result.usage_precision == UsagePrecision.MISSING
             if row["state"] == "COMPLETED":
                 persisted = (
-                    row["result_json"], row["final_response"], row["input_tokens"], row["cached_input_tokens"],
-                    row["output_tokens"], row["reasoning_tokens"], row["usage_missing"],
+                    row["result_json"], row["response_hash"], row["input_tokens"], row["cached_input_tokens"],
+                    row["output_tokens"], row["reasoning_tokens"], row["cache_write_input_tokens"], row["usage_precision"], row["usage_missing"],
                 )
                 incoming = (
-                    payload, result.final_response, result.usage.input_tokens, result.usage.cached_input_tokens,
-                    result.usage.output_tokens, result.usage.reasoning_tokens, int(result.usage_missing),
+                    payload, response_hash, result.usage.input_tokens, result.usage.cached_input_tokens,
+                    result.usage.output_tokens, result.usage.reasoning_tokens, result.usage.cache_write_input_tokens,
+                    result.usage_precision.value, int(usage_missing),
                 )
                 if persisted != incoming:
                     raise RuntimeError("completed turn result conflicts with the persisted result")
                 return
             self.con.execute(
-                "UPDATE controller_turns SET state='COMPLETED',result_json=?,final_response=?,input_tokens=?,cached_input_tokens=?,output_tokens=?,reasoning_tokens=?,usage_missing=?,finished_at=? WHERE id=?",
-                (payload, result.final_response, result.usage.input_tokens, result.usage.cached_input_tokens,
-                 result.usage.output_tokens, result.usage.reasoning_tokens, int(result.usage_missing), now(), local_turn_id),
+                "UPDATE controller_turns SET state='COMPLETED',result_json=?,final_response=NULL,response_hash=?,input_tokens=?,cached_input_tokens=?,cache_write_input_tokens=?,output_tokens=?,reasoning_tokens=?,usage_precision=?,usage_before_json=?,usage_after_json=?,exact_response_count=?,usage_missing=?,finished_at=? WHERE id=?",
+                (payload, response_hash, result.usage.input_tokens, result.usage.cached_input_tokens,
+                 result.usage.cache_write_input_tokens, result.usage.output_tokens, result.usage.reasoning_tokens,
+                 result.usage_precision.value, before_json, after_json, result.exact_response_count,
+                 int(usage_missing), now(), local_turn_id),
             )
 
     def record_usage_events(self, local_turn_id: str, events: tuple[dict[str, Any], ...]) -> None:
+        """Legacy compatibility hook. New runs intentionally persist no raw provider events."""
+        return None
+
+    def latest_context_hashes(self, session_id: str) -> dict[str, str]:
+        row = self.con.execute(
+            "SELECT context_hashes_json FROM controller_turns WHERE session_id=? AND state='COMPLETED' ORDER BY sequence DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return json.loads(row[0]) if row and row[0] else {}
+
+    def latest_cumulative_usage(self, session_id: str) -> Usage | None:
+        row = self.con.execute(
+            "SELECT usage_after_json FROM controller_turns "
+            "WHERE session_id=? AND state='COMPLETED' AND usage_after_json IS NOT NULL "
+            "ORDER BY sequence DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return Usage(**json.loads(row[0])) if row and row[0] else None
+
+    def append_event(
+        self, *, run_id: str, scope_type: str, scope_id: str, event_type: str,
+        reason_code: str | None = None, local_turn_id: str | None = None,
+        attributes: dict[str, Any] | None = None, transition_only: bool = False,
+    ) -> bool:
         with transaction(self.con):
-            for event in events:
-                raw = canonical(event)
-                event_id = str(event.get("event_id") or hashlib.sha256(raw.encode()).hexdigest())
-                usage = event.get("usage") or {}
-                self.con.execute(
-                    "INSERT OR IGNORE INTO controller_usage_events(id,turn_id,external_event_id,raw_json,input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (new_id(), local_turn_id, event_id, raw, usage.get("input_tokens"), usage.get("cached_input_tokens"), usage.get("output_tokens"), usage.get("reasoning_tokens"), now()),
-                )
+            if transition_only:
+                last = self.con.execute(
+                    "SELECT event_type,reason_code,small_attributes_json FROM controller_events WHERE run_id=? AND scope_type=? AND scope_id=? ORDER BY sequence DESC LIMIT 1",
+                    (run_id, scope_type, scope_id),
+                ).fetchone()
+                attrs = canonical(attributes or {})
+                if last and (last["event_type"], last["reason_code"], last["small_attributes_json"]) == (event_type, reason_code, attrs):
+                    return False
+            self._append_event_locked(run_id, scope_type, scope_id, event_type, reason_code, local_turn_id, attributes or {})
+        return True
+
+    def _append_event_locked(self, run_id, scope_type, scope_id, event_type, reason_code, local_turn_id, attributes):
+        self.con.execute(
+            "INSERT INTO controller_events(run_id,scope_type,scope_id,event_type,reason_code,local_turn_id,small_attributes_json,occurred_at) VALUES(?,?,?,?,?,?,?,?)",
+            (run_id, scope_type, scope_id, event_type, reason_code, local_turn_id, canonical(attributes), now()),
+        )
 
     def fail_turn(self, local_turn_id: str, error: str, *, uncertain: bool) -> None:
         with transaction(self.con):
@@ -318,6 +394,12 @@ class Journal:
 
     def session_turn_count(self, session_id: str) -> int:
         return self.con.execute("SELECT COUNT(*) FROM controller_turns WHERE session_id=?", (session_id,)).fetchone()[0]
+
+    def session_completed_turn_count(self, session_id: str) -> int:
+        return self.con.execute(
+            "SELECT COUNT(*) FROM controller_turns WHERE session_id=? AND state='COMPLETED'",
+            (session_id,),
+        ).fetchone()[0]
 
     def run_turn_count(self, *, run_id: str, roles: tuple[str, ...]) -> int:
         if not roles:
@@ -360,7 +442,7 @@ class Journal:
 
     def usage(self, *, run_id: str) -> Usage:
         row = self.con.execute(
-            "SELECT COALESCE(SUM(input_tokens),0),COALESCE(SUM(cached_input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(reasoning_tokens),0) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=?",
+            "SELECT COALESCE(SUM(input_tokens),0),COALESCE(SUM(cached_input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(reasoning_tokens),0),COALESCE(SUM(cache_write_input_tokens),0) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=?",
             (run_id,),
         ).fetchone()
         return Usage(*map(int, row))
@@ -372,7 +454,11 @@ class Journal:
             "SELECT COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state='COMPLETED'",
             (run_id,),
         ).fetchone()[0])
-        return {**usage.__dict__, "completed_turns": turns, "missing_usage_turns": missing, "complete": missing == 0}
+        precision = {row[0]: int(row[1]) for row in self.con.execute(
+            "SELECT usage_precision,COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state='COMPLETED' GROUP BY usage_precision ORDER BY usage_precision",
+            (run_id,),
+        )}
+        return {**usage.__dict__, "completed_turns": turns, "missing_usage_turns": missing, "precision": precision, "complete": missing == 0}
 
     def add_targets(self, run_id: str, targets: list[dict[str, Any]]) -> None:
         with transaction(self.con):
@@ -451,7 +537,7 @@ class Journal:
             )
 
     def grant_budget(self, *, run_id: str, kind: str, amount: int, reason: str, principal_id: str) -> str:
-        if kind not in {"WORKER_TURNS", "REVIEWER_TURNS", "TOKENS", "ELAPSED_SECONDS"} or not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+        if kind not in {"WORKER_TURNS", "REVIEWER_TURNS", "TASK_CREATOR_TURNS", "TOKENS", "ELAPSED_SECONDS"} or not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
             raise ValueError("invalid controller budget grant")
         grant_id = new_id()
         with transaction(self.con):
@@ -487,7 +573,11 @@ class Journal:
                 RuntimeTurnHandle(row["external_thread_id"], row["external_turn_id"]),
                 structured_output=structured,
                 final_response=row["final_response"],
-                usage=Usage(row["input_tokens"], row["cached_input_tokens"], row["output_tokens"], row["reasoning_tokens"]),
+                usage=Usage(row["input_tokens"], row["cached_input_tokens"], row["output_tokens"], row["reasoning_tokens"], row["cache_write_input_tokens"]),
                 usage_missing=bool(row["usage_missing"]),
+                usage_precision=UsagePrecision(row["usage_precision"]),
+                cumulative_before=Usage(**json.loads(row["usage_before_json"])) if row["usage_before_json"] else None,
+                cumulative_after=Usage(**json.loads(row["usage_after_json"])) if row["usage_after_json"] else None,
+                exact_response_count=row["exact_response_count"],
             )
         return TerminalTurn(row["id"], row["session_id"], row["state"], row["prompt_kind"], row["external_thread_id"], row["external_turn_id"], result, row["error"], row["progress_before"], row["progress_after"], None if row["progressed"] is None else bool(row["progressed"]))

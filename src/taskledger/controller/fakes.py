@@ -15,6 +15,7 @@ from .model import (
     RuntimeTurnResult,
     SessionRole,
     Usage,
+    UsagePrecision,
 )
 
 
@@ -43,6 +44,8 @@ class FakeRuntime:
         self.turns_started = 0
         self.worker_tools: dict[str, Any] = {}
         self.identity_overrides: dict[tuple[SessionRole, str], RuntimeIdentity] = {}
+        self.prompts: list[dict[str, Any]] = []
+        self.provider_histories: dict[str, dict[str, Any] | Exception] = {}
 
     def session_identity(self, *, role, profile, subject_id, cwd, writable):
         return self.identity_overrides.get(
@@ -62,7 +65,7 @@ class FakeRuntime:
         self.roles[thread] = role
         return RuntimeSession(thread, self.session_identity(role=role, profile=profile, subject_id=subject_id, cwd=cwd, writable=writable))
 
-    async def resume_session(self, *, thread_id, role, profile, subject_id, cwd, writable):
+    async def resume_session(self, *, thread_id, role, profile, subject_id, cwd, writable, cumulative_usage_baseline=None):
         if thread_id not in self.roles:
             raise RuntimeError("thread does not exist")
         return RuntimeSession(thread_id, self.session_identity(role=role, profile=profile, subject_id=subject_id, cwd=cwd, writable=writable))
@@ -72,6 +75,7 @@ class FakeRuntime:
         if not self.scripts[role]:
             raise RuntimeError("no scripted turn")
         self.turns_started += 1
+        self.prompts.append({"thread_id": thread_id, "prompt": prompt, "output_schema": output_schema})
         turn_id = f"turn-{self.turns_started}"
         self.turns[(thread_id, turn_id)] = ("RUNNING", self.scripts[role].pop(0))
         return RuntimeTurnHandle(thread_id, turn_id)
@@ -87,7 +91,8 @@ class FakeRuntime:
             script.effect()
         self.turns[(handle.thread_id, handle.turn_id)] = ("COMPLETED", script)
         structured = script.structured_output() if callable(script.structured_output) else script.structured_output
-        return RuntimeTurnResult(handle, structured, script.final_response, script.usage, script.usage_missing)
+        precision = UsagePrecision.MISSING if script.usage_missing else UsagePrecision.THREAD_TOTAL_DELTA
+        return RuntimeTurnResult(handle, structured, script.final_response, script.usage, script.usage_missing, precision)
 
     async def inspect_turn(self, handle):
         state, script = self.turns.get((handle.thread_id, handle.turn_id), ("UNKNOWN", TurnScript()))
@@ -97,7 +102,8 @@ class FakeRuntime:
             return RuntimeTurnInspection("FAILED", error=script.failure)
         if state == "COMPLETED":
             structured = script.structured_output() if callable(script.structured_output) else script.structured_output
-            return RuntimeTurnInspection("COMPLETED", RuntimeTurnResult(handle, structured, script.final_response, script.usage, script.usage_missing))
+            precision = UsagePrecision.MISSING if script.usage_missing else UsagePrecision.THREAD_TOTAL_DELTA
+            return RuntimeTurnInspection("COMPLETED", RuntimeTurnResult(handle, structured, script.final_response, script.usage, script.usage_missing, precision))
         return RuntimeTurnInspection("RUNNING")
 
     def usage_events(self, handle):
@@ -106,6 +112,12 @@ class FakeRuntime:
             return ()
         usage = result[1].usage
         return ({"event_id": f"fake-{handle.turn_id}", "usage": usage.__dict__, "raw": {"turn_id": handle.turn_id}},)
+
+    async def provider_history(self, thread_id):
+        value = self.provider_histories.get(thread_id, {"turns": [], "items": []})
+        if isinstance(value, Exception):
+            raise value
+        return value
 
 
 class FakeLedger:

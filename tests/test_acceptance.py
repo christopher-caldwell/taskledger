@@ -162,7 +162,7 @@ class TaskledgerAcceptance(unittest.TestCase):
 
         migrated=connect(prior_schema_home)
         self.assertEqual(migrated.execute("SELECT worker_profile FROM assignments").fetchone()[0],"complex")
-        self.assertEqual([row[0] for row in migrated.execute("SELECT version FROM schema_migrations ORDER BY version")],[1,2,3,4,5,6])
+        self.assertEqual([row[0] for row in migrated.execute("SELECT version FROM schema_migrations ORDER BY version")],[1,2,3,4,5,6,7])
         migrated.close()
 
     def test_task_create_confirms_success_after_post_commit_error(self):

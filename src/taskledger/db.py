@@ -101,8 +101,12 @@ CREATE TABLE IF NOT EXISTS controller_turns(
  id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES controller_sessions(id),sequence INTEGER NOT NULL,
  state TEXT NOT NULL CHECK(state IN ('DISPATCHING','RUNNING','COMPLETED','FAILED','UNCERTAIN')),prompt_kind TEXT NOT NULL,
  external_turn_id TEXT,result_json TEXT,final_response TEXT,error TEXT,progress_before TEXT,progress_after TEXT,
- progressed INTEGER CHECK(progressed IN (0,1)),input_tokens INTEGER NOT NULL DEFAULT 0,cached_input_tokens INTEGER NOT NULL DEFAULT 0,
- output_tokens INTEGER NOT NULL DEFAULT 0,reasoning_tokens INTEGER NOT NULL DEFAULT 0,usage_missing INTEGER NOT NULL DEFAULT 0 CHECK(usage_missing IN (0,1)),
+ progressed INTEGER CHECK(progressed IN (0,1)),dispatch_reason TEXT,prompt_builder_version TEXT,controller_payload_bytes INTEGER NOT NULL DEFAULT 0,
+ static_assignment_bytes INTEGER NOT NULL DEFAULT 0,dynamic_state_bytes INTEGER NOT NULL DEFAULT 0,correction_bytes INTEGER NOT NULL DEFAULT 0,
+ output_schema_bytes INTEGER NOT NULL DEFAULT 0,dynamic_state_hash TEXT,context_hashes_json TEXT NOT NULL DEFAULT '{}',response_hash TEXT,
+ input_tokens INTEGER NOT NULL DEFAULT 0,cached_input_tokens INTEGER NOT NULL DEFAULT 0,cache_write_input_tokens INTEGER NOT NULL DEFAULT 0,
+ output_tokens INTEGER NOT NULL DEFAULT 0,reasoning_tokens INTEGER NOT NULL DEFAULT 0,usage_precision TEXT NOT NULL DEFAULT 'MISSING',
+ usage_before_json TEXT,usage_after_json TEXT,exact_response_count INTEGER NOT NULL DEFAULT 0,usage_missing INTEGER NOT NULL DEFAULT 0 CHECK(usage_missing IN (0,1)),
  started_at TEXT NOT NULL,finished_at TEXT,consumed_at TEXT,
  UNIQUE(session_id,sequence));
 CREATE INDEX IF NOT EXISTS controller_turns_open ON controller_turns(state) WHERE state IN ('DISPATCHING','RUNNING','UNCERTAIN');
@@ -112,12 +116,17 @@ CREATE TABLE IF NOT EXISTS controller_usage_events(
  input_tokens INTEGER,cached_input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,created_at TEXT NOT NULL,
  UNIQUE(turn_id,external_event_id));
 CREATE TABLE IF NOT EXISTS controller_budget_grants(
- id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES controller_runs(id),kind TEXT NOT NULL CHECK(kind IN ('WORKER_TURNS','REVIEWER_TURNS','TOKENS','ELAPSED_SECONDS')),
+ id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES controller_runs(id),kind TEXT NOT NULL CHECK(kind IN ('WORKER_TURNS','REVIEWER_TURNS','TASK_CREATOR_TURNS','TOKENS','ELAPSED_SECONDS')),
  amount INTEGER NOT NULL CHECK(amount>0),reason TEXT NOT NULL,granted_by_principal_id TEXT NOT NULL REFERENCES principals(id),created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS controller_final_reviews(
  id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES controller_runs(id),canonical_oid TEXT NOT NULL,
  plan_fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('PENDING','SATISFIED','DEFECTS','AMBIGUOUS','INVALID')),
  verdict_json TEXT,created_at TEXT NOT NULL,resolved_at TEXT);
+CREATE TABLE IF NOT EXISTS controller_events(
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES controller_runs(id),scope_type TEXT NOT NULL,
+ scope_id TEXT NOT NULL,event_type TEXT NOT NULL,reason_code TEXT,local_turn_id TEXT REFERENCES controller_turns(id),
+ small_attributes_json TEXT NOT NULL DEFAULT '{}',occurred_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS controller_events_run ON controller_events(run_id,sequence);
 """
 
 
@@ -150,6 +159,8 @@ def connect(home: Path) -> sqlite3.Connection:
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(5,?)", (now(),))
         _migrate_controller_v6(con)
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(6,?)", (now(),))
+        _migrate_controller_v7(con)
+        con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(7,?)", (now(),))
         return con
     except (OSError, sqlite3.Error) as exc:
         if con is not None:
@@ -204,6 +215,60 @@ def _migrate_controller_v6(con: sqlite3.Connection) -> None:
                 CREATE UNIQUE INDEX one_active_controller_session ON controller_sessions(project_id,role,subject_id) WHERE state='ACTIVE';
                 CREATE INDEX controller_turns_open ON controller_turns(state) WHERE state IN ('DISPATCHING','RUNNING','UNCERTAIN');
                 CREATE INDEX controller_turns_unconsumed ON controller_turns(session_id,consumed_at) WHERE consumed_at IS NULL;
+                COMMIT;
+            """)
+        except Exception:
+            if con.in_transaction:
+                con.rollback()
+            raise
+        finally:
+            con.execute("PRAGMA foreign_keys=ON")
+
+
+def _migrate_controller_v7(con: sqlite3.Connection) -> None:
+    """Add controller-owned turn metrics/events and explicit usage provenance."""
+    turn_columns = {row[1] for row in con.execute("PRAGMA table_info(controller_turns)")}
+    additions = {
+        "dispatch_reason": "TEXT",
+        "prompt_builder_version": "TEXT",
+        "controller_payload_bytes": "INTEGER NOT NULL DEFAULT 0",
+        "static_assignment_bytes": "INTEGER NOT NULL DEFAULT 0",
+        "dynamic_state_bytes": "INTEGER NOT NULL DEFAULT 0",
+        "correction_bytes": "INTEGER NOT NULL DEFAULT 0",
+        "output_schema_bytes": "INTEGER NOT NULL DEFAULT 0",
+        "dynamic_state_hash": "TEXT",
+        "context_hashes_json": "TEXT NOT NULL DEFAULT '{}'",
+        "response_hash": "TEXT",
+        "cache_write_input_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "usage_precision": "TEXT NOT NULL DEFAULT 'LEGACY_LAST_USAGE'",
+        "usage_before_json": "TEXT",
+        "usage_after_json": "TEXT",
+        "exact_response_count": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for name, definition in additions.items():
+        if name not in turn_columns:
+            con.execute(f"ALTER TABLE controller_turns ADD COLUMN {name} {definition}")
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS controller_events(
+         sequence INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES controller_runs(id),scope_type TEXT NOT NULL,
+         scope_id TEXT NOT NULL,event_type TEXT NOT NULL,reason_code TEXT,local_turn_id TEXT REFERENCES controller_turns(id),
+         small_attributes_json TEXT NOT NULL DEFAULT '{}',occurred_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS controller_events_run ON controller_events(run_id,sequence);
+    """)
+    budget_sql = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='controller_budget_grants'"
+    ).fetchone()[0]
+    if "TASK_CREATOR_TURNS" not in budget_sql:
+        con.execute("PRAGMA foreign_keys=OFF")
+        try:
+            con.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE controller_budget_grants_v7(
+                 id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES controller_runs(id),kind TEXT NOT NULL CHECK(kind IN ('WORKER_TURNS','REVIEWER_TURNS','TASK_CREATOR_TURNS','TOKENS','ELAPSED_SECONDS')),
+                 amount INTEGER NOT NULL CHECK(amount>0),reason TEXT NOT NULL,granted_by_principal_id TEXT NOT NULL REFERENCES principals(id),created_at TEXT NOT NULL);
+                INSERT INTO controller_budget_grants_v7 SELECT * FROM controller_budget_grants;
+                DROP TABLE controller_budget_grants;
+                ALTER TABLE controller_budget_grants_v7 RENAME TO controller_budget_grants;
                 COMMIT;
             """)
         except Exception:

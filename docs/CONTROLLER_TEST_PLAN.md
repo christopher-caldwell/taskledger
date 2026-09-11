@@ -3,7 +3,7 @@
 **Status:** current acceptance backlog
 **Date:** 2026-09-10
 **Scope:** deterministic Task Ledger assignment supervisor, project controller, and Codex app-server adapter
-**Inventory:** **190 no-Codex cases + 111 live-Codex cases = 301 total cases**
+**Inventory:** **224 no-Codex cases + 120 live-Codex cases = 344 total cases**
 
 This plan is intended to be exhaustive against the current supervisor design and the failure surfaces already identified. It is a living verification document: cases may be split into more granular tests as implementation reveals new boundaries, but a case should not be removed unless its invariant is deliberately retired.
 
@@ -26,9 +26,9 @@ Current inventory by priority:
 
 | Category | P0 | P1 | P2 | Total |
 |---|---:|---:|---:|---:|
-| No Codex | 115 | 58 | 17 | 190 |
-| With Codex | 39 | 57 | 15 | 111 |
-| **Total** | **154** | **115** | **32** | **301** |
+| No Codex | 133 | 74 | 17 | 224 |
+| With Codex | 44 | 61 | 15 | 120 |
+| **Total** | **177** | **135** | **32** | **344** |
 
 ## Architectural invariants under test
 
@@ -333,6 +333,45 @@ These tests should be run continuously in CI/local development. They should cons
 | **NC-189** | P2 | Property/Fuzz | Random valid event sequences across ACTIVE/SUBMITTED/ACCEPTED/COMPLETED | Invariant checker never observes illegal completion/duplicate active turn. |
 | **NC-190** | P2 | Property/Fuzz | Random crash injection at every journal/runtime/ledger boundary | Recovery either proves a unique next action or pauses uncertain; never produces false success. |
 
+## A9. Controller hardening, native profiles, and deterministic reporting
+
+| ID | Pri | Layer | Test case | Required result |
+|---|---|---|---|---|
+| **NC-191** | P0 | Profiles | Native role-file metadata/config parsing | Metadata is separated and the complete native configuration body is retained. |
+| **NC-192** | P0 | Profiles | Project-local profile precedence | Project `.codex/agents` wins over user/global and bundled fallbacks. |
+| **NC-193** | P0 | Profiles | Unknown or invalid native profile field | Codex strict validation rejects it loudly; no partial subset is accepted. |
+| **NC-194** | P0 | Profiles | Profile conflicts with controller authority | Preflight reports `CONFIGURATION_CONFLICT`; controller safety is not weakened. |
+| **NC-195** | P0 | Profiles | Profile identity persistence and drift | Source, file hash, model, effort, config hash, sandbox, and protocol survive restart; drift pauses. |
+| **NC-196** | P1 | Reviewer | Generic Reviewer profile | One profile supports checkpoint, submission, and final review through job-specific prompts. |
+| **NC-197** | P0 | Runtime | Multi-agent disabled in controller runtime | Every current collaboration gate is disabled in scoped process and per-thread config. |
+| **NC-198** | P1 | Context | Full first worker prompt | First turn contains the complete immutable assignment packet. |
+| **NC-199** | P1 | Context | Minimal unchanged continuation | Same-thread continuation omits immutable and unchanged dynamic context. |
+| **NC-200** | P1 | Context | Correction delta | Rejection sends exact correction state without replaying the assignment packet. |
+| **NC-201** | P1 | Context | Checkpoint/question delta | Only changed checkpoint or question/answer state is supplied. |
+| **NC-202** | P1 | Context | Structured-output retry delta | Same-thread malformed output receives a small correction-only retry within existing bounds. |
+| **NC-203** | P1 | Context | Compact final-review projection | Final review excludes full plan/task-history duplication. |
+| **NC-204** | P0 | Corrections | Correction planning preserves links | `requirement_ids` and `dependency_task_ids` survive `plan.apply`. |
+| **NC-205** | P0 | Scheduler | Independent worker/reviewer pipeline | Review activity never occupies worker capacity. |
+| **NC-206** | P0 | Scheduler | Explicit inflight-target bound | Scheduler no longer treats worker-plus-reviewer capacity as an unexplained batch proxy. |
+| **NC-207** | P1 | Scheduler | Single scheduler loop | Repeated correction cycles return iteratively without recursive scheduler entry. |
+| **NC-208** | P0 | Sessions | Terminal worker sessions close | Completed/revoked/cancelled/replaced sessions cannot resume; temporary blockers remain resumable. |
+| **NC-209** | P0 | Budgets | Aggregate Task Creator budget | Repeated correction planning exhausts a durable project-level bound and pauses. |
+| **NC-210** | P0 | Usage | Multi-response cumulative usage delta | One turn containing several upstream responses records the complete field-by-field delta. |
+| **NC-211** | P0 | Usage | Cache-write accounting | Cache-write input is preserved separately without double-counting cached input. |
+| **NC-212** | P0 | Usage | Usage precision | Exact, delta, synthetic, missing, and legacy provenance remain explicit. |
+| **NC-213** | P0 | Usage | Missing baseline fails closed | Unprovable cumulative usage blocks further token admission. |
+| **NC-214** | P1 | Migration | Legacy raw usage rows preserved | Historical rows remain; new correctness/reporting does not populate or depend on them. |
+| **NC-215** | P1 | Manifest | Controller run start identity | Starting OID, plan/policy/config hashes, schema, and protocol identity are frozen. |
+| **NC-216** | P1 | Events | Transition-only controller events | Repeated identical scheduler observations do not append duplicate events. |
+| **NC-217** | P1 | Events | Wait-reason history | Dependency, wave, capacity, and write-surface waits reconstruct deterministically. |
+| **NC-218** | P0 | Reporting | Report never starts a model | Report succeeds against a runtime that raises on `turn/start`. |
+| **NC-219** | P1 | Reporting | Provider history unavailable | Controller/domain report remains valid with explicit unavailable provider detail. |
+| **NC-220** | P1 | Reporting | Provider enrichment remains ephemeral | Command/file/tool/compaction summaries are derived without inserting Codex history copies. |
+| **NC-221** | P1 | Reporting | Deterministic report | Identical DB and provider history produce structurally identical output. |
+| **NC-222** | P1 | Reporting | Existing domain facts reused | Routing, review, check, blocker, and integration metrics query authoritative tables. |
+| **NC-223** | P0 | Storage | Sensitive content exclusion | New telemetry contains no prompts, command output, patches, reasoning, credentials, or tool bodies. |
+| **NC-224** | P0 | Reporting | Architecture-invariant reporting | Collaboration calls and subagent activity produce explicit nonzero violations. |
+
 ## No-Codex destructive/fault-injection matrix
 
 For the crash-sensitive P0 cases above, do not rely only on mocked exceptions. Run a process-level matrix that kills the controller after each durable boundary below, then starts a new process and asks it to reconcile:
@@ -388,8 +427,10 @@ turn events by exact thread and turn IDs, turns accept `outputSchema`, sandbox
 policy can be selected per thread and turn, and
 `thread/tokenUsage/updated.tokenUsage.last` reports the latest upstream response
 while `tokenUsage.total` is cumulative thread usage. A tool using turn may emit
-several response local updates, which must be deduplicated and summed within the
-exact turn. Treat these as external contracts, not internal guarantees. The
+several upstream responses, so whole-turn usage must be the field-by-field delta
+between the cumulative snapshots before and after the turn. Experimental exact
+raw-response events may validate that delta but are neither required nor
+persisted. Treat these as external contracts, not internal guarantees. The
 controller stores the resolved Codex CLI version and its own protocol identity
 with every session.
 
@@ -548,6 +589,15 @@ with every session.
 | **CX-109** | P2 | Upgrade | Upgrade Codex CLI/app server one compatible version | Run compatibility smoke suite before enabling production; state/journal remains readable. |
 | **CX-110** | P2 | Upgrade | App server changes turn, usage, or output schema behavior | Contract tests fail visibly; no silent accounting/review degradation. |
 | **CX-111** | P2 | Upgrade | Configured model aliases/version change | Resolved model is recorded and benchmark baselines remain attributable. |
+| **CX-112** | P0 | Profiles | Project-local native role override | Live thread applies model, effort, developer instructions, source, and file hash from disposable project profile. |
+| **CX-113** | P0 | Runtime | Nested agents unavailable | Delegation attempt exposes no collaboration tool, creates no collaboration/subagent item, and spawns no child. |
+| **CX-114** | P0 | Usage | One turn with multiple upstream responses | Tool interaction proves cumulative delta covers the whole turn; exact raw-response sum cross-checks when supported. |
+| **CX-115** | P0 | Usage | Usage baseline after restart | Cold resume restores cumulative usage before the next turn and excludes prior usage from its delta. |
+| **CX-116** | P1 | Reporting | Provider history after restart | Persisted turns/items reconstruct after client restart without live event capture. |
+| **CX-117** | P1 | Context | Continuation omits full assignment | Persisted second user message lacks the immutable first-turn packet. |
+| **CX-118** | P1 | Reviewer | Generic Reviewer submission and final jobs | One configured Reviewer profile completes both bounded job types. |
+| **CX-119** | P0 | Scheduler | Worker/reviewer pipeline concurrency | Independent worker work overlaps another target's review within both limits. |
+| **CX-120** | P1 | Reporting | Deterministic report over bounded live run | History joins by IDs, quality/invariants are explicit, repeat output matches, and reporting starts no turn. |
 
 ## Live-Codex cost-control protocol
 
@@ -557,7 +607,7 @@ Live tests exist to verify external contracts, not to rediscover deterministic b
 2. Use tiny disposable tasks for app server, thread, sandbox, and recovery tests.
 3. Before every paid test, record the expected maximum number of worker and reviewer turns.
 4. Refuse admission when the test would exceed its explicit live-turn budget.
-5. Persist raw usage fields per turn before computing any credit-equivalent estimate.
+5. Persist cumulative thread-usage deltas and precision per turn before computing any credit-equivalent estimate; never persist raw response bodies.
 6. Never use account-wide quota change as the authoritative per-test usage measurement while other sessions are active.
 7. Repeat cost benchmarks enough times to measure variance; do not optimize around one run.
 8. Evaluate **completed reviewed work**, not implementation-only cost.
@@ -646,20 +696,20 @@ Any production incident, unexpected model stop behavior, duplicate dispatch, sta
 # Coverage status
 
 This inventory is an acceptance backlog, not a claim of test coverage. Every
-case must have one of these statuses:
+case must have exactly one of these statuses:
 
-- `passing`: an automated test directly exercises the required result and is
+- `PASSING`: an automated test directly exercises the required result and is
   green in the current run;
-- `implemented`: the production path exists, but the exact inventory case has
+- `IMPLEMENTED`: the production path exists, but the exact inventory case has
   not yet passed as a dedicated test;
-- `planned`: the case remains in the backlog and its required fixture or
+- `PLANNED`: the case remains in the backlog and its required fixture or
   behavior is not complete;
-- `deferred`: the case is intentionally postponed with a stated reason;
-- `not applicable`: the shipped architecture makes the case impossible, with
+- `DEFERRED`: the case is intentionally postponed with a stated reason;
+- `NOT_APPLICABLE`: the shipped architecture makes the case impossible, with
   the replacement contract named.
 
 The checked in coverage snapshot is maintained in
 [`CONTROLLER_TEST_COVERAGE.md`](CONTROLLER_TEST_COVERAGE.md). Its counts must
-sum to all 301 cases. Live cases stay `implemented` or `deferred` until an
+sum to all 344 cases. Live cases stay `IMPLEMENTED` or `DEFERRED` until an
 opt-in run records an actual passing result. The E4 representative benchmark is
 always deferred until the user explicitly authorizes that spend.

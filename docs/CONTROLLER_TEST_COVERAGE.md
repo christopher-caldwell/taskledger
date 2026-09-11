@@ -7,22 +7,22 @@ the final section.
 
 ## Status summary
 
-| Environment | Passing | Implemented | Planned | Deferred | Not applicable | Total |
+| Environment | PASSING | IMPLEMENTED | PLANNED | DEFERRED | NOT_APPLICABLE | Total |
 |---|---:|---:|---:|---:|---:|---:|
-| No Codex (`NC`) | 98 | 64 | 28 | 0 | 0 | 190 |
-| Live Codex (`CX`) | 11 | 67 | 6 | 27 | 0 | 111 |
-| **All cases** | **109** | **131** | **34** | **27** | **0** | **301** |
+| No Codex (`NC`) | 132 | 64 | 28 | 0 | 0 | 224 |
+| Live Codex (`CX`) | 20 | 67 | 6 | 27 | 0 | 120 |
+| **All cases** | **152** | **131** | **34** | **27** | **0** | **344** |
 
-`Passing` means the required result is exercised by the current automated
-suite. A broad test may cover several adjacent cases. `Implemented` means the
+`PASSING` means the required result is exercised by the current automated
+suite. A broad test may cover several adjacent cases. `IMPLEMENTED` means the
 production behavior exists but the exact inventory case has not yet passed as
-a separately attributable test. `Planned` means required production or fixture
-work remains. `Deferred` is reserved for opt-in experiments, expensive fault
+a separately attributable test. `PLANNED` means required production or fixture
+work remains. `DEFERRED` is reserved for opt-in experiments, expensive fault
 runs, benchmarks, and upgrade checks.
 
 ## No Codex cases
 
-The following 98 cases are passing:
+The following 132 cases are passing:
 
 - NC-001 through NC-006
 - NC-010 through NC-012
@@ -41,6 +41,7 @@ The following 98 cases are passing:
 - NC-159, NC-160
 - NC-168 through NC-177
 - NC-180 through NC-182
+- NC-191 through NC-224
 
 Coverage is supplied by `tests/test_controller.py`,
 `tests/test_project_controller.py`, and the real Taskledger disposable Git
@@ -63,11 +64,12 @@ covered at a neighboring boundary but not at the exact process kill point.
 
 ## Live Codex cases
 
-The bounded opt-in suite directly passed these 11 cases on 2026-09-11:
+The bounded opt-in suite directly passed these 20 cases on 2026-09-11:
 
 - CX-001, CX-008 through CX-010, CX-012
 - CX-028, CX-035, CX-041, CX-082
 - CX-099, CX-103
+- CX-112 through CX-120
 
 CX-011, CX-049, and CX-094 have live coverage for neighboring behavior but
 remain `implemented`: restart was exercised with a fresh app-server client in
@@ -103,32 +105,37 @@ The following 27 cases are deferred:
 
 ## Latest execution
 
-The complete default non-live suite passed 78 tests and skipped the five
-explicitly opt-in live cases in 78.95 seconds. It includes real Taskledger and
-disposable Git integration plus subprocess termination at both unacknowledged
-and acknowledged dispatch boundaries.
+The release-candidate default suite passed 113 tests and skipped the eight
+explicitly opt-in live methods in 80.94 seconds. The dedicated NC-191 through NC-224 module
+passed all 34 tests. The final bounded live sweep used `gpt-5.6-luna` at `low`
+effort and passed all eight methods in 165.285 seconds; those methods directly
+cover the 20 CX cases listed above.
 
-On 2026-09-11, the final app-server transport was exercised with
-`gpt-5.6-luna` at `low` effort. All three opt-in invocations passed: the
-assignment lifecycle passed in 38.15 seconds, the three protocol contract tests
-passed in 19.20 seconds, and the live two-task project passed in 88.60 seconds.
+| Live case group | Turns | Input | Cached input | Cache-write input | Output | Reasoning |
+|---|---:|---:|---:|---:|---:|---:|
+| same-thread continuation | 2 | 35,357 | 25,088 | 0 | 12 | 0 |
+| restart accounting/history | 2 | 35,187 | 25,088 | 0 | 39 | 21 |
+| assignment lifecycle | 2 | 115,540 | 78,592 | 0 | 1,132 | 165 |
+| read-only structured review | 1 | 27,071 | 13,056 | 0 | 123 | 14 |
+| two-task project + final review | 5 | 449,763 | 356,352 | 0 | 3,900 | 580 |
+| nested-agent denial | 1 | 15,150 | 11,008 | 0 | 39 | 27 |
+| multi-response accounting | 1 | 30,266 | 20,992 | 0 | 101 | 18 |
+| project-local profile resolution | 0 | 0 | 0 | 0 | 0 | 0 |
+| **Total** | **14** | **708,334** | **530,176** | **0** | **5,346** | **825** |
 
-| Case/turn | Role | Input | Cached input | Output | Reasoning |
-|---|---|---:|---:|---:|---:|
-| assignment lifecycle worker | worker | 85,971 | 48,384 | 462 | 117 |
-| assignment lifecycle review | reviewer | 56,171 | 34,304 | 844 | 113 |
-| worker thread, turn 1 | worker | 14,159 | 6,912 | 6 | 0 |
-| worker thread, turn 2 | worker | 19,162 | 13,056 | 6 | 0 |
-| restart, before | worker | 14,175 | 5,888 | 18 | 9 |
-| restart, after | worker | 14,210 | 13,056 | 7 | 0 |
-| read-only structured review | reviewer | 27,064 | 13,056 | 115 | 19 |
-| multi-task project, task A | worker | 70,017 | 50,432 | 516 | 95 |
-| multi-task project, task B | worker | 88,263 | 70,400 | 539 | 103 |
-| multi-task project, review A | reviewer | 76,421 | 35,328 | 1,241 | 135 |
-| multi-task project, review B | reviewer | 35,552 | 15,104 | 592 | 61 |
-| multi-task final review | requirement reviewer | 79,664 | 55,552 | 929 | 257 |
-| **Total** |  | **580,829** | **361,472** | **5,275** | **909** |
+Admission usage for this sweep was 713,680 tokens (`input + output`). Cached
+input is already a component of input and is not added again. The diagnostic
+multi-response turn contained two exact upstream responses: cumulative usage
+moved from zero to 30,266 input, 20,992 cached input, 101 output, and 18
+reasoning tokens; the exact-response sum reconciled to that delta and precision
+was `EXACT_RESPONSES`.
 
-All 12 turn records had complete usage. The controller computes admission
-tokens as input plus output (586,104 here); cached input and reasoning are kept
-as separate immutable telemetry fields rather than added again.
+The bounded two-task report was generated twice with identical structured
+output. It joined all 5 expected Codex turns, reported 0 missing-usage turns, 0
+nested-agent calls, 0 subagent activity, and 0 untracked turns. Project wall
+time was 93,801 ms, summed model-turn duration was 117,217 ms, and the union of
+active model intervals was 91,815 ms. Task Ledger stored no raw provider-usage
+events or worker prose for that run; provider history remained in Codex.
+
+Historical `last`-usage totals are intentionally not reused as a ground truth
+for this accounting model.

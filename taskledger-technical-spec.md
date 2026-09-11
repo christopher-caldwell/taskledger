@@ -43,7 +43,7 @@ Taskledger is a local command line application with a foreground executable cont
 | State model | Relational current state plus immutable historical records and an audit log |
 | Model transport | Local Codex app server over standard input and output |
 
-This is not a hosted server, generic agent framework, web application, or MCP service. The Python controller calls the local Codex app server directly and remains the only workflow scheduler. Task Creator, worker, and Reviewer sessions are bounded jobs.
+This is not a hosted server, generic agent framework, web application, or MCP service. The Python controller calls the local Codex app server directly and remains the only persistent orchestration and decision loop. Task Creator, worker, and Reviewer sessions are bounded jobs explicitly started by Python. Their Codex threads may persist for context; idle threads do not schedule or poll work.
 
 ### 2.1 Why this is the simplest adequate architecture
 
@@ -720,17 +720,36 @@ The audit table is diagnostic history, not an event-sourced authority. Current r
 
 `controller_sessions` binds one semantic job to one external Codex thread. It records role, profile, subject, resolved model, resolved effort, agent configuration hash, exact sandbox policy, Codex version and protocol identity, and a hash of that complete identity. Restart must either resume with the same identity or pause as `CONFIGURATION_DRIFT`.
 
-`controller_turns` records dispatch intent before the external request, then the acknowledged external turn ID, terminal result, consumption state, progress fingerprints, elapsed timestamps, and exact turn usage. `DISPATCHING` without a proven external ID and any unresolvable external status become `UNCERTAIN`.
+`controller_turns` records dispatch intent before the external request, then the
+acknowledged external turn ID, terminal structured result when recovery needs it,
+response hash, consumption state, progress fingerprints, elapsed timestamps,
+controller-injected byte counts and hashes, and the field-by-field delta between
+cumulative thread usage before and after the turn. Precision is one of exact raw
+response reconciliation, cumulative thread delta, synthetic/estimated, missing,
+or explicit legacy provenance. `DISPATCHING` without a proven external ID and
+any unresolvable external status become `UNCERTAIN`. New worker prose and complete
+prompts are not stored.
 
-`controller_usage_events` retains deduplicated raw usage notifications by local
-turn and stable event identity. The app server notification contains `last`,
-which is local to one upstream model response, and `total`, which is cumulative
-for the thread. A tool-using turn may emit several response-local `last` values.
-The controller deduplicates exact raw notifications, binds them to `turnId`, and
-sums those response-local values for the turn. Missing turn usage is explicit;
-cumulative totals are never substituted or summed.
+On client restart, a replayed Codex total must equal the last durable
+`usage_after_json`. For legacy local rollouts with no persisted token-count
+record, Codex restarts its live cumulative counter at zero; the durable total is
+then an explicit accounting offset, so the next field-by-field delta excludes
+prior usage. With neither source available, precision is `MISSING` and admission
+fails closed.
 
-`controller_budget_grants` records positive user approved extensions. `controller_final_reviews` binds each bounded integrated review to the exact canonical OID and plan fingerprint so a stale result cannot complete the project.
+`controller_usage_events` is a retained legacy table. Migration does not delete
+historical rows, but new execution and reporting neither populate nor depend on
+raw provider-event JSON.
+
+`controller_events` is the one small append-only controller-state history. It
+records constrained Python-owned transitions such as runnable and wait reasons,
+never one row per scheduler poll and never copies domain audit events or Codex
+turn items.
+
+`controller_budget_grants` records positive user-approved extensions, including
+aggregate Task Creator turns. `controller_final_reviews` binds each bounded
+integrated review to the exact canonical OID and plan fingerprint so a stale
+result cannot complete the project.
 
 ---
 
@@ -959,7 +978,7 @@ assignment branches.
 
 #### `taskledger controller run-project`
 
-Input contains `live: true`, an approved `execution_policy`, and optional limits. Every target must contain exactly `task_id`, positive integer `wave`, `worker_profile`, `parallel_safe`, and `write_surfaces`. The policy must cover every unfinished task exactly once; it may be empty only when the approved plan has no unfinished tasks. Default capacity is `max_workers: 2` and `max_reviewers: 1`; project-wide defaults are 100 worker turns and 50 reviewer turns. An optional reviewer token reserve stops new worker admission early enough to retain review capacity. Supervisor limits remain durable project admission limits.
+Input contains `live: true`, an approved `execution_policy`, and optional limits. Every target must contain exactly `task_id`, positive integer `wave`, `worker_profile`, `parallel_safe`, and `write_surfaces`. The policy must cover every unfinished task exactly once; it may be empty only when the approved plan has no unfinished tasks. Default capacity is `max_workers: 2` and `max_reviewers: 1`; project-wide defaults are 100 worker turns, 50 reviewer turns, and six aggregate Task Creator turns. `max_inflight_targets` defaults explicitly to worker plus reviewer capacity so independent implementation can pipeline with review. An optional reviewer token reserve stops new worker admission early enough to retain review capacity. Supervisor limits remain durable project admission limits.
 
 The command validates the current Taskledger plan, target identities, policy
 shape, configured model profiles, and local Codex executable before creating a
@@ -981,9 +1000,19 @@ Input is `{"run_id":"...","live":true}`. The command loads the stored mode and l
 
 Returns the run, project targets, session roles and runtime identities, and a usage report. The report includes completed turn count, missing usage count, and whether totals are complete.
 
+#### `taskledger controller report`
+
+Input is `{"run_id":"...","include_provider_detail":true}`. Produces structured,
+deterministic Python reporting. Taskledger domain/controller rows supply project
+meaning, scheduler transitions, injected-context metrics, and budget usage.
+Optional Codex enrichment uses `thread/turns/list` and `thread/items/list` joined
+by persisted thread and turn IDs. Reporting never invokes `turn/start`, does not
+persist provider item copies, and succeeds with provider detail marked
+`UNAVAILABLE` when history cannot be read.
+
 #### `taskledger controller extend-budget`
 
-Records a positive durable grant for worker turns, reviewer turns, tokens, or elapsed seconds. A paused run remains paused until explicitly resumed.
+Records a positive durable grant for worker turns, reviewer turns, aggregate Task Creator turns, tokens, or elapsed seconds. A paused run remains paused until explicitly resumed.
 
 ### 10.2 Specification commands
 
@@ -2204,7 +2233,7 @@ Every mutation includes expected current revision/state in the service query. SQ
 
 The scheduler evaluates targets in stable `(wave, task_id)` order. It considers only the lowest unfinished wave. A target may start only when Taskledger eligibility, dependencies, blockers, plan currency, approved parallel safety, write surface compatibility, and runtime capacity all permit it. A target marked not parallel safe runs alone. Intersecting write surfaces never run together.
 
-Worker capacity is generic. Each assignment uses its persisted routine or complex profile when it acquires a slot. Reviewer capacity is a separate semaphore, so a submitted task can wait for review without consuming a worker slot. The controller creates no more active scheduling jobs than the configured worker and reviewer capacity combined, and every Codex event is routed by exact thread and turn IDs.
+Worker capacity is generic. Each assignment uses its persisted routine or complex profile when it acquires a slot. Reviewer capacity is a separate semaphore, so a submitted task can wait for review without consuming a worker slot and an independent runnable target can use the free worker capacity. An explicit `max_inflight_targets` bounds target state machines; its default is the sum of worker and reviewer capacity because one target may occupy each available slot. It is not used as either pool's capacity. Every Codex event is routed by exact thread and turn IDs.
 
 An assignment supervisor repeats this state machine after every worker turn:
 
@@ -2218,6 +2247,12 @@ An assignment supervisor repeats this state machine after every worker turn:
 
 A routine assignment revoked by the existing rejection threshold is never resumed. The target is rerouted to complex, a new assignment is created through the existing service, and a new worker thread owns that attempt.
 
+The scheduler has one iterative loop. Final-review defects materialize validated
+correction targets and return to that same loop; repeated correction cycles do
+not recursively enter another scheduler. A project-level aggregate Task Creator
+turn budget is checked immediately before correction-planning dispatch and
+pauses rather than resetting or declaring success.
+
 Local blockers pause only their targets. Plan invalidity, pending specification review, unresolved Taskledger operations, integration uncertainty, runtime uncertainty, budget exhaustion, and configuration drift pause global dispatch.
 
 ### 23.6 Final semantic boundary
@@ -2225,6 +2260,20 @@ Local blockers pause only their targets. Plan invalidity, pending specification 
 When all approved targets are integrated, the controller records the current canonical OID and plan fingerprint and dispatches one read only requirement Reviewer. Its schema covers every active requirement exactly once and separates implementation defects from product ambiguity.
 
 A satisfied verdict is rechecked against current canonical and plan identity, then applied through `requirement verify` followed by existing completion checks. An implementation defect dispatches one bounded Task Creator job. Its structured correction plan is materialized atomically with stable plan references, validated by Taskledger, appended as a later execution wave, and scheduled normally. Product ambiguity pauses for the user.
+
+All conceptual reviews use the same native Reviewer profile. Job-specific
+prompts and schemas distinguish checkpoint, submission, and final integrated
+review; `REQUIREMENT_REVIEWER` is only an internal journal/accounting role.
+
+Codex-native role files resolve in project `.codex/agents`, then user/global
+`agents`, then Taskledger's bundled defaults. Python separates native metadata,
+retains the complete remaining config layer, and supplies it to app-server for
+strict native validation. Controller-owned cwd, roots, sandbox, network,
+approval, credentials, dynamic tools, and collaboration controls cannot be
+weakened by a role file. Controller-owned runtimes force `agents.enabled=false`,
+`features.multi_agent_v2=false`, legacy `features.collab=false`, and
+collaboration-mode instruction injection off. Conflicts fail before model dispatch and user-global configuration is never
+modified.
 
 ## 24. Error Codes
 

@@ -32,7 +32,7 @@ Taskledger allows an approved product specification to move through the followin
 10. Recover the complete current state in a later session.
 11. Finish only after all required product behavior is verified and no blocking work remains.
 
-Bounded models supply semantic judgment. The Python controller owns scheduling, waiting, continuation, recovery, budgets, and routing. Taskledger supplies durable authority and deterministic transition rules.
+Bounded models supply semantic judgment. The Python controller is the only persistent orchestration and decision loop; it owns scheduling, waiting, continuation, recovery, budgets, and routing. Model threads may persist for context, but Python explicitly starts every bounded semantic turn. Taskledger supplies durable authority and deterministic transition rules.
 
 ---
 
@@ -1145,25 +1145,33 @@ The CLI may wait for selected actionable audit events using durable sequences,
 a bounded timeout, cancellation, and missed-event diagnostics. The host remains
 responsible for waiting outside model reasoning and waking the model.
 
-Usage tooling requires turn identified telemetry, deduplicates exact raw event
-IDs, and attributes actual model and effort. For the current app server contract,
-`tokenUsage.last` is the latest upstream response value and `tokenUsage.total`
-is cumulative thread usage. A tool using turn may contain several response
-updates, so the controller deduplicates and adds response local `last` values by
-exact turn and event identity. It never adds cumulative `total` snapshots.
-Reasoning tokens are an output subset, and measured tokens are not billing.
-Missing or inconsistent telemetry is reported and prevents further token budget
-admission; legacy token counters are ignored.
+Usage tooling requires turn-identified telemetry and attributes the actual model
+and effort. For the current app-server contract, `tokenUsage.last` is only the
+latest upstream response while `tokenUsage.total` is cumulative thread usage. A
+tool-using turn may contain several upstream responses. The controller therefore
+subtracts the cumulative thread usage immediately before a turn from the
+cumulative usage after it. Input, cached input, cache-write input, output, and
+reasoning output remain separate; cached input is not added to input a second
+time. Token admission is `input + output`. Missing or unprovable cumulative
+baselines fail closed. Experimental raw-response usage may cross-check a newly
+started test turn, but correctness and budgets never depend on it and raw bodies
+are not persisted.
 
 ## 25B. Executable Project Controller
 
 An approved execution policy is durable project state. For every target it records the task, execution wave, worker profile, parallel safety decision, and prospective write surfaces. Python may derive readiness from current Taskledger state, but it must not infer missing semantic concurrency or routing decisions.
 
-The foreground controller uses generic worker capacity and separate reviewer capacity. The default limits are two workers and one reviewer. A free worker slot may run either a routine or complex assignment according to the target profile. Capacity limits, turn limits, stall limits, runtime failure limits, elapsed time, and token admission limits survive restart. Exhaustion pauses the run.
+The foreground controller uses generic worker capacity and separate reviewer capacity. The default limits are two workers and one reviewer. A free worker slot may run either a routine or complex assignment according to the target profile, including while an independent target is under review. An explicit inflight-target bound permits that pipeline without conflating the two capacity pools. Capacity limits, turn limits, stall limits, runtime failure limits, aggregate Task Creator turns, elapsed time, and token admission limits survive restart. Exhaustion pauses the run.
 
 A completed Codex turn is only a transport event. After every worker turn, the controller reads current Taskledger state. A pending submission enters review. A blocker pauses that target. Revocation stops the old thread. An active assignment continues automatically while durable progress and budgets permit. Model prose, including an empty response or a statement of completion, does not alter this rule.
 
-One worker thread belongs to one assignment attempt. Normal continuation and correction reuse it. Revocation or routine worker escalation closes it, and the replacement assignment receives a new thread. Submitted work remains frozen while controller checks and a bounded Reviewer inspect the exact commit.
+One worker thread belongs to one assignment attempt. Its first turn receives the
+complete immutable assignment packet. Normal continuation, checkpoint, question,
+and correction turns reuse it with only changed durable state. Revocation,
+cancellation, completion, replacement, or routine worker escalation closes the
+controller session, and a replacement assignment receives a new thread.
+Submitted work remains frozen while controller checks and a bounded Reviewer
+inspect the exact commit.
 
 Reviewer output must cover every current criterion exactly once and must be structurally consistent with the requested outcome. Required check failure prevents acceptance. A missing, malformed, duplicate, stale, or inconsistent result is retried only within the reviewer budget. It never becomes acceptance by inference.
 
@@ -1171,9 +1179,23 @@ Accepted work uses the existing Taskledger verification and integration path. Kn
 
 After approved work is integrated, the controller starts one bounded final Reviewer against canonical state. A satisfied result supplies evidence for existing requirement verification and completion checks. An implementation defect starts one bounded Task Creator job that materializes correction tasks and returns control to Python scheduling. Product ambiguity pauses for the user.
 
-The controller persists dispatch intent, external thread and turn identity, resolved model and effort, agent configuration hash, sandbox policy, protocol identity, raw usage events, and consumption state. Restart reconciliation consumes a proven result once. An external operation that may have happened but cannot be identified or reconciled pauses as uncertain.
+The controller consumes Codex-native role files from `.codex/agents`, preferring
+project-local files over user/global and bundled fallbacks. It persists role
+source and full file hash, resolved model and effort, effective configuration
+hash, sandbox and protocol identity, dispatch reason, external thread/turn
+identity, controller-injected byte counts and hashes, cumulative usage deltas and
+precision, and consumption state. It does not copy Codex commands, output,
+patches, reasoning, transcripts, or provider turn items. Restart reconciliation
+consumes a proven result once. An external operation or usage baseline that
+cannot be identified or reconciled pauses as uncertain.
 
-The security boundary is proportional to this local product. Orchestrator credentials never reach model prompts or environments. Worker ledger operations remain assignment scoped. Reviewers receive read only source access and no mutation authority. Privileged Taskledger changes are controller owned. This does not claim containment against hostile code running as the local user.
+The security boundary is proportional to this local product. Orchestrator credentials never reach model prompts or environments. Worker ledger operations remain assignment scoped. Reviewers receive read only source access and no mutation authority. Privileged Taskledger changes are controller owned. Controller-owned agents cannot recursively delegate or spawn model agents; the scoped app-server runtime disables every current Codex collaboration gate without modifying user-global configuration. This does not claim containment against hostile code running as the local user.
+
+Reporting is deterministic Python code over authoritative Taskledger domain and
+controller data. Optional Codex provider-history enrichment is read at report
+time through supported app-server history APIs and is never mirrored into a
+shadow event store. Provider-history failure cannot invalidate a completed run
+and is labeled unavailable rather than replaced with guessed precision.
 
 ## 26. Scope Boundary for Technical Design
 

@@ -12,6 +12,7 @@ from .model import (
     RuntimeTurnInspection,
     RuntimeTurnResult,
     SessionRole,
+    Usage,
 )
 
 
@@ -31,7 +32,8 @@ class AgentRuntime(Protocol):
     ) -> RuntimeSession: ...
 
     async def resume_session(
-        self, *, thread_id: str, role: SessionRole, profile: str, subject_id: str, cwd: str | None, writable: bool
+        self, *, thread_id: str, role: SessionRole, profile: str, subject_id: str,
+        cwd: str | None, writable: bool, cumulative_usage_baseline: Usage | None = None,
     ) -> RuntimeSession: ...
 
     async def start_turn(
