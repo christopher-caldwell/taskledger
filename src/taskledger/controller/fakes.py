@@ -46,6 +46,9 @@ class FakeRuntime:
         self.identity_overrides: dict[tuple[SessionRole, str], RuntimeIdentity] = {}
         self.prompts: list[dict[str, Any]] = []
         self.provider_histories: dict[str, dict[str, Any] | Exception] = {}
+        self.interrupted: list[RuntimeTurnHandle] = []
+        self.protocol_identity = "fake-runtime-v1"
+        self.closed = False
 
     def session_identity(self, *, role, profile, subject_id, cwd, writable):
         return self.identity_overrides.get(
@@ -121,6 +124,11 @@ class FakeRuntime:
             return RuntimeTurnInspection("COMPLETED", result)
         return RuntimeTurnInspection("RUNNING")
 
+    async def interrupt_turn(self, handle):
+        self.interrupted.append(handle)
+        state, script = self.turns.get((handle.thread_id, handle.turn_id), ("RUNNING", TurnScript()))
+        self.turns[(handle.thread_id, handle.turn_id)] = ("FAILED", script)
+
     def usage_events(self, handle):
         result = self.turns.get((handle.thread_id, handle.turn_id))
         if not result:
@@ -133,6 +141,9 @@ class FakeRuntime:
         if isinstance(value, Exception):
             raise value
         return value
+
+    async def close(self):
+        self.closed = True
 
 
 class FakeLedger:

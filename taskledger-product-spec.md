@@ -88,7 +88,7 @@ The user owns product decisions and approvals. Human input is required for produ
 
 ### 5.2 Task Creator
 
-The Task Creator is a bounded strong model job. It reads the specification and produces or revises requirements, tasks, acceptance criteria, deterministic checks, dependencies, worker routing, execution waves, and declared write surfaces. It exits after the approved plan is durably materialized. It may be invoked again when final review finds an implementation defect that needs semantic decomposition. It does not schedule work or monitor execution.
+The Task Creator is a bounded strong model job. For initial planning it is launched by `project prepare`, reads the specification, and returns an immutable structured proposal containing requirements, tasks, acceptance criteria, deterministic checks, dependencies, worker routing, execution waves, declared write surfaces, assumptions, and ambiguities. Python validates and stores that proposal; `project start` materializes it only after exact hash approval. It may be invoked again when final review finds an implementation defect that needs semantic decomposition. It does not schedule work or monitor execution.
 
 ### 5.3 Python controller
 

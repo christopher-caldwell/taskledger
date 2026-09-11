@@ -80,6 +80,7 @@ async def controller_report(con, run_id: str, *, include_provider_detail: bool, 
         (run_id,),
     ).fetchall()
     terminal = [row for row in turns if row["state"] in {"COMPLETED", "FAILED", "UNCERTAIN"}]
+    unresolved = [row for row in turns if row["state"] in {"DISPATCHING", "RUNNING", "UNCERTAIN"}]
     completed = [row for row in terminal if row["state"] == "COMPLETED"]
     quality_counts = {precision.value.lower(): 0 for precision in UsagePrecision}
     for row in terminal:
@@ -334,7 +335,9 @@ async def controller_report(con, run_id: str, *, include_provider_detail: bool, 
             "dynamic_tool_schema_bytes": int(identity.get("dynamic_tool_schema_bytes") or 0),
             "dynamic_tool_count": int(identity.get("dynamic_tool_count") or 0),
         })
-    wall_ms = _ms(run["started_at"], cutoff)
+    wall_lower_bound_ms = _ms(run["started_at"], cutoff)
+    timing_complete = run["finished_at"] is not None
+    wall_ms = wall_lower_bound_ms if timing_complete else 0
     paused_ms = waits.get("HUMAN_OR_BLOCKER_PAUSE", 0)
     active_wall_ms = max(0, wall_ms - paused_ms)
     limits = config.get("limits", {})
@@ -356,9 +359,17 @@ async def controller_report(con, run_id: str, *, include_provider_detail: bool, 
     report = {
         "identity": {"run_id": run_id, "project_id": run["project_id"], "mode": run["mode"], "state": run["state"], "manifest": manifest},
         "scope": manifest.get("scope", "POST_APPROVAL_EXECUTION"),
-        "quality": {"usage_accounting": quality_counts, "accounting_complete": not any(row["usage_missing"] for row in terminal), "data_quality_errors": data_quality_errors, "provider_detail": provider},
+        "quality": {
+            "usage_accounting": quality_counts,
+            "accounting_complete": not unresolved and not any(row["usage_missing"] for row in terminal),
+            "accounting_status": "UNRECONCILED_ACTIVE_TURN" if unresolved else ("MISSING_TERMINAL_USAGE" if any(row["usage_missing"] for row in terminal) else "COMPLETE"),
+            "known_token_subtotal": totals["admission_tokens"],
+            "unresolved_turn_count": len(unresolved),
+            "data_quality_errors": data_quality_errors,
+            "provider_detail": provider,
+        },
         "economics": {"totals": totals, "by_model": dict(sorted(by_model.items())), "by_role": {key: by_role[key] for key in sorted(by_role)}, "by_dispatch_reason": dict(sorted(by_reason.items())), "by_outcome": dict(sorted(by_outcome.items())), "by_accounting_class": dict(sorted(by_accounting.items())), "direct_task": direct, "shared_project": shared, "total_tokens_per_integrated_task_ratio": None, "valuation": {"status": "UNAVAILABLE", "reason": "no immutable valuation snapshot supplied"}},
-        "scheduler": {"report_cutoff": cutoff, "gross_elapsed_ms": wall_ms, "wall_time_ms": wall_ms, "recorded_paused_ms": paused_ms, "non_paused_wall_ms": active_wall_ms, "summed_attempt_duration_ms": totals["summed_turn_duration_ms"], "summed_model_turn_duration_ms": totals["summed_turn_duration_ms"], "model_active_interval_union_ms": _interval_union(all_intervals), "worker_active_interval_union_ms": worker_union, "reviewer_active_interval_union_ms": reviewer_union, "waits_entity_ms": dict(sorted(waits.items())), "waits_ms": dict(sorted(waits.items())), "timing_provenance": "CONTROLLER_DISPATCH_TO_TERMINAL", "concurrency": {"max_workers": limits.get("max_workers", limits.get("supervisor", {}).get("max_workers")), "max_reviewers": limits.get("max_reviewers"), "max_inflight_targets": limits.get("max_inflight_targets"), "average_concurrent_workers": (worker_slot_ms / active_wall_ms) if active_wall_ms else None, "average_concurrent_reviewers": (reviewer_slot_ms / active_wall_ms) if active_wall_ms else None, "worker_slot_utilization": (worker_slot_ms / (active_wall_ms * limits.get("max_workers", 1))) if active_wall_ms and limits.get("max_workers") else None, "reviewer_slot_utilization": (reviewer_slot_ms / (active_wall_ms * limits.get("max_reviewers", 1))) if active_wall_ms and limits.get("max_reviewers") else None}},
+        "scheduler": {"report_cutoff": cutoff, "gross_elapsed_ms": wall_ms if timing_complete else None, "gross_elapsed_lower_bound_ms": wall_lower_bound_ms, "timing_status": "EXACT" if timing_complete else "OPEN_RUN_END_UNKNOWN", "wall_time_ms": wall_ms if timing_complete else None, "recorded_paused_ms": paused_ms, "non_paused_wall_ms": active_wall_ms if timing_complete else None, "summed_attempt_duration_ms": totals["summed_turn_duration_ms"], "summed_model_turn_duration_ms": totals["summed_turn_duration_ms"], "model_active_interval_union_ms": _interval_union(all_intervals), "worker_active_interval_union_ms": worker_union, "reviewer_active_interval_union_ms": reviewer_union, "waits_entity_ms": dict(sorted(waits.items())), "waits_ms": dict(sorted(waits.items())), "timing_provenance": "CONTROLLER_DISPATCH_TO_TERMINAL", "concurrency": {"max_workers": limits.get("max_workers", limits.get("supervisor", {}).get("max_workers")), "max_reviewers": limits.get("max_reviewers"), "max_inflight_targets": limits.get("max_inflight_targets"), "average_concurrent_workers": (worker_slot_ms / active_wall_ms) if active_wall_ms else None, "average_concurrent_reviewers": (reviewer_slot_ms / active_wall_ms) if active_wall_ms else None, "worker_slot_utilization": (worker_slot_ms / (active_wall_ms * limits.get("max_workers", 1))) if active_wall_ms and limits.get("max_workers") else None, "reviewer_slot_utilization": (reviewer_slot_ms / (active_wall_ms * limits.get("max_reviewers", 1))) if active_wall_ms and limits.get("max_reviewers") else None}},
         "workers": {"routine": routing["routine"], "complex": routing["complex"], "continuations": {"worker_assignments": len(assignments), "assignments_submitted_in_one_turn": one_turn, "progressing_early_stops": progressing, "automatic_continuation_turns": continuations, "by_dispatch_reason": {reason: sum(row["dispatch_reason"] == reason for row in worker_turns) for reason in ("ACTIVE_CONTINUATION", "CORRECTION", "CHECKPOINT_CONTINUATION", "QUESTION_ANSWERED", "STRUCTURED_OUTPUT_RETRY")}, "no_progress_turns": no_progress_turns, "stalls": sum(event["event_type"] == "RUN_PAUSED" and event["reason_code"] == "STALLED" for event in events), "human_continuation_interventions": None}},
         "reviews": {"submissions": {"total": len(verification_rows), "first_pass_accepted": sum(row["sequence"] == 1 and row["outcome"] == "ACCEPTED" for row in verification_rows), "first_pass_rejected": sum(row["sequence"] == 1 and row["outcome"] == "REJECTED" for row in verification_rows), "blocked": sum(row["outcome"] == "BLOCKED" for row in verification_rows), "correction_rounds": sum(row["outcome"] == "REJECTED" for row in verification_rows), "average_tokens": average_review(submission_review_turns, "tokens"), "average_duration_ms": average_review(submission_review_turns, "duration"), "escaped_defect_tasks": escaped}, "checkpoints": {"total": len(checkpoint_rows), "rejected": sum(row["state"] == "REJECTED" for row in checkpoint_rows), "average_tokens": average_review(checkpoint_review_turns, "tokens"), "average_duration_ms": average_review(checkpoint_review_turns, "duration")}, "final": {"reviews": len(final_rows), "average_tokens": average_review(final_review_turns, "tokens"), "average_duration_ms": average_review(final_review_turns, "duration"), "defects": sum(item.get("classification") == "IMPLEMENTATION_DEFECT" for item in final_findings), "product_ambiguities": sum(item.get("classification") == "PRODUCT_AMBIGUITY" for item in final_findings), "correction_tasks_created": sum(1 for row in con.execute("SELECT payload_json FROM audit_events WHERE project_id=? AND event_type='TASK_CREATED'", (run["project_id"],)) if any(json.loads(row[0]).get("plan_ref", "").startswith(f"controller-correction-{review['id']}-") for review in final_rows))}},
         "context_efficiency": {"controller_bytes": controller_bytes, "controller_byte_semantics": "correction_bytes may overlap dynamic_state_bytes; components are not summed into a payload total", "session_measurements": session_measurements, "token_usage": {key: totals[key] for key in ("input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_tokens")}, "underlying_exact_response_count": sum(int(row["exact_response_count"] or 0) for row in terminal), "compactions": activity["context_compaction_count"], "provider_activity": activity},
@@ -389,4 +400,28 @@ async def controller_report(con, run_id: str, *, include_provider_detail: bool, 
     integrated = con.execute("SELECT COUNT(*) FROM controller_run_targets WHERE run_id=? AND state='INTEGRATED'", (run_id,)).fetchone()[0]
     if integrated:
         report["economics"]["total_tokens_per_integrated_task_ratio"] = (totals["input_tokens"] + totals["output_tokens"]) / integrated
+    preparation_run_id = manifest.get("preparation_run_id")
+    if preparation_run_id:
+        preparation = con.execute(
+            "SELECT COALESCE(SUM(t.input_tokens+t.output_tokens),0),"
+            "SUM(CASE WHEN t.usage_missing=1 OR t.state IN ('DISPATCHING','RUNNING','UNCERTAIN') THEN 1 ELSE 0 END) "
+            "FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=?",
+            (preparation_run_id,),
+        ).fetchone()
+        preparation_tokens = int(preparation[0] or 0)
+        report["economics"]["whole_taskledger_run"] = {
+            "preparation_run_id": preparation_run_id,
+            "preparation_known_tokens": preparation_tokens,
+            "post_approval_execution_known_tokens": totals["admission_tokens"],
+            "known_total_tokens": preparation_tokens + totals["admission_tokens"],
+            "accounting_complete": report["quality"]["accounting_complete"] and int(preparation[1] or 0) == 0,
+            "human_specification_authoring_included": False,
+        }
+    elif run["mode"] == "PREPARATION":
+        linked = con.execute(
+            "SELECT id,execution_run_id,proposal_hash,state FROM project_preparations WHERE planning_run_id=?",
+            (run_id,),
+        ).fetchone()
+        if linked:
+            report["identity"]["preparation"] = dict(linked)
     return report

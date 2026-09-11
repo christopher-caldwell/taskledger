@@ -3,11 +3,13 @@
 This table is the exhaustive public command registry. Taskledger has no
 interactive `--help` contract; callers must not probe unlisted commands or flags.
 
-All commands emit the stable JSON envelope in Technical Specification §9. Unknown JSON fields are rejected by the request parser. Commands except `project init` require a token; orchestrator commands resolve `--project`, current repository, then the credential file, while worker commands resolve only from the worker credential.
+All commands emit the stable JSON envelope in Technical Specification §9. Unknown JSON fields are rejected by the request parser. Commands except first-time `project init` and `project prepare` require a token; `project prepare` creates or loads the repository-local orchestrator credential. Other orchestrator commands resolve `--project`, current repository, then the credential file, while worker commands resolve only from the worker credential.
 
 | Command | Role | Request body | Gate |
 |---|---|---|---|
 | `project init` | none | flags: `repo`, `confirm_branch` | existing non-bare symbolic-HEAD repository |
+| `project prepare` | none for first-time setup; orchestrator thereafter | specification, `live=true`, limits, declared preflight inputs/services | clean canonical repository, ignored local ledger, configured profiles; stops at immutable proposal |
+| `project start` | orchestrator | preparation ID, approved proposal hash, `live=true` | every preparation identity and preflight check remains unchanged |
 | `project show`, `project recover`, `project complete`, `project cleanup` | orchestrator | `{}` | completion requires all conditions and then safely cleans finalized worktrees; cleanup retries only after completion |
 | `project resume`, `wait`, `preflight` | orchestrator | cursor refresh / bounded event filter / declared prerequisites and host report | wait uses audit sequences; profile config is not host runtime proof |
 | `project set-canonical-branch` | orchestrator | `new_branch`, `confirm_branch` | no active work/recovery and integrations reachable |

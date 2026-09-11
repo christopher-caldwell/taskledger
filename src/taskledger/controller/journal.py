@@ -90,7 +90,7 @@ class Journal:
                 os.close(fd)
 
     def create_run(self, project_id: str, *, mode: str, config: dict[str, Any]) -> str:
-        if mode not in {"ASSIGNMENT", "PROJECT"}:
+        if mode not in {"ASSIGNMENT", "PROJECT", "PREPARATION"}:
             raise ValueError(mode)
         run_id = new_id()
         stamp = now()
@@ -522,7 +522,19 @@ class Journal:
             "SELECT COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state='COMPLETED'",
             (run_id,),
         ).fetchone()[0])
-        return {**usage.__dict__, "terminal_turns": turns, "completed_turns": completed, "missing_usage_turns": missing, "precision": precision, "complete": missing == 0}
+        unresolved = int(self.con.execute(
+            "SELECT COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id "
+            "WHERE s.run_id=? AND t.state IN ('DISPATCHING','RUNNING','UNCERTAIN')",
+            (run_id,),
+        ).fetchone()[0])
+        complete = missing == 0 and unresolved == 0
+        status = "COMPLETE" if complete else ("UNRECONCILED_ACTIVE_TURN" if unresolved else "MISSING_TERMINAL_USAGE")
+        return {
+            **usage.__dict__, "terminal_turns": turns, "completed_turns": completed,
+            "missing_usage_turns": missing, "unresolved_turn_count": unresolved,
+            "known_token_subtotal": usage.total_tokens, "accounting_status": status,
+            "precision": precision, "complete": complete,
+        }
 
     def add_targets(self, run_id: str, targets: list[dict[str, Any]]) -> None:
         with transaction(self.con):

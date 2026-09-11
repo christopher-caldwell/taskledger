@@ -974,6 +974,28 @@ operation. Idempotently retries the safe assignment-worktree cleanup in Section
 16.4 and returns removed, already-absent, and skipped worktrees. It never deletes
 assignment branches.
 
+#### `taskledger project prepare`
+
+Input names a repository-relative `spec_path`, `live: true`, bounded planning
+and execution limits, and declared preflight inputs/services. The command may
+initialize an eligible repository, freezes the specification, resolves all four
+role profiles, creates a `PREPARATION` controller run, and dispatches a bounded
+read-only Task Creator through the controller-owned app-server runtime. Its
+validated structured result and proposal fingerprint are stored in
+`project_preparations`. The command stops at `AWAITING_APPROVAL` and never
+starts an implementation worker. Material ambiguity produces a durable failed
+preparation with the ambiguity list.
+
+#### `taskledger project start`
+
+Input contains `preparation_id`, the exact `approve_proposal_hash`, and
+`live: true`. Before dispatch, the command rechecks canonical branch and OID,
+cleanliness, specification hash, role-profile identities, run configuration,
+preflight, and the stored proposal fingerprint. Any mismatch returns
+`PREPARATION_STALE`. It materializes the approved plan, validates it, resolves
+temporary task refs, creates the existing post-approval project controller run,
+links that run to the preparation, and remains in the foreground.
+
 ### 10.1A Controller commands
 
 #### `taskledger controller run-project`

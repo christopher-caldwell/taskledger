@@ -7,7 +7,7 @@ metadata:
 
 # Taskledger
 
-Use the installed CLI as the durable authority. A bounded Task Creator prepares the semantic plan, the user approves it, and the foreground Python controller operates execution. Strong Reviewer jobs verify immutable submissions and final integrated state. No model remains alive as the project scheduler.
+Use the installed CLI as the durable authority. Normal execution starts with `taskledger project prepare`, followed by hash approval through `taskledger project start`; it does not require this skill or a parent Codex conversation. The foreground Python controller owns execution. Use this skill for inspection, specification authoring, blocked decisions, reports, troubleshooting, and legacy/manual plan operation. Strong Reviewer jobs verify immutable submissions and final integrated state. No model remains alive as the project scheduler.
 
 ## Open the project
 

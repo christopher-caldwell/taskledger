@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,project_id TEXT NOT NU
 CREATE UNIQUE INDEX IF NOT EXISTS current_operation ON operations(project_id) WHERE state='STARTED';
 CREATE TABLE IF NOT EXISTS audit_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL REFERENCES projects(id),principal_id TEXT,event_type TEXT NOT NULL,entity_type TEXT NOT NULL,entity_id TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS controller_runs(
- id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),mode TEXT NOT NULL CHECK(mode IN ('ASSIGNMENT','PROJECT')),
+ id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),mode TEXT NOT NULL CHECK(mode IN ('ASSIGNMENT','PROJECT','PREPARATION')),
  state TEXT NOT NULL CHECK(state IN ('RUNNING','PAUSED','COMPLETED','FAILED')),config_json TEXT NOT NULL,
  pause_reason TEXT,pause_detail TEXT,created_at TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT);
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_controller_run ON controller_runs(project_id) WHERE state='RUNNING';
@@ -127,6 +127,14 @@ CREATE TABLE IF NOT EXISTS controller_events(
  scope_id TEXT NOT NULL,event_type TEXT NOT NULL,reason_code TEXT,local_turn_id TEXT REFERENCES controller_turns(id),
  small_attributes_json TEXT NOT NULL DEFAULT '{}',occurred_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS controller_events_run ON controller_events(run_id,sequence);
+CREATE TABLE IF NOT EXISTS project_preparations(
+ id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),planning_run_id TEXT NOT NULL REFERENCES controller_runs(id),
+ task_creator_turn_id TEXT REFERENCES controller_turns(id),starting_oid TEXT NOT NULL,canonical_branch TEXT NOT NULL,
+ specification_id TEXT NOT NULL REFERENCES specifications(id),specification_hash TEXT NOT NULL,
+ profile_hashes_json TEXT NOT NULL,run_configuration_json TEXT NOT NULL,run_configuration_hash TEXT NOT NULL,
+ proposal_json TEXT,proposal_hash TEXT,state TEXT NOT NULL CHECK(state IN ('PLANNING','AWAITING_APPROVAL','APPROVED','SUPERSEDED','FAILED')),
+ failure_reason TEXT,execution_run_id TEXT REFERENCES controller_runs(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL,approved_at TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_project_preparation ON project_preparations(project_id) WHERE state IN ('PLANNING','AWAITING_APPROVAL');
 """
 
 
@@ -161,6 +169,8 @@ def connect(home: Path) -> sqlite3.Connection:
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(6,?)", (now(),))
         _migrate_controller_v7(con)
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(7,?)", (now(),))
+        _migrate_controller_v8(con)
+        con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(8,?)", (now(),))
         return con
     except (OSError, sqlite3.Error) as exc:
         if con is not None:
@@ -277,6 +287,45 @@ def _migrate_controller_v7(con: sqlite3.Connection) -> None:
             raise
         finally:
             con.execute("PRAGMA foreign_keys=ON")
+
+
+def _migrate_controller_v8(con: sqlite3.Connection) -> None:
+    """Add CLI preparation records and the PREPARATION controller-run mode."""
+    run_sql = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='controller_runs'"
+    ).fetchone()[0]
+    if "PREPARATION" not in run_sql:
+        con.execute("PRAGMA foreign_keys=OFF")
+        try:
+            con.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE controller_runs_v8(
+                 id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),
+                 mode TEXT NOT NULL CHECK(mode IN ('ASSIGNMENT','PROJECT','PREPARATION')),
+                 state TEXT NOT NULL CHECK(state IN ('RUNNING','PAUSED','COMPLETED','FAILED')),config_json TEXT NOT NULL,
+                 pause_reason TEXT,pause_detail TEXT,created_at TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT);
+                INSERT INTO controller_runs_v8 SELECT * FROM controller_runs;
+                DROP TABLE controller_runs;
+                ALTER TABLE controller_runs_v8 RENAME TO controller_runs;
+                CREATE UNIQUE INDEX one_active_controller_run ON controller_runs(project_id) WHERE state='RUNNING';
+                COMMIT;
+            """)
+        except Exception:
+            if con.in_transaction:
+                con.rollback()
+            raise
+        finally:
+            con.execute("PRAGMA foreign_keys=ON")
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS project_preparations(
+         id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),planning_run_id TEXT NOT NULL REFERENCES controller_runs(id),
+         task_creator_turn_id TEXT REFERENCES controller_turns(id),starting_oid TEXT NOT NULL,canonical_branch TEXT NOT NULL,
+         specification_id TEXT NOT NULL REFERENCES specifications(id),specification_hash TEXT NOT NULL,
+         profile_hashes_json TEXT NOT NULL,run_configuration_json TEXT NOT NULL,run_configuration_hash TEXT NOT NULL,
+         proposal_json TEXT,proposal_hash TEXT,state TEXT NOT NULL CHECK(state IN ('PLANNING','AWAITING_APPROVAL','APPROVED','SUPERSEDED','FAILED')),
+         failure_reason TEXT,execution_run_id TEXT REFERENCES controller_runs(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL,approved_at TEXT);
+        CREATE UNIQUE INDEX IF NOT EXISTS one_open_project_preparation ON project_preparations(project_id) WHERE state IN ('PLANNING','AWAITING_APPROVAL');
+    """)
 
 
 @contextlib.contextmanager

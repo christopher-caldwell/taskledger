@@ -26,6 +26,10 @@ from .profiles import ProfileResolver
 class AppServerRuntime:
     """Async JSON RPC client for the local Codex app server stdio transport."""
 
+    # JSONL tool output/history can exceed asyncio's default 64 KiB line limit.
+    # Keep an explicit finite bound rather than allowing unbounded messages.
+    MAX_MESSAGE_BYTES = 8 * 1024 * 1024
+
     BASE_INSTRUCTIONS = (
         "You are a bounded Taskledger execution agent. Perform only the supplied worker, reviewer, "
         "or planning job. The Python controller owns scheduling, continuation, verification, and "
@@ -212,6 +216,10 @@ class AppServerRuntime:
         waiter = self.turn_waiters.setdefault(handle.turn_id, asyncio.get_running_loop().create_future())
         return await waiter
 
+    async def interrupt_turn(self, handle: RuntimeTurnHandle) -> None:
+        """Request interruption of one acknowledged provider turn."""
+        await self._request("turn/interrupt", {"threadId": handle.thread_id, "turnId": handle.turn_id})
+
     async def inspect_turn(self, handle: RuntimeTurnHandle) -> RuntimeTurnInspection:
         await self._ensure_started()
         try:
@@ -224,8 +232,10 @@ class AppServerRuntime:
             status = turn.get("status")
             if status in {"inProgress", "running"}:
                 return RuntimeTurnInspection("RUNNING")
-            if status in {"completed", "interrupted"}:
+            if status == "completed":
                 return RuntimeTurnInspection("COMPLETED", self._turn_result(handle, turn))
+            if status == "interrupted":
+                return RuntimeTurnInspection("FAILED", self._turn_result(handle, turn), "INTERRUPTED")
             if status in {"failed", "error"}:
                 return RuntimeTurnInspection("FAILED", self._turn_result(handle, turn), self._error_text(turn.get("error")))
             return RuntimeTurnInspection(
@@ -313,6 +323,7 @@ class AppServerRuntime:
                 "-c", "features.image_generation=false", "-c", "features.goals=false",
                 *mcp_disable_args,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                limit=self.MAX_MESSAGE_BYTES,
             )
             self.reader_task = asyncio.create_task(self._read_messages())
             self.stderr_task = asyncio.create_task(self._drain_stderr())
@@ -469,6 +480,14 @@ class AppServerRuntime:
                     turn_id = params.get("turnId")
                     if turn_id and (waiter := self.turn_waiters.get(turn_id)) and not waiter.done():
                         waiter.set_exception(RuntimeError(f"Codex requested unattended interaction: {method}"))
+        except ValueError as exc:
+            # StreamReader.readline wraps LimitOverrunError as ValueError.
+            if "limit" in str(exc).lower() or "chunk" in str(exc).lower():
+                failure = RuntimeError(
+                    f"Taskledger app-server message exceeded the explicit {self.MAX_MESSAGE_BYTES}-byte limit"
+                )
+            else:
+                failure = exc
         except BaseException as exc:
             failure = exc
             if isinstance(exc, asyncio.CancelledError):
@@ -497,8 +516,9 @@ class AppServerRuntime:
             except asyncio.TimeoutError:
                 pass
         if not waiter.done():
-            if turn.get("status") in {"failed", "error"}:
-                waiter.set_exception(RuntimeError(self._error_text(turn.get("error"))))
+            if turn.get("status") in {"failed", "error", "interrupted"}:
+                error = "INTERRUPTED" if turn.get("status") == "interrupted" else self._error_text(turn.get("error"))
+                waiter.set_exception(RuntimeError(error))
             else:
                 waiter.set_result(self._turn_result(handle, turn))
 

@@ -232,23 +232,24 @@ fails normally.
 
 ## Quick start
 
-Ask the primary Codex agent to use the installed skill and name the specification:
+Prepare directly from the repository root with a reviewed JSON run configuration:
 
-```text
-Use $taskledger to implement docs/my-spec.md. Inspect the repository, propose
-the plan, and stop for the required approvals before making changes.
+```sh
+taskledger project prepare --input taskledger-run.json
 ```
 
-For a new or materially changed plan, Taskledger uses two approval gates:
+The command runs one bounded Task Creator, prints an immutable proposal and its
+fingerprint, and stops without starting implementation. Approve that exact
+proposal by hash:
 
-1. **Plan approval:** outcome, success criteria, scope, dependencies, task
-   boundaries, assumptions, and proposed parallel work.
-2. **Execution approval:** exact branch and Git state, initialization and commit
-   actions, validation result, and the complete execution policy.
+```sh
+printf '%s\n' '{"preparation_id":"...","approve_proposal_hash":"sha256:...","live":true}' \
+  | taskledger project start --input -
+```
 
-The Task Creator runs the bounded preparation diagnostic and durably
-materializes the approved plan and execution policy, then exits. The foreground
-Python controller creates eligible assignments. Workers implement in scoped
+The Task Creator returns a structured proposal and exits. Python stores that
+proposal immutably; only `project start` materializes the hash-approved plan and
+execution policy. The foreground Python controller then creates eligible assignments. Workers implement in scoped
 worktrees and submit through Taskledger; they do not integrate their own work.
 Bounded reviewers inspect exact submissions. The controller validates their
 structured verdicts before invoking Taskledger verification and integration.
@@ -263,9 +264,9 @@ submitted commit, and worker receipts cannot satisfy that obligation. For a larg
 `plan apply` creates a batch of requirements and tasks transactionally using
 short local references, reducing repetitive CLI traffic before `plan validate`.
 
-To resume later, ask Codex to resume the existing Taskledger project. The ledger
-persists the approved plan and completed work; the chat transcript is not the
-source of truth.
+To resume later, use `taskledger controller resume` with the paused execution
+run ID. The ledger persists the approved plan and completed work; no chat
+transcript is part of the lifecycle.
 
 Small cohesive assignments may keep one worker across ordered checkpoints by
 creating a `lightweight` assignment with checkpoint criteria. Each checkpoint
@@ -352,6 +353,8 @@ Useful entry points:
 ```sh
 taskledger --version
 taskledger project init --repo /absolute/path/to/repository
+taskledger project prepare --input taskledger-run.json
+taskledger project start --input approved-preparation.json
 taskledger controller run-project --input approved-controller-run.json
 printf '{}\n' | taskledger project cleanup --input -
 ```

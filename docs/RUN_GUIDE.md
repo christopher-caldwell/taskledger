@@ -154,37 +154,36 @@ metadata, and explicitly named TCP services without reading input contents.
 A profile TOML proves configuration only; the host must separately report
 whether it can launch the exact named profile with its configured model/effort.
 
-### 2. Start the workflow through Codex
+### 2. Prepare and start through the CLI
 
-Open a new Codex task from the managed repository root and ask:
+Create a run configuration naming the specification, limits, and declared local
+inputs/services, then run:
 
-```text
-Use $taskledger to implement docs/my-spec.md. Inspect the repository, propose
-the plan, and stop for the required approvals before making changes.
+```sh
+taskledger project prepare --input taskledger-run.json
 ```
 
-The first `project init` invocation is discovery-only. For a new or materially
-revised plan, the skill stops at two gates:
+Review the returned requirements, tasks, routing, waves, assumptions, and
+proposal fingerprint. Start only the exact immutable proposal:
 
-1. Plan approval covers the outcome, observable success, scope, task boundaries,
-   dependencies, assumptions, and possible parallel waves.
-2. Execution approval covers the exact branch and Git state, initialization and
-   commit actions, validated ledger plan, worktree prerequisites, and the first
-   assignment wave.
+```sh
+printf '%s\n' '{"preparation_id":"...","approve_proposal_hash":"sha256:...","live":true}' \
+  | taskledger project start --input -
+```
 
-The Task Creator durably materializes the approved requirements, tasks, checks,
-dependencies, routing, and concurrency policy, then exits. Start the foreground
-project controller with `controller run-project`. It creates eligible
+`project prepare` initializes Taskledger when needed, runs and accounts for the
+bounded Task Creator, then stops. `project start` rechecks repository, spec,
+profiles, configuration, proposal hash, and preflight before transactionally
+materializing the plan and starting the foreground controller. It creates eligible
 assignments, continues unfinished worker turns, dispatches bounded independent
 reviewers, and invokes Taskledger verification and integration.
 
 ### 3. Resume an existing project
 
-Open a new Codex task in the managed repository and ask:
+Resume the paused foreground execution run directly:
 
-```text
-Use $taskledger to resume this repository's existing project and show me the
-next safe action.
+```sh
+printf '%s\n' '{"run_id":"...","live":true}' | taskledger controller resume --input -
 ```
 
 Taskledger loads its durable plan and history from `.taskledger/`; the previous

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
+import signal
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -12,8 +14,8 @@ from typing import Any
 
 from . import __version__
 from . import git
-from .core import LedgerError, MAX_JSON, canonical, require_object, taskledger_home, text
-from .db import connect
+from .core import LedgerError, MAX_JSON, canonical, now, require_object, sha256, taskledger_home, text
+from .db import connect, transaction
 from .service import Service
 
 
@@ -133,20 +135,254 @@ def project_controller_config(limits):
 
 def run_project_controller(service,project,principal,run_id,config,runtime):
     from .controller.journal import Journal
-    from .controller.project import ProjectController
+    from .controller.project import ProjectController, ProjectControllerResult
     journal=Journal(service.con,service.home)
     async def execute():
-        try:return await ProjectController(service=service,project=project,orchestrator=principal,run_id=run_id,runtime=runtime,journal=journal,config=config).run()
+        loop = asyncio.get_running_loop()
+        shutdown = asyncio.Event()
+        shutdown_reason = {"value": "USER_INTERRUPTED"}
+
+        def request_shutdown(reason):
+            shutdown_reason["value"] = reason
+            shutdown.set()
+
+        installed = []
+        for sig, reason in ((signal.SIGINT, "USER_INTERRUPTED"), (signal.SIGTERM, "PROCESS_TERMINATED")):
+            try:
+                loop.add_signal_handler(sig, request_shutdown, reason); installed.append(sig)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass
+        controller = asyncio.create_task(ProjectController(service=service,project=project,orchestrator=principal,run_id=run_id,runtime=runtime,journal=journal,config=config).run())
+        stopper = asyncio.create_task(shutdown.wait())
+        try:
+            done, _ = await asyncio.wait({controller, stopper}, return_when=asyncio.FIRST_COMPLETED)
+            if controller in done:
+                stopper.cancel()
+                return await controller
+            controller.cancel()
+            await asyncio.gather(controller, return_exceptions=True)
+            unresolved = []
+            for turn in journal.open_turns(project_id=project["id"]):
+                result = None
+                if turn.external_turn_id:
+                    from .controller.model import RuntimeTurnHandle
+                    handle = RuntimeTurnHandle(turn.thread_id, turn.external_turn_id)
+                    try:
+                        await asyncio.wait_for(runtime.interrupt_turn(handle), timeout=5)
+                    except Exception:
+                        pass
+                    try:
+                        inspection = None
+                        for _ in range(10):
+                            inspection = await asyncio.wait_for(runtime.inspect_turn(handle), timeout=1)
+                            result = inspection.result
+                            if inspection.state in {"FAILED", "COMPLETED"}:
+                                break
+                            await asyncio.sleep(0.1)
+                        if inspection and inspection.state == "FAILED":
+                            journal.fail_turn(turn.id, inspection.error or "INTERRUPTED", uncertain=False, result=result)
+                            journal.consume_turn(turn.id)
+                            continue
+                        if inspection and inspection.state == "COMPLETED" and result is not None:
+                            journal.complete_turn(turn.id, result)
+                            journal.consume_turn(turn.id)
+                            continue
+                    except Exception:
+                        pass
+                journal.fail_turn(turn.id, "interrupted before a terminal provider result was proven", uncertain=True, result=result)
+                unresolved.append(turn.id)
+            if (journal.run(run_id) or {}).get("state") == "RUNNING":
+                journal.finish_run(run_id, "PAUSED", reason=shutdown_reason["value"], detail=("unresolved interrupted turns: " + ", ".join(unresolved)) if unresolved else "foreground execution interrupted safely")
+            return ProjectControllerResult("PAUSED", run_id, shutdown_reason["value"], "foreground execution interrupted", usage=journal.usage_report(run_id=run_id))
         except Exception as exc:
             if (journal.run(run_id) or {}).get("state")=="RUNNING":journal.finish_run(run_id,"FAILED",reason="INVALID_STATE",detail=str(exc))
             raise
-        finally:await runtime.close()
+        finally:
+            for sig in installed:
+                loop.remove_signal_handler(sig)
+            await runtime.close()
     return asyncio.run(execute())
+
+
+def prepare_project_command(args, data):
+    """Own initial planning from the CLI, including first-time initialization."""
+    from .controller.app_server import AppServerRuntime
+    from .controller.initial_planning import (
+        InitialPlanner, finish_preparation, parse_preparation_request, store_planning_preparation,
+    )
+    from .controller.journal import Journal
+    from .controller.model import SessionRole
+
+    spec_path, config = parse_preparation_request(data)
+    info = git.inspect(os.getcwd())
+    if not info["has_commits"]:
+        raise LedgerError("INITIAL_COMMIT_REQUIRED", "The repository needs an initial commit before preparation.")
+    if not git.clean(info["root"]):
+        raise LedgerError("CANONICAL_WORKTREE_DIRTY", "The canonical worktree must be clean before preparation.")
+    home = home_for_repository(info, create=False)
+    if not os.environ.get("TASKLEDGER_HOME") and not git.ignored(info["root"], ".taskledger/"):
+        raise LedgerError("LEDGER_DIRECTORY_NOT_IGNORED", "Add .taskledger/ to this repository's ignore rules before preparation.")
+    database = home / "taskledger.sqlite3"
+    already_initialized = database.is_file()
+    home = home_for_repository(info, create=True)
+    service = Service(connect(home), home)
+    if not already_initialized:
+        service.init(info["root"], info["branch"])
+    project, principal = service.auth_orchestrator(args.project, args.token)
+    if project["canonical_branch"] != info["branch"]:
+        raise LedgerError("CANONICAL_BRANCH_NOT_CHECKED_OUT", "Preparation requires the canonical branch to be checked out.")
+    active_run = service.con.execute(
+        "SELECT id FROM controller_runs WHERE project_id=? AND state='RUNNING'", (project["id"],)
+    ).fetchone()
+    if active_run:
+        raise LedgerError("INVALID_REQUEST", "A controller run is already active.", details={"run_id": active_run["id"]})
+    existing = service.con.execute(
+        "SELECT id FROM project_preparations WHERE project_id=? AND state IN ('PLANNING','AWAITING_APPROVAL')",
+        (project["id"],),
+    ).fetchone()
+    if existing:
+        raise LedgerError("STALE_STATE", "An open preparation already exists.", details={"preparation_id": existing["id"]})
+    spec = service.con.execute(
+        "SELECT * FROM specifications WHERE project_id=? AND relative_path=? AND lifecycle='ACTIVE'",
+        (project["id"], spec_path),
+    ).fetchone()
+    if spec is None:
+        service.register_spec(project, principal, {"relative_path": spec_path})
+        spec = service.con.execute(
+            "SELECT * FROM specifications WHERE project_id=? AND relative_path=?", (project["id"], spec_path)
+        ).fetchone()
+    service.preflight(project)
+    revision = service.con.execute("SELECT * FROM specification_revisions WHERE id=?", (spec["active_revision_id"],)).fetchone()
+    if not revision or revision["file_state"] != "PRESENT" or not revision["content_hash"]:
+        raise LedgerError("SPECIFICATION_STATE", "Preparation requires a present approved specification revision.")
+    diagnostics = service.preparation_diagnostics(project, {
+        "profiles": ["routine", "complex"], "local_inputs": config.local_inputs,
+        "services": config.services, "host_agent_availability": {"routine": True, "complex": True},
+    })
+    if not diagnostics["ready_for_local_preparation"]:
+        raise LedgerError("INVALID_REQUEST", "Preparation preflight failed.", details={"preflight": diagnostics})
+    runtime = AppServerRuntime(repository_root=project["repository_root"], worker_tools={})
+    identities = {
+        "task_creator": runtime.session_identity(role=SessionRole.TASK_CREATOR, profile="taskledger_task_creator", subject_id="preflight", cwd=project["repository_root"], writable=False).as_dict(),
+        "routine": runtime.session_identity(role=SessionRole.WORKER, profile="routine", subject_id="preflight", cwd=project["repository_root"], writable=True).as_dict(),
+        "complex": runtime.session_identity(role=SessionRole.WORKER, profile="complex", subject_id="preflight", cwd=project["repository_root"], writable=True).as_dict(),
+        "reviewer": runtime.session_identity(role=SessionRole.REVIEWER, profile="taskledger_reviewer", subject_id="preflight", cwd=project["repository_root"], writable=False).as_dict(),
+    }
+    journal = Journal(service.con, service.home)
+    manifest = {
+        "canonical_starting_oid": info["head_oid"], "specification_hash": revision["content_hash"],
+        "scope": "PREPARATION", "controller_configuration_hash": sha256(canonical(config.as_dict())),
+        "taskledger_schema_version": service.con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+        "codex_protocol_identity": runtime.protocol_identity,
+    }
+    run_id = journal.create_run(project["id"], mode="PREPARATION", config={"limits": config.as_dict(), "manifest": manifest})
+    preparation_id = store_planning_preparation(
+        service, project, run_id=run_id, starting_oid=info["head_oid"], spec_id=spec["id"],
+        spec_hash=revision["content_hash"], profile_hashes=identities, config=config,
+    )
+
+    async def execute():
+        try:
+            proposal, turn_id = await InitialPlanner(
+                service=service, project=project, journal=journal, runtime=runtime, run_id=run_id,
+                preparation_id=preparation_id, spec_path=spec_path, config=config,
+            ).run()
+            result = finish_preparation(service, preparation_id, proposal, turn_id)
+            journal.finish_run(run_id, "COMPLETED" if result["status"] == "AWAITING_APPROVAL" else "FAILED", reason=None if result["status"] == "AWAITING_APPROVAL" else "AMBIGUOUS_REQUIREMENT")
+            return {**result, "planning_run_id": run_id, "starting_oid": info["head_oid"], "canonical_branch": info["branch"], "profiles": identities}
+        except BaseException as exc:
+            if (journal.run(run_id) or {}).get("state") == "RUNNING":
+                journal.finish_run(run_id, "FAILED", reason="INVALID_STATE", detail=str(exc))
+            with contextlib.suppress(Exception):
+                with transaction(service.con):
+                    service.con.execute("UPDATE project_preparations SET state='FAILED',failure_reason=?,updated_at=? WHERE id=? AND state='PLANNING'", (str(exc), now(), preparation_id))
+            raise
+        finally:
+            await runtime.close()
+    try:
+        return asyncio.run(execute())
+    finally:
+        service.con.close()
+
+
+def start_prepared_project(service, project, principal, data):
+    from .controller.app_server import AppServerRuntime
+    from .controller.initial_planning import materialized_plan, preparation_row
+    from .controller.journal import Journal
+    from .controller.model import SessionRole
+    from .controller.project import validate_execution_policy
+    require_object(data, {"preparation_id", "approve_proposal_hash", "live"}, {"preparation_id", "approve_proposal_hash", "live"})
+    if data["live"] is not True:
+        raise LedgerError("INVALID_REQUEST", "Live project execution requires live=true explicit opt in.")
+    preparation = preparation_row(service, text(data["preparation_id"], "preparation_id"))
+    if preparation["project_id"] != project["id"] or preparation["state"] != "AWAITING_APPROVAL":
+        raise LedgerError("PREPARATION_STALE", "Preparation is not awaiting approval.")
+    if text(data["approve_proposal_hash"], "approve_proposal_hash") != preparation["proposal_hash"]:
+        raise LedgerError("PREPARATION_STALE", "Approved proposal hash does not match the immutable preparation.")
+    if "sha256:" + sha256(canonical(preparation["proposal"])) != preparation["proposal_hash"]:
+        raise LedgerError("PREPARATION_STALE", "Stored proposal no longer matches its immutable fingerprint.")
+    info = git.inspect(project["repository_root"])
+    if info["branch"] != preparation["canonical_branch"] or info["head_oid"] != preparation["starting_oid"] or not git.clean(info["root"]):
+        raise LedgerError("PREPARATION_STALE", "Repository branch, commit, or cleanliness changed after preparation.")
+    spec = service.con.execute("SELECT * FROM specifications WHERE id=? AND project_id=?", (preparation["specification_id"], project["id"])).fetchone()
+    service.preflight(project)
+    revision = service.con.execute("SELECT * FROM specification_revisions WHERE id=?", (spec["active_revision_id"],)).fetchone() if spec else None
+    if not revision or revision["content_hash"] != preparation["specification_hash"]:
+        raise LedgerError("PREPARATION_STALE", "Specification changed after preparation.")
+    stored = preparation["run_configuration"]
+    diagnostics = service.preparation_diagnostics(project, {
+        "profiles": ["routine", "complex"], "local_inputs": stored["preflight"]["local_inputs"],
+        "services": stored["preflight"]["services"], "host_agent_availability": {"routine": True, "complex": True},
+    })
+    if not diagnostics["ready_for_local_preparation"]:
+        raise LedgerError("PREPARATION_STALE", "Preflight no longer passes.", details={"preflight": diagnostics})
+    runtime = AppServerRuntime(repository_root=project["repository_root"], worker_tools={})
+    identities = {
+        "task_creator": runtime.session_identity(role=SessionRole.TASK_CREATOR, profile="taskledger_task_creator", subject_id="preflight", cwd=project["repository_root"], writable=False).as_dict(),
+        "routine": runtime.session_identity(role=SessionRole.WORKER, profile="routine", subject_id="preflight", cwd=project["repository_root"], writable=True).as_dict(),
+        "complex": runtime.session_identity(role=SessionRole.WORKER, profile="complex", subject_id="preflight", cwd=project["repository_root"], writable=True).as_dict(),
+        "reviewer": runtime.session_identity(role=SessionRole.REVIEWER, profile="taskledger_reviewer", subject_id="preflight", cwd=project["repository_root"], writable=False).as_dict(),
+    }
+    if identities != preparation["profile_hashes"] or sha256(canonical(stored)) != preparation["run_configuration_hash"]:
+        raise LedgerError("PREPARATION_STALE", "Resolved profiles or run configuration changed after preparation.")
+    active_run = service.con.execute(
+        "SELECT id FROM controller_runs WHERE project_id=? AND state='RUNNING'", (project["id"],)
+    ).fetchone()
+    if active_run:
+        raise LedgerError("PREPARATION_STALE", "Another controller run became active after preparation.", details={"run_id": active_run["id"]})
+    applied = service.apply_plan(project, principal, materialized_plan(preparation))
+    validated = service.validate_plan(project, principal)
+    if not validated["valid"]:
+        raise LedgerError("PLAN_VALIDATION_FAILED", "Prepared plan did not pass Taskledger validation.", details={"diagnostics": validated["diagnostics"]})
+    raw_targets = [
+        {"task_id": applied["task_ids"][entry["task_ref"]], "wave": entry["wave"],
+         "worker_profile": entry["worker_profile"], "parallel_safe": entry["parallel_safe"],
+         "write_surfaces": entry["write_surfaces"]}
+        for entry in preparation["proposal"]["execution_policy"]
+    ]
+    targets = validate_execution_policy(service, project, raw_targets)
+    config = project_controller_config(stored["execution_limits"])
+    manifest = {
+        "canonical_starting_oid": info["head_oid"], "starting_plan_fingerprint": validated["fingerprint"],
+        "execution_policy_hash": hashlib.sha256(canonical(targets).encode()).hexdigest(),
+        "controller_configuration_hash": hashlib.sha256(canonical(config.as_dict()).encode()).hexdigest(),
+        "taskledger_schema_version": service.con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+        "codex_protocol_identity": runtime.protocol_identity, "scope": "POST_APPROVAL_EXECUTION",
+        "preparation_run_id": preparation["planning_run_id"], "proposal_hash": preparation["proposal_hash"],
+    }
+    journal = Journal(service.con, service.home)
+    run_id = journal.create_project_run(project["id"], config={"limits": config.as_dict(), "manifest": manifest}, targets=targets)
+    with transaction(service.con):
+        service.con.execute("UPDATE project_preparations SET state='APPROVED',execution_run_id=?,approved_at=?,updated_at=? WHERE id=? AND state='AWAITING_APPROVAL'", (run_id, now(), now(), preparation["id"]))
+    print(f"Taskledger execution run:\n{run_id}\n\nCtrl-C requests a safe pause.", file=sys.stderr, flush=True)
+    result = run_project_controller(service, project, principal, run_id, config, runtime)
+    return {"preparation_id": preparation["id"], **asdict(result)}
 
 
 def dispatch(args, data):
     command=f"{args.resource}.{args.action}"
     if command=="project.init":return init_project(args,data)
+    if command=="project.prepare":return prepare_project_command(args,data)
     if not args.resource or not args.action:raise LedgerError("INVALID_REQUEST","Command requires a resource and action.")
     service=service_for_command(args)
     worker=command.startswith("worker.")
@@ -173,6 +409,7 @@ def dispatch(args, data):
     if command=="project.set-canonical-branch":return service.set_branch(project,principal,data)
     if command=="project.complete":require_object(data,{});return service.complete_project(project,principal)
     if command=="project.cleanup":require_object(data,{});return service.cleanup_worktrees(project,principal)
+    if command=="project.start":return start_prepared_project(service,project,principal,data)
     if command=="controller.run-project":
         require_object(data,{"execution_policy","live","limits"},{"execution_policy","live"})
         if data["live"] is not True:raise LedgerError("INVALID_REQUEST","Live controller execution requires live=true explicit opt in.")

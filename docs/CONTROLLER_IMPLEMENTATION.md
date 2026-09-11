@@ -37,7 +37,12 @@ Task Creator; product ambiguity pauses for the user.
 
 ## Commands
 
-`controller run-project` starts the normal foreground execution path. Its strict
+`project prepare` is the normal entry point. It runs the bounded initial Task
+Creator, stores an immutable proposal, and stops for hash approval. `project
+start` validates that preparation, materializes it, and invokes the foreground
+project controller.
+
+`controller run-project` remains the lower-level post-approval execution path. Its strict
 request contains `execution_policy`, `live: true`, and optional `limits`. The
 policy records task, wave, routine or complex profile, parallel safety, and
 prospective write surfaces for every unfinished task.
