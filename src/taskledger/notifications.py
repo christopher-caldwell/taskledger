@@ -51,6 +51,17 @@ def unbind_change_sink(connection: object) -> None:
         _sinks.pop(id(connection), None)
 
 
+def change_sink_for(connection: object) -> ChangeSink | None:
+    """Return the observer associated with an owning connection.
+
+    Worker broker calls intentionally use a short-lived connection on a
+    different thread.  They need the same *observer*, not the owning
+    connection, so that their committed work invalidates the host projection.
+    """
+    with _lock:
+        return _sinks.get(id(connection))
+
+
 def publish_committed(connection: object) -> None:
     with _lock:
         sink = _sinks.get(id(connection))

@@ -79,6 +79,7 @@ class ConsoleQueries:
         if con.in_transaction:
             raise RuntimeError("cannot project an open write transaction")
         with read_transaction(con):
+            current_project = con.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
             run = con.execute("SELECT id,project_id,mode,state,pause_reason,pause_detail,created_at,started_at,finished_at,config_json "
                 "FROM controller_runs WHERE project_id=? ORDER BY created_at DESC LIMIT 1", (pid,)).fetchone()
             prep = con.execute("SELECT id,project_id,planning_run_id,starting_oid,canonical_branch,specification_id,"
@@ -106,7 +107,7 @@ class ConsoleQueries:
             audit = con.execute("SELECT sequence,'AUDIT' source,event_type,entity_type,entity_id,created_at FROM audit_events WHERE project_id=? ORDER BY sequence DESC LIMIT 100", (pid,)).fetchall()
             controller = con.execute("SELECT e.sequence,'CONTROLLER' source,e.event_type,e.scope_type entity_type,e.scope_id entity_id,e.occurred_at created_at FROM controller_events e JOIN controller_runs r ON r.id=e.run_id WHERE r.project_id=? ORDER BY e.sequence DESC LIMIT 100", (pid,)).fetchall()
             progress = self.service.progress(self.project)
-            phase = self.service.phase(self.project)
+            phase = self.service.phase(current_project)
             usage = Journal(con, self.service.home).usage_report(run_id=run["id"]) if run else {}
             requirements = con.execute("SELECT COUNT(*) total,SUM(CASE WHEN lifecycle='ACTIVE' THEN 1 ELSE 0 END) active FROM requirements WHERE project_id=?", (pid,)).fetchone()
             verified = con.execute("SELECT COUNT(*) FROM requirement_verifications WHERE project_id=? AND state='CURRENT'", (pid,)).fetchone()[0]
@@ -121,7 +122,7 @@ class ConsoleQueries:
             run_values["owned_by_host"] = self.owns_run(run_values["id"])
             run_values["pause_requested"] = self.pause_requested(run_values["id"])
         events = sorted([record(x) for x in (*audit, *controller)], key=lambda x: (x.get("created_at", ""), x.get("source", ""), x.get("sequence", 0)), reverse=True)[:200]
-        project_values = dict(self.project)
+        project_values = dict(current_project)
         owned_running = bool(run_values and run_values["state"] == "RUNNING" and run_values["owned_by_host"])
         actions = [
             {"code": "PREPARE", "enabled": not bool(run_values and run_values["state"] == "RUNNING"),

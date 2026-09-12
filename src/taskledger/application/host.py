@@ -35,7 +35,9 @@ class EngineHost:
         self.runtime_factory = runtime_factory
         self.feed = LatestSnapshotFeed(); self.epoch = str(uuid.uuid4()); self.loop = None
         self.thread = threading.Thread(target=self._thread_main, name="taskledger-engine", daemon=False)
-        self.ready = threading.Event(); self.closed = False; self._startup_error = None
+        self.ready = threading.Event(); self._startup_error = None
+        self.service = self.project = self.principal = self.queries = None
+        self._state_lock = threading.Lock(); self._state = "OPEN"; self._shutdown_future = None
         self._dirty = False; self._projection_queued = False; self._active: dict[str, Any] = {}
         self._active_lock = threading.Lock()
         self._pause_requested: set[str] = set()
@@ -44,35 +46,86 @@ class EngineHost:
         self._active_operations: dict[str, tuple[Any, OperationStatus, asyncio.Task[Any]]] = {}
         self._completed_operations: OrderedDict[str, tuple[Any, OperationStatus]] = OrderedDict()
         self.thread.start(); self.ready.wait(10)
-        if self._startup_error: raise self._startup_error
-        if not self.ready.is_set(): raise RuntimeError("Taskledger engine did not start")
+        if self._startup_error:
+            self.thread.join()
+            raise self._startup_error
+        if not self.ready.is_set():
+            # Do not leave a non-daemon owner thread behind after a failed
+            # startup handshake.  The thread observes this stop immediately
+            # once it reaches the loop, and construction waits for its exit.
+            self._set_state("CLOSING")
+            if self.loop is not None:
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            self.thread.join()
+            self._set_state("CLOSED")
+            raise RuntimeError("Taskledger engine did not start")
+
+    @property
+    def closed(self) -> bool:
+        with self._state_lock:
+            return self._state == "CLOSED"
+
+    @property
+    def lifecycle_state(self) -> str:
+        with self._state_lock:
+            return self._state
+
+    def _set_state(self, state: str) -> None:
+        with self._state_lock:
+            self._state = state
+
+    def _is_open(self) -> bool:
+        with self._state_lock:
+            return self._state == "OPEN"
 
     def _thread_main(self):
         self.loop = asyncio.new_event_loop(); asyncio.set_event_loop(self.loop)
         try:
             info = git.inspect(self.repository); home = home_for_repository(info, create=False)
             if not (home / "taskledger.sqlite3").is_file():
-                self.service = None; self.project = None; self.principal = None; self.queries = None
                 self.feed.publish(ConsoleSnapshot(1,SnapshotVersion(self.epoch,1),"",record(id=None,repository_root=self.repository,effective_phase="UNINITIALIZED"),None,None,(),(),record(accounting_quality="UNAVAILABLE"),(),()))
             else:
                 self._adopt_service(Service(connect_existing(home), home))
         except BaseException as exc:
-            self._startup_error = exc; self.ready.set(); self.loop.close(); return
+            self._startup_error = exc; self.ready.set()
+            self._set_state("CLOSED")
+            self.loop.close(); return
         self.ready.set()
         try: self.loop.run_forever()
         finally:
-            if self.service is not None:
-                unbind_change_sink(self.service.con); self.service.con.close()
-            self.loop.run_until_complete(self.loop.shutdown_asyncgens()); self.loop.close()
+            try:
+                if self.service is not None:
+                    unbind_change_sink(self.service.con)
+                    self.service.con.close()
+            finally:
+                self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+                self.loop.close()
+                self._set_state("CLOSED")
 
-    def _adopt_service(self, service):
-        self.service = service
-        self.project, self.principal = service.auth_orchestrator(self.project_id, self.token)
-        self.queries = ConsoleQueries(service, self.project, self.epoch, self._owns_run, self._is_pause_requested)
-        if self.feed.latest is not None:
-            self.queries.revision = self.feed.latest.version.revision
-        bind_change_sink(service.con, _RefreshSink(self._schedule_projection))
-        self.feed.publish(self.queries.snapshot())
+    def _adopt_service(self, service, *, project_id: str | None = None):
+        """Adopt a fully constructed service, or leave the host untouched.
+
+        A failed auth/projection must not expose a closed connection through
+        ``self.service``.  This method owns ``service`` until the final state
+        assignment succeeds.
+        """
+        bound = False
+        try:
+            project, principal = service.auth_orchestrator(project_id or self.project_id, self.token)
+            queries = ConsoleQueries(service, project, self.epoch, self._owns_run, self._is_pause_requested)
+            if self.feed.latest is not None:
+                queries.revision = self.feed.latest.version.revision
+            bind_change_sink(service.con, _RefreshSink(self._notice_committed)); bound = True
+            snapshot = queries.snapshot()
+            # Publishing is also part of adoption: if a feed implementation
+            # rejects this snapshot, retain neither its service nor its sink.
+            self.feed.publish(snapshot)
+        except BaseException:
+            if bound:
+                unbind_change_sink(service.con)
+            service.con.close()
+            raise
+        self.service, self.project, self.principal, self.queries = service, project, principal, queries
 
     def _owns_run(self, run_id):
         with self._active_lock: return run_id in self._active
@@ -94,12 +147,25 @@ class EngineHost:
         service = Service(connect(home), home)
         try:
             initialized = service.init(info["root"], info["branch"])
-            if self.project_id is None:
-                self.project_id = initialized["project_id"]
-            self._adopt_service(service)
+            selected_project_id = self.project_id or initialized["project_id"]
+            self._adopt_service(service, project_id=selected_project_id)
+            self.project_id = selected_project_id
         except BaseException:
-            service.con.close()
+            # _adopt_service owns and closes a failed candidate.  A failure
+            # before that transfer (for example init itself) remains ours.
+            if self.service is not service:
+                try: service.con.close()
+                except Exception: pass
             raise
+
+    def _notice_committed(self) -> None:
+        """Cross-thread committed-change ingress; never blocks a transaction."""
+        loop = self.loop
+        if loop is not None and self.lifecycle_state != "CLOSED":
+            try:
+                loop.call_soon_threadsafe(self._schedule_projection)
+            except RuntimeError:
+                pass
 
     def _schedule_projection(self):
         self._dirty = True
@@ -150,13 +216,15 @@ class EngineHost:
                 operation=self._transient_operation))
 
     def submit(self, function: Callable[..., Any], *args: Any) -> Future:
-        if self.closed or self.loop is None: raise RuntimeError("ENGINE_CLOSING")
+        if not self._is_open() or self.loop is None: raise RuntimeError("ENGINE_CLOSING")
         async def invoke(): return function(*args)
         return asyncio.run_coroutine_threadsafe(invoke(), self.loop)
 
-    def submit_coro(self, coroutine) -> Future:
-        if self.closed or self.loop is None: raise RuntimeError("ENGINE_CLOSING")
-        return asyncio.run_coroutine_threadsafe(coroutine, self.loop)
+    def submit_async(self, factory: Callable[[], Any]) -> Future:
+        """Invoke an async factory on the engine loop, never a caller-built coroutine."""
+        if not self._is_open() or self.loop is None: raise RuntimeError("ENGINE_CLOSING")
+        async def invoke(): return await factory()
+        return asyncio.run_coroutine_threadsafe(invoke(), self.loop)
 
     def current_snapshot(self): return self.feed.latest
     def open_feed(self): return self.feed.attach(asyncio.get_running_loop())
@@ -166,28 +234,33 @@ class EngineHost:
         if self.queries is not None:
             try: self.feed.publish(self.queries.snapshot(operation=self._operation_record()))
             except Exception as exc: self._publish_observation_error(exc)
+    def _query(self, method: str, *args):
+        if self.queries is None:
+            raise LedgerError("PROJECT_REQUIRED", "Taskledger is not initialized for this repository.")
+        return getattr(self.queries, method)(*args)
+
     async def task_detail(self, task_id: str):
-        if self.queries is None: raise LedgerError("PROJECT_REQUIRED", "Taskledger is not initialized for this repository.")
-        return await asyncio.wrap_future(self.submit(self.queries.task_detail, task_id))
+        return await asyncio.wrap_future(self.submit(self._query, "task_detail", task_id))
     async def task_page(self, offset: int = 0, limit: int = 200):
-        if self.queries is None: raise LedgerError("PROJECT_REQUIRED", "Taskledger is not initialized for this repository.")
-        return await asyncio.wrap_future(self.submit(self.queries.task_page, offset, limit))
+        return await asyncio.wrap_future(self.submit(self._query, "task_page", offset, limit))
     async def preparation_detail(self, preparation_id: str):
-        if self.queries is None: raise LedgerError("PROJECT_REQUIRED", "Taskledger is not initialized for this repository.")
-        return await asyncio.wrap_future(self.submit(self.queries.preparation_detail, preparation_id))
+        return await asyncio.wrap_future(self.submit(self._query, "preparation_detail", preparation_id))
     async def history_page(self, cursor, limit=100):
-        if self.queries is None: raise LedgerError("PROJECT_REQUIRED", "Taskledger is not initialized for this repository.")
-        return await asyncio.wrap_future(self.submit(self.queries.history_page, cursor, limit))
+        return await asyncio.wrap_future(self.submit(self._query, "history_page", cursor, limit))
 
     async def run_report(self, run_id: str):
-        if self.queries is None: raise LedgerError("PROJECT_REQUIRED", "Taskledger is not initialized for this repository.")
         from taskledger.controller.reporting import controller_report
-        run = await asyncio.wrap_future(self.submit(lambda: self.service.con.execute("SELECT project_id FROM controller_runs WHERE id=?",(run_id,)).fetchone()))
-        if not run or run["project_id"] != self.project["id"]: raise LedgerError("INVALID_REQUEST", "Controller run was not found.")
         async def build():
+            if self.queries is None or self.service is None or self.project is None:
+                raise LedgerError("PROJECT_REQUIRED", "Taskledger is not initialized for this repository.")
+            run = self.service.con.execute(
+                "SELECT project_id FROM controller_runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if not run or run["project_id"] != self.project["id"]:
+                raise LedgerError("INVALID_REQUEST", "Controller run was not found.")
             report = await controller_report(self.service.con,run_id,include_provider_detail=False)
             return record(run_id=run_id, **report)
-        return await asyncio.wrap_future(self.submit_coro(build()))
+        return await asyncio.wrap_future(self.submit_async(build))
 
     async def mutate(self, request_id: str, kind: str, payload: dict[str, Any]) -> OperationReceipt:
         payload = json.loads(canonical(payload))
@@ -260,7 +333,7 @@ class EngineHost:
             finally: self._transient_operation = None
         except (LedgerError, RuntimeError) as exc:
             code = exc.code if isinstance(exc, LedgerError) else "INVALID_REQUEST"
-            message = exc.message if isinstance(exc, LedgerError) else str(exc)
+            message = exc.message if isinstance(exc, LedgerError) else "Console operation input is invalid."
             return self._record_rejection(request_id, fingerprint, code, message)
         receipt = OperationReceipt(request_id, "ACCEPTED", run_id=admitted.run_id, preparation_id=admitted.preparation_id)
         self._lifecycle_operation_id = request_id
@@ -301,7 +374,7 @@ class EngineHost:
             finally: self._transient_operation = None
         except (LedgerError, RuntimeError) as exc:
             code = exc.code if isinstance(exc, LedgerError) else "INVALID_REQUEST"
-            message = exc.message if isinstance(exc, LedgerError) else str(exc)
+            message = exc.message if isinstance(exc, LedgerError) else "Console operation input is invalid."
             return self._record_rejection(request_id, fingerprint, code, message)
         receipt = OperationReceipt(request_id, "ACCEPTED", run_id=admitted.run_id)
         self._lifecycle_operation_id = request_id
@@ -349,9 +422,18 @@ class EngineHost:
             else: raise LedgerError("INVALID_REQUEST", f"Unknown console operation: {kind}")
             receipt = OperationReceipt(request_id, "APPLIED", run_id=payload.get("run_id"))
             status = OperationStatus(request_id,"SUCCEEDED",receipt,record(**result))
-        except LedgerError as exc:
-            receipt = OperationReceipt(request_id,"REJECTED",error=ApplicationError(exc.code,exc.message))
+        except (LedgerError, ValueError, TypeError, KeyError) as exc:
+            if isinstance(exc, LedgerError):
+                code, message = exc.code, exc.message
+            else:
+                code, message = "INVALID_REQUEST", "Console operation input is invalid."
+            receipt = OperationReceipt(request_id,"REJECTED",error=ApplicationError(code,message))
             status = OperationStatus(request_id,"FAILED",receipt,error=receipt.error)
+        except Exception:
+            receipt = OperationReceipt(request_id, "REJECTED", error=ApplicationError(
+                "INTERNAL_ERROR", "Taskledger encountered an unexpected internal error."
+            ))
+            status = OperationStatus(request_id, "FAILED", receipt, error=receipt.error)
         self._completed_operations[request_id] = (fingerprint,status)
         while len(self._completed_operations) > 256:
             self._completed_operations.popitem(last=False)
@@ -381,8 +463,8 @@ class EngineHost:
             except LedgerError as exc:
                 error = ApplicationError(exc.code, exc.message)
                 status = OperationStatus(request_id, "FAILED", receipt, error=error)
-            except Exception as exc:
-                error = ApplicationError("INTERNAL_ERROR", str(exc))
+            except Exception:
+                error = ApplicationError("INTERNAL_ERROR", "Taskledger encountered an unexpected internal error.")
                 status = OperationStatus(request_id, "FAILED", receipt, error=error)
             self._active_operations.pop(request_id, None)
             self._completed_operations[request_id] = (fingerprint, status)
@@ -420,19 +502,42 @@ class EngineHost:
         if self.loop is not None: self.loop.call_soon_threadsafe(self._schedule_projection)
         return PauseRequestReceipt(lifecycle_id, "REQUESTED")
 
-    async def close(self):
-        if self.closed: return
-        self.closed = True
+    def _request_active_stops(self) -> None:
+        """Set lifecycle latches synchronously; callbacks are thread-safe."""
+        with self._active_lock:
+            callbacks = tuple(self._active.values())
+        for request_stop in callbacks:
+            try:
+                request_stop("APPLICATION_SHUTDOWN")
+            except Exception:
+                # Shutdown must continue even if an optional lifecycle owner is
+                # already faulted.
+                pass
+
+    async def close(self, timeout: float = 10):
+        with self._state_lock:
+            state = self._state
+            if state == "CLOSED":
+                return
+            self._state = "CLOSING"
+        # This is deliberately before scheduling any loop work.  A synchronous
+        # check may be occupying the engine loop, but its stop latch is still
+        # observable immediately.
+        self._request_active_stops()
         if self.feed.reader: self.feed.reader.close()
-        if self.loop:
+        if self.loop and self.thread.is_alive():
             async def finish_active():
-                with self._active_lock: callbacks = list(self._active.values())
-                for request_stop in callbacks:
-                    request_stop("APPLICATION_SHUTDOWN")
                 tasks = [entry[2] for entry in self._active_operations.values()]
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
                 self.loop.stop()
-            asyncio.run_coroutine_threadsafe(finish_active(), self.loop)
-        await asyncio.to_thread(self.thread.join, 10)
-        if self.thread.is_alive(): raise RuntimeError("engine shutdown is waiting for a safe point")
+            if self._shutdown_future is None:
+                self._shutdown_future = asyncio.run_coroutine_threadsafe(finish_active(), self.loop)
+            try:
+                await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(self._shutdown_future)), timeout)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("engine shutdown is waiting for a safe point") from exc
+        await asyncio.to_thread(self.thread.join, timeout)
+        if self.thread.is_alive():
+            raise RuntimeError("engine shutdown is waiting for a safe point")
+        self._set_state("CLOSED")

@@ -95,8 +95,10 @@ class LifecycleOwner:
                     self.journal.finish_run(self.run_id, "FAILED", reason="INVALID_STATE", detail=str(exc))
                 raise
             finally:
-                await self.runtime.close()
-                if self._cleanup is not None:
-                    await self._cleanup()
+                try:
+                    await self.runtime.close()
+                finally:
+                    if self._cleanup is not None:
+                        await self._cleanup()
         finally:
             lease.__exit__(None, None, None)

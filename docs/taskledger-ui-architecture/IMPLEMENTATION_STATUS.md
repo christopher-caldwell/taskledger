@@ -1,12 +1,26 @@
 # Task Ledger visual console implementation status
 
 The headless application and lifecycle layer in
-`01-headless-mechanics-spec.md` is implemented. Its public contract can prepare,
+`01-headless-mechanics-spec.md` is implemented and accepted. Its public contract can prepare,
 approve and start, resume project or assignment runs, request safe pause, apply
 human interventions, query immutable snapshots/details/history/reports, and
 observe committed changes without Textual installed. See
-`HEADLESS_ACCEPTANCE.md` for the M01–M24 mapping, commands, measurements, and the
-unavailable Linux coverage declaration.
+`HEADLESS_ACCEPTANCE.md` for the M01–M24 mapping, commands, and measurements.
+The correctness hardening pass added
+broker-to-host committed-change propagation (including isolated worker SQLite
+connections), OPEN/CLOSING/CLOSED host shutdown semantics, atomic service
+adoption rollback, safe application error normalization, engine-owned report
+construction, current durable project-state projection, and removal of
+duplicated CLI lifecycle code.
+
+M04, M05, M14, M17, and M24 now have deterministic acceptance fixtures and are
+recorded as Pass. The coverage includes observer equivalence; real
+broker-originated question, blocker, and submit updates; reviewer and
+integration pause boundaries; fatal primary-client cleanup of an owned active
+lifecycle; and one successful public-contract-only prepare-to-completion run.
+
+Current non-live regression evidence: 195 tests passed (11 skipped); the
+focused application/controller regression passed 128 tests (1 skipped).
 
 The remaining work is the Textual adapter described by
 `02-textual-display-spec.md`. The existing adapter is a display shell; the

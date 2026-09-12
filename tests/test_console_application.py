@@ -3,14 +3,17 @@ import dataclasses
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 import sys
 from pathlib import Path
 
 from taskledger.application.contracts import SnapshotVersion
 from taskledger.application.live import LatestSnapshotFeed
 from taskledger.db import transaction
-from taskledger.notifications import ChangeNotice, bind_change_sink, unbind_change_sink
+from taskledger.notifications import ChangeNotice, bind_change_sink, publish_committed, unbind_change_sink
 from taskledger.ui.formatting import safe_text
 
 
@@ -35,6 +38,27 @@ class CommittedNotificationTests(unittest.TestCase):
         self.sink.publish=lambda notice:(_ for _ in ()).throw(RuntimeError())
         with transaction(self.con):self.con.execute("INSERT INTO x VALUES(1)")
         self.assertEqual(self.con.execute("SELECT count(*) FROM x").fetchone()[0],1)
+
+    def test_worker_broker_isolated_connection_inherits_owner_observer(self):
+        """The broker path has a different SQLite connection but the same sink."""
+        from taskledger.controller.worker_broker import WorkerBroker
+        class Connection:
+            def close(self): pass
+        owner_con, isolated_con = Connection(), Connection()
+        owner = SimpleNamespace(con=owner_con, home=Path("/tmp/taskledger-test-home"))
+        isolated = SimpleNamespace(con=isolated_con, home=owner.home)
+        broker = WorkerBroker(owner, object(), Path("/tmp/taskledger-test.sock"))
+        observed = Sink(); bind_change_sink(owner_con, observed)
+        try:
+            # _dispatch models a committed worker tool call made through the
+            # very isolated Service created by dispatch().
+            with patch("taskledger.db.connect", return_value=isolated_con), \
+                 patch("taskledger.service.Service", return_value=isolated), \
+                 patch.object(broker, "_dispatch", side_effect=lambda _a, _d, service: (publish_committed(service.con), {"ok": True})[1]):
+                self.assertEqual(broker.dispatch("question", {}), {"ok": True})
+            self.assertEqual(len(observed.notices), 1)
+        finally:
+            unbind_change_sink(owner_con)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -146,6 +170,223 @@ class HostIntegrationTests(unittest.TestCase):
                 asyncio.run(scenario())
             finally:
                 asyncio.run(host.close())
+
+    def test_close_requests_stop_before_a_blocked_engine_can_run_cleanup(self):
+        from taskledger.application.host import EngineHost
+        with tempfile.TemporaryDirectory() as directory:
+            import subprocess
+            subprocess.run(["git", "init", "-q", directory], check=True)
+            host = EngineHost(directory)
+            entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
+            with host._active_lock:
+                host._active["run"] = lambda _reason: stopped.set()
+            try:
+                host.submit(lambda: (entered.set(), release.wait())).result(.1)
+            except TimeoutError:
+                pass
+            self.assertTrue(entered.wait(1))
+            with self.assertRaisesRegex(RuntimeError, "safe point"):
+                asyncio.run(host.close(timeout=.01))
+            self.assertTrue(stopped.is_set())
+            self.assertEqual(host.lifecycle_state, "CLOSING")
+            release.set()
+            asyncio.run(host.close(timeout=2))
+            self.assertEqual(host.lifecycle_state, "CLOSED")
+            self.assertFalse(host.thread.is_alive())
+
+    def test_fatal_primary_client_finally_requests_safe_stop_and_closes_host(self):
+        """M17: a display-equivalent crash still executes the composition-root cleanup."""
+        from taskledger.application.host import EngineHost
+        with tempfile.TemporaryDirectory() as directory:
+            import subprocess
+            subprocess.run(["git", "init", "-q", directory], check=True)
+            host = EngineHost(directory)
+            stopped = threading.Event()
+            with host._active_lock:
+                host._active["owned-run"] = lambda _reason: stopped.set()
+            async def primary_client():
+                try:
+                    raise RuntimeError("injected display failure")
+                finally:
+                    await host.close(timeout=2)
+            with self.assertRaisesRegex(RuntimeError, "injected display failure"):
+                asyncio.run(primary_client())
+            self.assertTrue(stopped.is_set())
+            self.assertEqual(host.lifecycle_state, "CLOSED")
+            self.assertFalse(host.thread.is_alive())
+
+    def test_fatal_primary_client_closes_owned_lifecycle_and_durable_resources(self):
+        """M17: fatal-client cleanup pauses and reconciles an owned active run."""
+        from tests.test_acceptance import TaskledgerAcceptance
+        from taskledger.application.contracts import OperationReceipt
+        from taskledger.application.host import EngineHost
+        from taskledger.application.lifecycle import LifecycleOwner
+        from taskledger.controller.fakes import FakeRuntime
+        from taskledger.controller.journal import Journal
+        from taskledger.controller.model import RuntimeTurnHandle
+        from taskledger.db import connect
+        from taskledger.service import Service
+
+        fixture = TaskledgerAcceptance("test_version_flag_returns_installed_version")
+        fixture.setUp()
+        host = None
+        try:
+            project_id = fixture.init()
+            host = EngineHost(str(fixture.root), project_id=project_id)
+            lifecycle_entered = threading.Event()
+
+            def admit_owned_lifecycle():
+                journal = Journal(host.service.con, host.service.home)
+                run_id = journal.create_run(project_id, mode="PROJECT", config={})
+                session = journal.create_session(
+                    run_id=run_id, project_id=project_id, role="REVIEWER",
+                    profile="taskledger_reviewer", subject_id="submission",
+                    external_thread_id="review-thread", config_hash="fake", runtime_identity={},
+                )
+                turn_id = journal.begin_turn(session.id, "reviewer")
+                journal.acknowledge_turn(turn_id, RuntimeTurnHandle("review-thread", "review-turn"))
+                runtime = FakeRuntime(worker_turns=[], reviewer_turns=[])
+
+                async def hanging_runner(_stop_requested):
+                    lifecycle_entered.set()
+                    await asyncio.Event().wait()
+
+                owner = LifecycleOwner(
+                    host.service, host.project, host.principal, run_id, object(), runtime,
+                    runner_factory=hanging_runner,
+                )
+                receipt = OperationReceipt("owned-lifecycle", "ACCEPTED", run_id=run_id)
+                with host._active_lock:
+                    host._active[run_id] = owner.request_stop
+
+                async def work():
+                    try:
+                        return dataclasses.asdict(await owner.run())
+                    finally:
+                        with host._active_lock:
+                            host._active.pop(run_id, None)
+
+                host._admit_owned_operation(
+                    "owned-lifecycle", ("test-owned-lifecycle", run_id), receipt, work,
+                )
+                return run_id, turn_id, runtime, host.service.con
+
+            run_id, turn_id, runtime, owned_connection = host.submit(admit_owned_lifecycle).result(2)
+            self.assertTrue(lifecycle_entered.wait(2))
+
+            async def primary_client():
+                try:
+                    raise RuntimeError("injected primary-client failure")
+                finally:
+                    await host.close(timeout=2)
+
+            with self.assertRaisesRegex(RuntimeError, "injected primary-client failure"):
+                asyncio.run(primary_client())
+
+            self.assertTrue(runtime.closed)
+            self.assertEqual(host.lifecycle_state, "CLOSED")
+            self.assertFalse(host.thread.is_alive())
+            with self.assertRaises(sqlite3.ProgrammingError):
+                owned_connection.execute("SELECT 1")
+
+            reopened = Service(connect(fixture.home), fixture.home)
+            try:
+                journal = Journal(reopened.con, reopened.home)
+                self.assertEqual(journal.run(run_id)["state"], "PAUSED")
+                turn = reopened.con.execute(
+                    "SELECT state,consumed_at FROM controller_turns WHERE id=?", (turn_id,)
+                ).fetchone()
+                self.assertEqual(turn["state"], "FAILED")
+                self.assertIsNotNone(turn["consumed_at"])
+                with journal.project_lock(project_id):
+                    pass
+            finally:
+                reopened.con.close()
+        finally:
+            if host is not None and not host.closed:
+                asyncio.run(host.close())
+            fixture.tearDown()
+
+    def test_invalid_budget_and_internal_operation_errors_are_safe(self):
+        from tests.test_acceptance import TaskledgerAcceptance
+        from taskledger.application.contracts import OperationReceipt
+        from taskledger.application.host import EngineHost
+        from taskledger.controller.journal import Journal
+        fixture = TaskledgerAcceptance("test_version_flag_returns_installed_version"); fixture.setUp()
+        try:
+            project_id = fixture.init()
+            from taskledger.cli import service_for_command
+            import argparse, os
+            previous = os.getcwd(); os.chdir(fixture.root)
+            try: service = service_for_command(argparse.Namespace())
+            finally: os.chdir(previous)
+            run_id = Journal(service.con, service.home).create_run(project_id, mode="PROJECT", config={})
+            service.con.close(); host = EngineHost(str(fixture.root), project_id=project_id)
+            async def scenario():
+                invalid = await host.extend_budget("bad-budget", run_id=run_id, kind="NOPE", amount=0, reason="bad")
+                self.assertEqual(invalid.error.code, "INVALID_REQUEST")
+                receipt = OperationReceipt("internal", "ACCEPTED")
+                async def broken(): raise RuntimeError("/private/path secret-value")
+                await asyncio.wrap_future(host.submit(host._admit_owned_operation, "internal", ("broken", ""), receipt, broken))
+                for _ in range(100):
+                    status = await host.operation_status("internal")
+                    if status.phase != "ACCEPTED": break
+                    await asyncio.sleep(.01)
+                self.assertEqual(status.error.code, "INTERNAL_ERROR")
+                self.assertNotIn("secret-value", status.error.message)
+                self.assertNotIn("/private/path", status.error.message)
+            try: asyncio.run(scenario())
+            finally: asyncio.run(host.close())
+        finally: fixture.tearDown()
+
+    def test_real_worker_question_and_blocker_refresh_host_snapshot(self):
+        """A real broker tool mutation reaches an attached host feed unaided."""
+        from tests.test_acceptance import TaskledgerAcceptance
+        from taskledger.application.host import EngineHost
+        from taskledger.controller.worker_broker import WorkerBroker
+        from taskledger.db import connect
+        from taskledger.service import Service
+        fixture = TaskledgerAcceptance("test_version_flag_returns_installed_version"); fixture.setUp()
+        host = None
+        try:
+            project_id = fixture.init()
+            _, task_id = fixture.setup_task(project_id)
+            fixture.command("plan", "validate", {}, project=project_id)
+            _, created = fixture.command("assignment", "create", {"task_id": task_id, "worker_profile": "routine"}, project=project_id)
+            token = fixture.assignment_token(created)
+            side = Service(connect(fixture.home), fixture.home)
+            try:
+                worker = side.authenticate(None, token, "WORKER")
+            finally:
+                side.con.close()
+            host = EngineHost(str(fixture.root), project_id=project_id)
+            broker = host.submit(lambda: WorkerBroker(host.service, worker, fixture.home / "test-worker.sock")).result(2)
+            async def scenario():
+                reader = host.open_feed()
+                await reader.receive()  # atomic seed; no unrelated host mutation follows.
+                result = await asyncio.to_thread(broker.dispatch, "question", {"body": "Need a decision", "blocking": False})
+                self.assertIn("question_id", result)
+                for _ in range(100):
+                    snapshot = await asyncio.wait_for(reader.receive(), 1)
+                    if any(item.get("kind") == "QUESTION" for item in snapshot.interventions):
+                        break
+                else:
+                    self.fail("worker-originated question never refreshed the host snapshot")
+                result = await asyncio.to_thread(broker.dispatch, "blocker", {
+                    "category": "EXTERNAL_DEPENDENCY", "scope_type": "TASK", "description": "Need a dependency"
+                })
+                self.assertIn("blocker_id", result)
+                for _ in range(100):
+                    snapshot = await asyncio.wait_for(reader.receive(), 1)
+                    if any(item.get("kind") == "BLOCKER" for item in snapshot.interventions):
+                        break
+                else:
+                    self.fail("worker-originated blocker never refreshed the host snapshot")
+                reader.close()
+            asyncio.run(scenario())
+        finally:
+            if host is not None: asyncio.run(host.close())
+            fixture.tearDown()
     def test_uninitialized_host_does_not_create_ledger(self):
         from taskledger.application.host import EngineHost
         with tempfile.TemporaryDirectory() as directory:
