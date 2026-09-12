@@ -25,6 +25,22 @@ Screen {
 .section-note { height: auto; padding: 0 1; color: $text-muted; }
 DataTable { height: 1fr; background: $surface; }
 
+.action-bar { height: 3; padding: 0 1; align-vertical: middle; }
+.action-bar Button { margin-right: 1; }
+.action-bar .section-note { width: 1fr; }
+#tasks-master-detail { height: 1fr; }
+#tasks-table { width: 1fr; }
+#task-inline-detail {
+    display: none;
+    width: 3fr;
+    height: 1fr;
+    overflow-y: auto;
+    padding: 1;
+    border-left: solid $primary;
+}
+.wide #tasks-table { width: 2fr; }
+.wide #task-inline-detail { display: block; }
+
 #minimum {
     display: none;
     height: 1fr;
@@ -37,7 +53,7 @@ DataTable { height: 1fr; background: $surface; }
 .below-minimum #sections, .below-minimum #global-banner, .below-minimum Footer { display: none; }
 .compact #console-header { height: 2; }
 
-ExitDialog, HelpDialog {
+ExitDialog, HelpDialog, MessageDialog, ConfirmDialog, TextMutationDialog, BudgetDialog {
     align: center middle;
     background: $background 70%;
 }
@@ -54,3 +70,19 @@ ExitDialog, HelpDialog {
 .dialog-title { height: auto; margin-bottom: 1; }
 .dialog-buttons { height: auto; align-horizontal: right; margin-top: 1; }
 .dialog-buttons Button { margin-left: 1; }
+.confirm-dialog { width: 72; }
+.intervention-dialog { width: 72; }
+.intervention-dialog TextArea { height: 8; }
+.budget-dialog { width: 56; }
+.form-error { height: auto; color: $error; margin: 1 0; }
+
+#detail-screen, #form-screen { background: $background; }
+.screen-toolbar { height: 3; padding: 0 1; background: $surface; align-vertical: middle; }
+.screen-toolbar .screen-title { width: 1fr; text-style: bold; }
+.screen-toolbar Button { margin-left: 1; }
+#detail-content, #preparation-content { padding: 1 2; }
+#stale-warning { padding: 0 2; }
+#form-scroll { padding: 1 3; }
+#form-scroll Input { margin-bottom: 1; }
+#form-scroll TextArea { height: 7; margin-bottom: 1; }
+.form-heading { margin-top: 1; text-style: bold; color: $accent; }

@@ -22,39 +22,40 @@ lifecycle; and one successful public-contract-only prepare-to-completion run.
 Current non-live regression evidence: 195 tests passed (11 skipped); the
 focused application/controller regression passed 128 tests (1 skipped).
 
-The implementation baseline for the Textual adapter is now TL-UI-1 in
-`02-textual-display-spec.md`, pinned to Textual 8.2.8. The first implementation
-pass substantially completes Checkpoint A: external TCSS and the built-in dark
-theme, a compact Task Ledger header, a single feed observer, six sections,
-keyed task/agent/activity/intervention tables, authoritative Overview and Usage
-summaries, explicit refresh and help, truthful pause presentation, guarded
-active-run exit, and geometry classes including a restricted below-minimum
-view. Rendering is slice-aware and task selection is retained by durable ID.
+The Textual adapter implements the functional TL-UI-1 operator console and is
+pinned to Textual 8.2.8. It uses external TCSS, one feed observer, immutable
+revision-ordered snapshots, slice-aware rendering, six keyboard-accessible
+sections, and guarded lifecycle shutdown. The visual layer uses only the public
+application/client contract and remains optional for headless installations.
 
-Current UI evidence with the pinned Textual release: the complete non-live
-suite passed 199 tests (9 skipped). The focused UI/host suite passed 29 tests,
-and a no-Textual run of the UI module passed its static boundary test while
-skipping the five Pilot cases. A built wheel was inspected and contains the
-external `taskledger.tcss` resource.
+The console now supports the complete normal operator workflow: prepare with
+validated limits and preflight JSON; inspect an exact immutable preparation;
+approve and start its exact proposal hash; observe workers, reviewers, current
+activity, interventions, and usage; inspect task evidence/details; page tasks
+and durable source-aware activity history; answer questions; resolve blockers;
+grant budget; request safe pause; resume; inspect completion and an immutable
+run report; and exit without abandoning an owned lifecycle. Accepted lifecycle
+operations are presented as admissions, then reconciled once through
+`operation_status` after their active snapshot entry disappears.
 
-Checkpoint A still needs distinct standard-column reduction and a manual run
-against the deterministic fake-runtime fixture before it is declared complete.
-The following later-checkpoint work remains outstanding:
+Wide terminals provide task master/detail behavior. Standard and compact
+terminals use full detail screens, and the restricted below-minimum screen is
+retained. Detail requests are identity/generation guarded, forms survive
+unrelated snapshots, untrusted values use literal-safe rendering, and history
+preserves Audit/Controller source identity.
 
-- task master/detail navigation with stable-ID selection and stale-detail
-  generation checks;
-- historical activity loading with source-aware cursors, follow mode, scroll
-  preservation, and bounded paging;
-- exact preparation review and forms for prepare, approval/start, resume,
-  answers, blocker resolution, and budget grants;
-- complete operation-state presentation, including rejection, failure,
-  uncertainty, and pending pause;
-- fatal-display shutdown verification through the composition-root safe-stop
-  path;
-- full wide/standard/compact layout refinement, including responsive table
-  columns, keyboard/mouse behavior, focus, modals, and unsent form text;
-- Textual Pilot coverage for T01–T24 and UI/headless workflow equivalence.
+Current UI evidence with Textual 8.2.8: 18 focused UI tests pass, including the
+specified 140x40, 100x30, 80x24, 70x22, and 55x18 geometries. The complete
+non-live regression passes 211 tests (9 skipped).
 
-Those items were part of the supplied specification. They are not required for
-headless operation, but they are required before the visual console as a whole
-is complete.
+## Known limitations / future polish
+
+- Activity follow behavior is intentionally basic: Recent always shows the
+  latest bounded snapshot and History uses an explicit Load more action.
+- Standard/compact tables rely on Textual horizontal scrolling rather than a
+  fully dynamic column-removal system.
+- The preparation, task, and run-report renderers are utilitarian generic
+  structured views rather than highly specialized visualizations.
+- Keyboard operation is more refined than mouse-first operation, and compact
+  spacing can be polished further.
+- Provider transcripts and a browser UI remain out of scope.
