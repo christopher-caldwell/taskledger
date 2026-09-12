@@ -11,7 +11,9 @@ This package specifies **two implementation parts**, not two services:
 | [Headless acceptance evidence](HEADLESS_ACCEPTANCE.md) | M01–M24 test mapping, verification commands, measurements, and platform coverage. |
 | [Part 2 — Textual display adapter](02-textual-display-spec.md) | The first visual interface: observation, navigation, presentation, forms, approval, safe-exit flows, packaging, and UI verification. |
 
-**Inspected source:** `christopher-caldwell/taskledger`, commit `c1453448436ec8d46d502eb9605876cca026e3fe`, the current remote `main` when reviewed. Repository source citations are pinned in the specifications. Uncommitted local changes were not available.
+**Current UI baseline:** TL-UI-1 was reconciled against
+`18728b75578ea93b5a6370cc431fafec8c6faeba` on `feat/add_terminal_ui`. Part 2
+supersedes the older proposed display baseline wherever it is more specific.
 
 ## Architectural decision
 
@@ -43,9 +45,9 @@ The experiment environment was Linux, Python 3.13.5, and SQLite 3.46.1. Exact en
 The synthetic experiment record above remains unchanged historical design
 evidence. The implemented headless layer and Task Ledger regression suite have
 now been exercised on macOS; current commands and results are recorded in
-[HEADLESS_ACCEPTANCE.md](HEADLESS_ACCEPTANCE.md). Linux implementation coverage,
-live Codex tests, and the complete Textual/Pilot matrix have not been run for
-the current working tree.
+[HEADLESS_ACCEPTANCE.md](HEADLESS_ACCEPTANCE.md). Textual Checkpoint A is in
+progress and has focused Pilot coverage under the pinned Textual 8.2.8 release;
+the complete T01–T24 matrix has not yet been run.
 
 The specifications separately identify **24 headless acceptance cases and 24 Textual acceptance cases** that implementation must satisfy. Performance figures in them are proposed test targets, not measured product claims.
 

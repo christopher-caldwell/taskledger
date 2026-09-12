@@ -22,9 +22,24 @@ lifecycle; and one successful public-contract-only prepare-to-completion run.
 Current non-live regression evidence: 195 tests passed (11 skipped); the
 focused application/controller regression passed 128 tests (1 skipped).
 
-The remaining work is the Textual adapter described by
-`02-textual-display-spec.md`. The existing adapter is a display shell; the
-following specified work is still outstanding:
+The implementation baseline for the Textual adapter is now TL-UI-1 in
+`02-textual-display-spec.md`, pinned to Textual 8.2.8. The first implementation
+pass substantially completes Checkpoint A: external TCSS and the built-in dark
+theme, a compact Task Ledger header, a single feed observer, six sections,
+keyed task/agent/activity/intervention tables, authoritative Overview and Usage
+summaries, explicit refresh and help, truthful pause presentation, guarded
+active-run exit, and geometry classes including a restricted below-minimum
+view. Rendering is slice-aware and task selection is retained by durable ID.
+
+Current UI evidence with the pinned Textual release: the complete non-live
+suite passed 199 tests (9 skipped). The focused UI/host suite passed 29 tests,
+and a no-Textual run of the UI module passed its static boundary test while
+skipping the five Pilot cases. A built wheel was inspected and contains the
+external `taskledger.tcss` resource.
+
+Checkpoint A still needs distinct standard-column reduction and a manual run
+against the deterministic fake-runtime fixture before it is declared complete.
+The following later-checkpoint work remains outstanding:
 
 - task master/detail navigation with stable-ID selection and stale-detail
   generation checks;
@@ -34,9 +49,10 @@ following specified work is still outstanding:
   answers, blocker resolution, and budget grants;
 - complete operation-state presentation, including rejection, failure,
   uncertainty, and pending pause;
-- guarded exit and fatal-display shutdown through the headless safe-stop path;
-- the wide, compact, and below-minimum layouts, including resize state
-  preservation, keyboard/mouse behavior, focus, modals, and unsent form text;
+- fatal-display shutdown verification through the composition-root safe-stop
+  path;
+- full wide/standard/compact layout refinement, including responsive table
+  columns, keyboard/mouse behavior, focus, modals, and unsent form text;
 - Textual Pilot coverage for T01–T24 and UI/headless workflow equivalence.
 
 Those items were part of the supplied specification. They are not required for

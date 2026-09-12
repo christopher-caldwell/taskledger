@@ -105,8 +105,15 @@ class DisplaySafetyTests(unittest.TestCase):
 
 class HostIntegrationTests(unittest.TestCase):
     def test_cli_import_does_not_import_textual(self):
-        import taskledger.cli
-        self.assertFalse(any(name == "textual" or name.startswith("textual.") for name in sys.modules))
+        # Run in a fresh interpreter so this remains valid when the Textual
+        # Pilot suite was collected earlier in the same discovery process.
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, "-c", "import sys, taskledger.cli; assert not any(n == 'textual' or n.startswith('textual.') for n in sys.modules)"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_engine_host_projects_real_ledger_on_owner_thread(self):
         from tests.test_acceptance import TaskledgerAcceptance

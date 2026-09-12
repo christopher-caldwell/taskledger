@@ -1,0 +1,56 @@
+Screen {
+    background: $background;
+    color: $text;
+}
+
+#console-header {
+    height: 3;
+    padding: 0 1;
+    background: $surface;
+    color: $text;
+    border-bottom: solid $primary;
+}
+
+#global-banner {
+    display: none;
+    height: 1;
+    padding: 0 1;
+    background: $warning;
+    color: $text-warning;
+}
+
+#global-banner.visible { display: block; }
+#sections { height: 1fr; }
+.pane { padding: 1 2; }
+.section-note { height: auto; padding: 0 1; color: $text-muted; }
+DataTable { height: 1fr; background: $surface; }
+
+#minimum {
+    display: none;
+    height: 1fr;
+    content-align: center middle;
+    text-align: center;
+    color: $text-warning;
+}
+
+.below-minimum #minimum { display: block; }
+.below-minimum #sections, .below-minimum #global-banner, .below-minimum Footer { display: none; }
+.compact #console-header { height: 2; }
+
+ExitDialog, HelpDialog {
+    align: center middle;
+    background: $background 70%;
+}
+
+.dialog {
+    width: 64;
+    height: auto;
+    padding: 1;
+    background: $panel;
+    border: round $primary;
+}
+
+.help-dialog { width: 48; }
+.dialog-title { height: auto; margin-bottom: 1; }
+.dialog-buttons { height: auto; align-horizontal: right; margin-top: 1; }
+.dialog-buttons Button { margin-left: 1; }
