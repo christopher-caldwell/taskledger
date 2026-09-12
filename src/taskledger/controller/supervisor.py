@@ -30,6 +30,10 @@ class ConfigurationDrift(RuntimeError):
     pass
 
 
+class ProviderAdmissionStopped(RuntimeError):
+    """A stop latch closed immediately before a spend-bearing dispatch."""
+
+
 @dataclass(frozen=True)
 class SupervisorConfig:
     max_worker_turns: int = 20
@@ -75,6 +79,8 @@ class Supervisor:
         worker_token_reserve: int = 0,
         manage_run: bool = True,
         reconcile_runtime: bool = True,
+        stop_requested=None,
+        owns_project_lease: bool | None = None,
     ) -> None:
         self.project_id = project_id
         self.run_id = run_id
@@ -89,6 +95,8 @@ class Supervisor:
         self.worker_token_reserve = worker_token_reserve
         self.manage_run = manage_run
         self.reconcile_runtime = reconcile_runtime
+        self.stop_requested = stop_requested or (lambda: False)
+        self.owns_project_lease = manage_run if owns_project_lease is None else owns_project_lease
         self.config.validate()
 
     async def reconcile_open_turns(self) -> list[str]:
@@ -142,7 +150,7 @@ class Supervisor:
             self.journal.close_session(session.id)
 
     async def run_assignment(self, assignment_id: str) -> SupervisorResult:
-        if self.manage_run:
+        if self.owns_project_lease:
             with self.journal.project_lock(self.project_id):
                 return await self._run_assignment(assignment_id)
         return await self._run_assignment(assignment_id)
@@ -273,6 +281,9 @@ class Supervisor:
                     new_worker_turns += 1
                     if execution.state == TurnExecutionState.UNCERTAIN:
                         return self._pause(assignment_id, PauseReason.RUNTIME_UNCERTAIN, execution.error or "worker outcome uncertain", new_worker_turns, new_reviewer_turns, reviews)
+            except ProviderAdmissionStopped:
+                return self._pause(assignment_id, PauseReason.USER_INTERRUPTED, "pause requested before provider dispatch",
+                    new_worker_turns, new_reviewer_turns, reviews)
             except Exception as exc:
                 if self.manage_run:
                     self.journal.finish_run(self.run_id, "FAILED", reason=PauseReason.INVALID_STATE.value, detail=str(exc))
@@ -287,12 +298,14 @@ class Supervisor:
         if existing:
             if existing.config_hash != config_hash or existing.runtime_identity != runtime_identity:
                 raise ConfigurationDrift("persisted worker runtime configuration differs from the resolved profile")
+            if self.stop_requested(): raise ProviderAdmissionStopped("pause requested before provider session resume")
             await self.runtime.resume_session(
                 thread_id=existing.thread_id, role=SessionRole.WORKER, profile=profile,
                 subject_id=assignment_id, cwd=cwd, writable=True,
                 cumulative_usage_baseline=self.journal.latest_cumulative_usage(existing.id),
             )
             return existing
+        if self.stop_requested(): raise ProviderAdmissionStopped("pause requested before provider session start")
         runtime_session = await self.runtime.start_session(role=SessionRole.WORKER, profile=profile, subject_id=assignment_id, cwd=cwd, writable=True)
         if runtime_session.identity and runtime_session.identity != identity:
             raise ConfigurationDrift("runtime started a worker with an unexpected semantic configuration")
@@ -354,6 +367,7 @@ class Supervisor:
         runtime_identity = identity.as_dict()
         config_hash = sha256(canonical(runtime_identity))
         if session is None:
+            if self.stop_requested(): raise ProviderAdmissionStopped("pause requested before provider session start")
             runtime_session = await self.runtime.start_session(role=SessionRole.REVIEWER, profile=self.config.reviewer_profile, subject_id=subject, cwd=cwd, writable=False)
             if runtime_session.identity and runtime_session.identity != identity:
                 raise ConfigurationDrift("runtime started a reviewer with an unexpected semantic configuration")
@@ -361,6 +375,7 @@ class Supervisor:
         elif session.config_hash != config_hash or session.runtime_identity != runtime_identity:
             raise ConfigurationDrift("persisted reviewer runtime configuration differs from the resolved profile")
         else:
+            if self.stop_requested(): raise ProviderAdmissionStopped("pause requested before provider session resume")
             await self.runtime.resume_session(
                 thread_id=session.thread_id, role=SessionRole.REVIEWER,
                 profile=self.config.reviewer_profile, subject_id=subject, cwd=cwd, writable=False,
@@ -414,12 +429,20 @@ class Supervisor:
             self.journal.close_session(reviewer.id)
 
     async def _run_turn(self, session: AgentSession, *, prompt: str, prompt_kind: str, progress_before: str | None = None, output_schema: dict[str, Any] | None = None, packet: PromptPacket | None = None) -> TurnExecution:
+        if self.stop_requested():
+            raise ProviderAdmissionStopped("pause requested before provider dispatch")
         local_id = self.journal.begin_turn(
             session.id, prompt_kind, progress_before=progress_before, packet=packet,
             output_schema_bytes=len(canonical(output_schema).encode("utf-8")) if output_schema is not None else 0,
         )
         try:
+            if self.stop_requested():
+                self.journal.fail_turn(local_id, "pause requested before provider dispatch", uncertain=False)
+                self.journal.consume_turn(local_id)
+                raise ProviderAdmissionStopped("pause requested before provider dispatch")
             handle = await self.runtime.start_turn(thread_id=session.thread_id, prompt=prompt, output_schema=output_schema)
+        except ProviderAdmissionStopped:
+            raise
         except Exception as exc:
             self.journal.fail_turn(local_id, f"dispatch outcome unknown: {exc}", uncertain=True)
             return TurnExecution(TurnExecutionState.UNCERTAIN, local_id, error=str(exc))

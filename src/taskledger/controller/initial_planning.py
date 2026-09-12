@@ -257,17 +257,21 @@ def proposal_sources_are_normalized(value: dict[str, Any]) -> bool:
 
 class InitialPlanner:
     def __init__(self, *, service, project, journal: Journal, runtime, run_id: str, preparation_id: str,
-                 spec_path: str, specification_bytes: bytes, specification_hash: str, config: PreparationConfig):
+                 spec_path: str, specification_bytes: bytes, specification_hash: str, config: PreparationConfig,
+                 stop_requested=None):
         self.service, self.project, self.journal, self.runtime = service, project, journal, runtime
         self.run_id, self.preparation_id, self.spec_path, self.specification_bytes, self.specification_hash, self.config = (
             run_id, preparation_id, spec_path, specification_bytes, specification_hash, config
         )
+        self.stop_requested = stop_requested or (lambda: False)
 
     async def run(self) -> tuple[dict[str, Any], str]:
         identity = self.runtime.session_identity(
             role=SessionRole.TASK_CREATOR, profile="taskledger_task_creator", subject_id=self.preparation_id,
             cwd=self.project["repository_root"], writable=False,
         )
+        if self.stop_requested():
+            raise LedgerError("PAUSE_REQUESTED", "Preparation paused before provider session start.")
         runtime_session = await self.runtime.start_session(
             role=SessionRole.TASK_CREATOR, profile="taskledger_task_creator", subject_id=self.preparation_id,
             cwd=self.project["repository_root"], writable=False,
@@ -303,6 +307,10 @@ class InitialPlanner:
             local_id = self.journal.begin_turn(session.id, "initial-planning", packet=packet)
             handle = None
             try:
+                if self.stop_requested():
+                    self.journal.fail_turn(local_id, "pause requested before provider dispatch", uncertain=False)
+                    self.journal.consume_turn(local_id)
+                    raise LedgerError("PAUSE_REQUESTED", "Preparation paused before provider dispatch.")
                 handle = await self.runtime.start_turn(thread_id=session.thread_id, prompt=turn_prompt, output_schema=schema)
                 self.journal.acknowledge_turn(local_id, handle)
                 result = await asyncio.wait_for(self.runtime.wait_turn(handle), timeout=self.config.execution_limits["supervisor"]["turn_timeout_seconds"])

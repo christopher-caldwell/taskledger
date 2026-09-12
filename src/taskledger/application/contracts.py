@@ -70,6 +70,13 @@ class HistoryPage:
 
 
 @dataclass(frozen=True)
+class TaskPage:
+    records: tuple[Record, ...]
+    next_offset: int | None
+    total: int
+
+
+@dataclass(frozen=True)
 class OperationStatus:
     operation_id: str
     phase: str

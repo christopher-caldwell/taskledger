@@ -8,6 +8,7 @@ This package specifies **two implementation parts**, not two services:
 | Document | Responsibility |
 |---|---|
 | [Part 1 — Headless console mechanics](01-headless-mechanics-spec.md) | Application queries and mutations, execution lifetime, emitter integration, committed snapshots, bounded delivery, ownership, recovery, and correctness arguments. |
+| [Headless acceptance evidence](HEADLESS_ACCEPTANCE.md) | M01–M24 test mapping, verification commands, measurements, and platform coverage. |
 | [Part 2 — Textual display adapter](02-textual-display-spec.md) | The first visual interface: observation, navigation, presentation, forms, approval, safe-exit flows, packaging, and UI verification. |
 
 **Inspected source:** `christopher-caldwell/taskledger`, commit `c1453448436ec8d46d502eb9605876cca026e3fe`, the current remote `main` when reviewed. Repository source citations are pinned in the specifications. Uncommitted local changes were not available.
@@ -39,7 +40,12 @@ The suite includes a 10,000-publication burst with one pending snapshot and one 
 
 The experiment environment was Linux, Python 3.13.5, and SQLite 3.46.1. Exact environment data and case outcomes are in `validation/results.json`. No model calls were made.
 
-**Not run:** the Task Ledger baseline regression suite, the actual proposed TL integration, Textual/Pilot tests, macOS/terminal compatibility tests, or live Codex tests. GitHub source inspection succeeded through the connector, but a local repository clone failed because this sandbox could not resolve GitHub. Textual was not installed. These limitations are not silently converted into passing evidence.
+The synthetic experiment record above remains unchanged historical design
+evidence. The implemented headless layer and Task Ledger regression suite have
+now been exercised on macOS; current commands and results are recorded in
+[HEADLESS_ACCEPTANCE.md](HEADLESS_ACCEPTANCE.md). Linux implementation coverage,
+live Codex tests, and the complete Textual/Pilot matrix have not been run for
+the current working tree.
 
 The specifications separately identify **24 headless acceptance cases and 24 Textual acceptance cases** that implementation must satisfy. Performance figures in them are proposed test targets, not measured product claims.
 
@@ -65,4 +71,6 @@ Implement and verify Part 1 without Textual first. Build Part 2 against fixture/
 
 Before implementing, inspect the actual repository worktree and reconcile changes since the pinned source. Preserve existing work. The specifications are proposed additions and targeted extraction work, not permission to reset the repository or redesign the scheduler.
 
-The overall feature can be called verified only after the actual acceptance suites pass. The evidence here supports the architectural choices and selected contracts; it does not certify an implementation that has not yet been built.
+Part 1 is implemented and its current acceptance evidence is recorded above.
+The visual-console feature as a whole still requires the Part 2 Textual
+acceptance suite.

@@ -145,6 +145,35 @@ CREATE TABLE IF NOT EXISTS preparation_attempts(
 CREATE INDEX IF NOT EXISTS preparation_attempts_group ON preparation_attempts(run_group_id,sequence);
 """
 
+CURRENT_SCHEMA_VERSION = 10
+
+
+def connect_existing(home: Path) -> sqlite3.Connection:
+    """Open a compatible ledger without creating or migrating durable state."""
+    path = home / "taskledger.sqlite3"
+    if not path.is_file():
+        raise LedgerError("PROJECT_REQUIRED", "Taskledger is not initialized for this repository.", details={"path": str(path)})
+    con: sqlite3.Connection | None = None
+    try:
+        con = sqlite3.connect(path, timeout=5, isolation_level=None)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA foreign_keys=ON")
+        con.execute("PRAGMA busy_timeout=5000")
+        version = con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+        if version != CURRENT_SCHEMA_VERSION:
+            raise LedgerError("SCHEMA_UPGRADE_REQUIRED", "Taskledger storage requires an explicit schema upgrade.",
+                details={"found_version": version, "required_version": CURRENT_SCHEMA_VERSION})
+        return con
+    except LedgerError:
+        if con is not None:
+            con.close()
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        if con is not None:
+            con.close()
+        raise LedgerError("LEDGER_STORAGE_UNAVAILABLE", "Taskledger could not open this repository's local state.",
+            details={"path": str(path), "reason": exc.__class__.__name__}) from exc
+
 
 def connect(home: Path) -> sqlite3.Connection:
     path = home / "taskledger.sqlite3"

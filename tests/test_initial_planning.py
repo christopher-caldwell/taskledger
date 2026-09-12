@@ -133,6 +133,43 @@ class InitialPlanningTests(unittest.TestCase):
         finally:
             fresh.tearDown()
 
+    def test_engine_host_adopts_repository_after_explicit_first_preparation(self):
+        from tests.test_acceptance import TaskledgerAcceptance
+        from taskledger.application.host import EngineHost
+        fresh = TaskledgerAcceptance("test_version_flag_returns_installed_version")
+        fresh.setUp()
+        try:
+            profiles = fresh.root / ".codex" / "agents"
+            profiles.mkdir(parents=True)
+            template = 'name = "test"\nmodel = "fake-model"\nmodel_reasoning_effort = "low"\n'
+            for name in ("taskledger-worker-routine.toml", "taskledger-worker-complex.toml"):
+                (profiles / name).write_text(template)
+            fresh.git("add", ".codex")
+            fresh.git("commit", "-qm", "add profiles")
+            runtime = FakeRuntime(worker_turns=[], reviewer_turns=[], task_creator_turns=[TurnScript(structured_output=proposal())])
+            host = EngineHost(str(fresh.root), runtime_factory=lambda **_: runtime)
+            self.assertEqual(host.current_snapshot().project.get("effective_phase"), "UNINITIALIZED")
+            self.assertFalse(fresh.home.exists())
+
+            async def scenario():
+                receipt = await host.prepare_project("first-prepare", spec_path="spec.md", live=True,
+                    limits={"max_initial_planner_turns": 1}, preflight={"local_inputs": [], "services": []})
+                self.assertEqual(receipt.disposition, "ACCEPTED")
+                for _ in range(300):
+                    status = await host.operation_status("first-prepare")
+                    if status.phase != "ACCEPTED":
+                        break
+                    await asyncio.sleep(.01)
+                self.assertEqual(status.phase, "SUCCEEDED", status.error)
+                self.assertNotEqual(host.current_snapshot().project.get("effective_phase"), "UNINITIALIZED")
+            try:
+                asyncio.run(scenario())
+            finally:
+                asyncio.run(host.close())
+            self.assertTrue((fresh.home / "taskledger.sqlite3").is_file())
+        finally:
+            fresh.tearDown()
+
     def test_bounded_planner_persists_immutable_proposal_and_materializes(self):
         runtime = FakeRuntime(worker_turns=[], reviewer_turns=[], task_creator_turns=[TurnScript(structured_output=proposal())])
         run_id = self.journal.create_run(self.project_id, mode="PREPARATION", config={"manifest": {"scope": "PREPARATION"}})
@@ -159,6 +196,102 @@ class InitialPlanningTests(unittest.TestCase):
         self.assertTrue(self.service.validate_plan(self.project, self.principal)["valid"])
         self.assertEqual(runtime.sessions_started, 1)
         self.assertEqual(runtime.turns_started, 1)
+
+    def test_pause_latch_blocks_initial_planner_provider_admission(self):
+        runtime = FakeRuntime(worker_turns=[], reviewer_turns=[], task_creator_turns=[TurnScript(structured_output=proposal())])
+        run_id = self.journal.create_run(self.project_id, mode="PREPARATION", config={})
+        revision = self.service.con.execute(
+            "SELECT r.* FROM specifications s JOIN specification_revisions r ON r.id=s.active_revision_id WHERE s.id=?",
+            (self.spec_id,),
+        ).fetchone()
+        preparation_id = store_planning_preparation(
+            self.service, self.project, run_id=run_id, starting_oid="0" * 40,
+            spec_id=self.spec_id, spec_hash=revision["content_hash"], profile_hashes={}, config=self.config,
+        )
+        with self.assertRaisesRegex(Exception, "paused before provider (session start|dispatch)"):
+            asyncio.run(InitialPlanner(
+                service=self.service, project=self.project, journal=self.journal, runtime=runtime,
+                run_id=run_id, preparation_id=preparation_id, spec_path="spec.md",
+                specification_bytes=revision["content_bytes"], specification_hash=revision["content_hash"],
+                config=self.config, stop_requested=lambda: True,
+            ).run())
+        self.assertEqual(runtime.turns_started, 0)
+
+    def test_engine_host_preparation_is_accepted_and_strongly_owned(self):
+        from taskledger.application.host import EngineHost
+        self.enable_profiles()
+        runtime = FakeRuntime(worker_turns=[], reviewer_turns=[], task_creator_turns=[TurnScript(structured_output=proposal())])
+        host = EngineHost(str(self.fixture.root), project_id=self.project_id, runtime_factory=lambda **_: runtime)
+
+        async def scenario():
+            receipt = await host.prepare_project("prepare-1", spec_path="spec.md", live=True,
+                limits={"max_initial_planner_turns": 1}, preflight={"local_inputs": [], "services": []})
+            self.assertEqual(receipt.disposition, "ACCEPTED")
+            for _ in range(200):
+                status = await host.operation_status("prepare-1")
+                if status.phase != "ACCEPTED":
+                    break
+                await asyncio.sleep(.01)
+            self.assertEqual(status.phase, "SUCCEEDED")
+            self.assertIsNotNone(host.current_snapshot().preparation)
+            detail = await host.preparation_detail(status.result.get("preparation_id"))
+            self.assertEqual(detail.get("proposal_hash"), status.result.get("proposal_hash"))
+            self.assertIsNotNone(detail.get("proposal_json"))
+            report = await host.run_report(status.result.get("planning_run_id"))
+            self.assertEqual(report.get("run_id"), status.result.get("planning_run_id"))
+        try:
+            asyncio.run(scenario())
+        finally:
+            asyncio.run(host.close())
+        self.assertEqual(runtime.turns_started, 1)
+        self.assertTrue(runtime.closed)
+
+    def test_engine_host_exact_start_returns_before_lifecycle_finishes(self):
+        from taskledger.application.host import EngineHost
+        self.enable_profiles()
+        planning = FakeRuntime(worker_turns=[], reviewer_turns=[], task_creator_turns=[TurnScript(structured_output=proposal())])
+        execution = FakeRuntime(worker_turns=[], reviewer_turns=[])
+        resumed_execution = FakeRuntime(worker_turns=[], reviewer_turns=[])
+        runtimes = iter((planning, execution, resumed_execution))
+        host = EngineHost(str(self.fixture.root), project_id=self.project_id, runtime_factory=lambda **_: next(runtimes))
+
+        async def wait_terminal(operation_id):
+            for _ in range(300):
+                status = await host.operation_status(operation_id)
+                if status.phase != "ACCEPTED":
+                    return status
+                await asyncio.sleep(.01)
+            self.fail(f"{operation_id} did not finish")
+
+        async def scenario():
+            self.assertEqual((await host.prepare_project("prepare-start", spec_path="spec.md", live=True,
+                limits={"max_initial_planner_turns": 1}, preflight={"local_inputs": [], "services": []})).disposition, "ACCEPTED")
+            prepared = await wait_terminal("prepare-start")
+            preparation_id = prepared.result.get("preparation_id")
+            proposal_hash = prepared.result.get("proposal_hash")
+            receipt = await host.start_prepared_project("start-1", preparation_id=preparation_id,
+                approve_proposal_hash=proposal_hash, live=True)
+            self.assertEqual(receipt.disposition, "ACCEPTED")
+            self.assertIsNotNone(receipt.run_id)
+            await host.refresh_snapshot()
+            task_id = host.current_snapshot().tasks[0].get("id")
+            detail = await host.task_detail(task_id)
+            self.assertIn("acceptance_criteria", dict(detail.fields))
+            self.assertIn("integration_attempts", dict(detail.fields))
+            pause = await host.request_pause(receipt.run_id)
+            self.assertIn(pause.status, {"REQUESTED", "NOT_RUNNING"})
+            terminal = await wait_terminal("start-1")
+            self.assertIn(terminal.phase, {"SUCCEEDED", "FAILED"})
+            resume = await host.resume_run("resume-1", run_id=receipt.run_id, live=True)
+            self.assertEqual(resume.disposition, "ACCEPTED")
+            self.assertEqual((await host.request_pause(resume.run_id)).status, "REQUESTED")
+            self.assertIn((await wait_terminal("resume-1")).phase, {"SUCCEEDED", "FAILED"})
+        try:
+            asyncio.run(scenario())
+        finally:
+            asyncio.run(host.close())
+        self.assertTrue(execution.closed)
+        self.assertTrue(resumed_execution.closed)
 
     def test_ambiguity_is_persisted_as_failed_preparation(self):
         value = proposal(ambiguities=["Choose retention period"])
@@ -435,6 +568,40 @@ class InitialPlanningTests(unittest.TestCase):
         self.assertEqual(self.journal.run(run_id)["state"], "PAUSED")
         self.assertEqual(len(runtime.interrupted), 1)
         self.assertTrue(runtime.closed)
+
+    def test_lifecycle_lease_remains_held_during_interruption_reconciliation(self):
+        from taskledger.application.lifecycle import LifecycleOwner
+        from taskledger.controller.model import RuntimeTurnHandle
+        run_id = self.journal.create_run(self.project_id, mode="PROJECT", config={})
+        session = self.journal.create_session(run_id=run_id, project_id=self.project_id, role="WORKER",
+            profile="routine", subject_id="task", external_thread_id="thread", config_hash="hash")
+        local_id = self.journal.begin_turn(session.id, "worker")
+        self.journal.acknowledge_turn(local_id, RuntimeTurnHandle("thread", "turn"))
+        entered, release = threading.Event(), threading.Event()
+
+        class Runtime(FakeRuntime):
+            async def interrupt_turn(self, handle):
+                entered.set()
+                await asyncio.to_thread(release.wait)
+
+        class HangingController:
+            def __init__(self, **kwargs): pass
+            async def run(self): await asyncio.Event().wait()
+
+        runtime = Runtime(worker_turns=[], reviewer_turns=[])
+        owner = LifecycleOwner(self.service, self.project, self.principal, run_id, object(), runtime)
+
+        async def scenario():
+            with patch("taskledger.controller.project.ProjectController", HangingController):
+                task = asyncio.create_task(owner.run())
+                await asyncio.sleep(.05); owner.request_stop()
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                with self.assertRaisesRegex(RuntimeError, "already running"):
+                    with self.journal.project_lock(self.project_id): pass
+                release.set()
+                return await task
+        result = asyncio.run(scenario())
+        self.assertEqual(result.status, "PAUSED")
 
 
 if __name__ == "__main__":

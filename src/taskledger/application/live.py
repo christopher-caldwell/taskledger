@@ -8,10 +8,12 @@ from typing import Any
 class LatestSnapshotFeed:
     def __init__(self):
         self._lock = threading.Lock(); self.latest = None; self.reader = None
+        self.delivery_errors = 0; self.scheduled_wakes = 0
 
     def publish(self, snapshot: Any) -> bool:
         with self._lock:
-            if self.latest and snapshot.version.engine_epoch == self.latest.version.engine_epoch and snapshot.version.revision <= self.latest.version.revision: return False
+            if self.latest and snapshot.version.engine_epoch != self.latest.version.engine_epoch: return False
+            if self.latest and snapshot.version.revision <= self.latest.version.revision: return False
             self.latest = snapshot; reader = self.reader
             if reader: reader._offer_locked(snapshot)
         return True
@@ -32,8 +34,11 @@ class FeedReader:
         self.pending = value
         if not self.wake_queued:
             self.wake_queued = True
-            try: self.loop.call_soon_threadsafe(self._wake)
-            except RuntimeError: self.closed = True; self.feed.reader = None; self.wake_queued = False
+            try:
+                self.loop.call_soon_threadsafe(self._wake); self.feed.scheduled_wakes += 1
+            except RuntimeError:
+                self.closed = True; self.feed.reader = None; self.wake_queued = False
+                self.feed.delivery_errors += 1
 
     def _wake(self):
         with self.feed._lock: self.wake_queued = False

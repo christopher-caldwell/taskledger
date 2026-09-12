@@ -14,7 +14,7 @@ from taskledger.controller.fakes import FakeLedger, FakeRuntime, TurnScript, acc
 from taskledger.controller.app_server import AppServerRuntime
 from taskledger.controller.journal import Journal
 from taskledger.controller.model import ExecutionStatus, PauseReason, RuntimeIdentity, RuntimeTurnHandle, RuntimeTurnResult, SessionRole, SupervisorStatus, Usage
-from taskledger.controller.supervisor import Supervisor, SupervisorConfig, parse_verdict
+from taskledger.controller.supervisor import ProviderAdmissionStopped, Supervisor, SupervisorConfig, parse_verdict
 from taskledger.controller.worker_broker import WorkerBroker, broker_socket_path, request
 from taskledger.core import canonical, now, sha256
 from taskledger.db import connect, transaction
@@ -52,6 +52,25 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, SupervisorStatus.INTEGRATED)
         self.assertEqual(result.worker_turns, 2)
         self.assertEqual(runtime.sessions_started, 2)
+
+    async def test_pause_latch_blocks_worker_provider_admission(self):
+        ledger=FakeLedger();runtime=FakeRuntime(worker_turns=[TurnScript()],reviewer_turns=[])
+        run=self.journal.create_run("p1",mode="ASSIGNMENT",config={})
+        supervisor=Supervisor(project_id="p1",run_id=run,ledger=ledger,runtime=runtime,journal=self.journal,
+            stop_requested=lambda:True)
+        result=await supervisor.run_assignment("a1")
+        self.assertEqual(result.status,SupervisorStatus.PAUSED)
+        self.assertEqual(runtime.turns_started,0)
+
+    async def test_pause_latch_blocks_reviewer_provider_admission(self):
+        ledger=FakeLedger();ledger.submit()
+        runtime=FakeRuntime(worker_turns=[],reviewer_turns=[TurnScript(structured_output=accepted_verdict())])
+        run=self.journal.create_run("p1",mode="ASSIGNMENT",config={})
+        supervisor=Supervisor(project_id="p1",run_id=run,ledger=ledger,runtime=runtime,journal=self.journal,
+            stop_requested=lambda:True)
+        result=await supervisor.run_assignment("a1")
+        self.assertEqual(result.status,SupervisorStatus.PAUSED)
+        self.assertEqual(runtime.turns_started,0)
 
     async def test_rejection_reuses_worker_session_then_reviews_new_submission(self):
         ledger = FakeLedger()

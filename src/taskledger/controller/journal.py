@@ -207,14 +207,20 @@ class Journal:
                 "INSERT INTO controller_sessions(id,run_id,project_id,role,profile,subject_id,external_thread_id,config_hash,runtime_identity_json,state,created_at,closed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (session_id, run_id, project_id, role, profile, subject_id, external_thread_id, config_hash, canonical(identity), "ACTIVE", now(), None),
             )
+            self._append_event_locked(run_id, "SESSION", session_id, "SESSION_CREATED", None, None,
+                {"role": role, "profile": profile, "subject_id": subject_id})
         return AgentSession(session_id, run_id, project_id, role, profile, subject_id, external_thread_id, config_hash, identity, "ACTIVE")
 
     def close_session(self, session_id: str, *, uncertain: bool = False) -> None:
         with transaction(self.con):
-            self.con.execute(
+            row = self.con.execute("SELECT run_id,state FROM controller_sessions WHERE id=?", (session_id,)).fetchone()
+            changed = self.con.execute(
                 "UPDATE controller_sessions SET state=?,closed_at=? WHERE id=? AND state='ACTIVE'",
                 ("UNCERTAIN" if uncertain else "CLOSED", now(), session_id),
-            )
+            ).rowcount
+            if changed and row:
+                self._append_event_locked(row["run_id"], "SESSION", session_id,
+                    "SESSION_UNCERTAIN" if uncertain else "SESSION_CLOSED", None, None, {})
 
     def begin_turn(
         self,
@@ -277,6 +283,12 @@ class Journal:
             )
             if cur.rowcount != 1:
                 raise RuntimeError("turn acknowledgement is stale")
+            event = self.con.execute(
+                "SELECT s.run_id FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE t.id=?",
+                (local_turn_id,),
+            ).fetchone()
+            self._append_event_locked(event["run_id"], "TURN", local_turn_id, "TURN_ACKNOWLEDGED", None,
+                local_turn_id, {"external_turn_id": handle.turn_id})
 
     def complete_turn(self, local_turn_id: str, result: RuntimeTurnResult) -> None:
         with transaction(self.con):
@@ -317,6 +329,9 @@ class Journal:
                  result.usage_precision.value, before_json, after_json, result.exact_response_count,
                  int(usage_missing), now(), local_turn_id),
             )
+            session = self.con.execute("SELECT run_id FROM controller_sessions WHERE id=?", (row["session_id"],)).fetchone()
+            self._append_event_locked(session["run_id"], "TURN", local_turn_id, "TURN_COMPLETED", None,
+                local_turn_id, {"usage_precision": result.usage_precision.value, "usage_missing": bool(usage_missing)})
 
     def record_usage_events(self, local_turn_id: str, events: tuple[dict[str, Any], ...]) -> None:
         """Legacy compatibility hook. New runs intentionally persist no raw provider events."""
@@ -376,20 +391,28 @@ class Journal:
             if not row:
                 raise RuntimeError("turn was not found")
             state = "UNCERTAIN" if uncertain else "FAILED"
+            changed = False
             if row["state"] in {"DISPATCHING", "RUNNING"}:
                 self.con.execute(
                     "UPDATE controller_turns SET state=?,error=?,finished_at=? WHERE id=?",
                     (state, error, now(), local_turn_id),
                 )
+                changed = True
             elif row["state"] == "UNCERTAIN" and not uncertain:
                 self.con.execute(
                     "UPDATE controller_turns SET state='FAILED',error=?,finished_at=? WHERE id=?",
                     (error, now(), local_turn_id),
                 )
+                changed = True
             elif row["state"] not in {"FAILED", "UNCERTAIN"}:
                 raise RuntimeError("failed turn is not reconcilable")
             if result is not None:
                 self._persist_usage_locked(local_turn_id, result)
+            if changed:
+                session = self.con.execute("SELECT run_id FROM controller_sessions WHERE id=?", (row["session_id"],)).fetchone()
+                self._append_event_locked(session["run_id"], "TURN", local_turn_id,
+                    "TURN_UNCERTAIN" if uncertain else "TURN_FAILED", None, local_turn_id,
+                    {"has_usage": result is not None})
 
     def reconcile_usage(self, local_turn_id: str, result: RuntimeTurnResult) -> None:
         """Idempotently reconcile a terminal allocation without changing outcome."""
