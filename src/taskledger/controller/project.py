@@ -10,7 +10,7 @@ from taskledger.core import LedgerError, canonical, sha256
 
 from .journal import AgentSession, Journal
 from .model import DispatchReason, PauseReason, PromptPacket, RuntimeTurnHandle, SessionRole, SupervisorStatus
-from .supervisor import ConfigurationDrift, Supervisor, SupervisorConfig
+from .supervisor import ConfigurationDrift, ProviderAdmissionStopped, Supervisor, SupervisorConfig
 from .taskledger_adapter import TaskledgerLedgerAdapter
 from .worker_broker import WorkerBroker
 
@@ -142,7 +142,7 @@ class ProjectController:
         PauseReason.PLAN_INVALID,
     }
 
-    def __init__(self, *, service, project, orchestrator, run_id: str, runtime, journal: Journal, config: ProjectControllerConfig):
+    def __init__(self, *, service, project, orchestrator, run_id: str, runtime, journal: Journal, config: ProjectControllerConfig, stop_requested=None, owns_project_lease: bool = True):
         self.service = service
         self.project = project
         self.orchestrator = orchestrator
@@ -155,26 +155,39 @@ class ProjectController:
         self.worker_capacity = asyncio.Semaphore(config.max_workers)
         self.reviewer_capacity = asyncio.Semaphore(config.max_reviewers)
         self.brokers: dict[str, WorkerBroker] = {}
+        self.stop_requested = stop_requested or (lambda: False)
+        self.owns_project_lease = owns_project_lease
 
     async def run(self) -> ProjectControllerResult:
-        with self.journal.project_lock(self.project["id"]):
-            try:
-                self._restore_worker_tools_for_recovery()
-                probe = Supervisor(
-                    project_id=self.project["id"], run_id=self.run_id, ledger=self.adapter, runtime=self.runtime,
-                    journal=self.journal, config=self.config.supervisor, manage_run=False,
-                )
-                unresolved = await probe.reconcile_open_turns()
-                if unresolved:
-                    return self._pause(PauseReason.RUNTIME_UNCERTAIN, f"unresolved external turns: {', '.join(unresolved)}")
-                probe.reconcile_resolved_reviewer_sessions()
-                return await self._run_loop()
-            except Exception as exc:
-                self.journal.finish_run(self.run_id, "FAILED", reason=PauseReason.INVALID_STATE.value, detail=str(exc))
-                raise
+        # Both lease modes enter the same _run_loop through _run_owned.
+        if self.owns_project_lease:
+            with self.journal.project_lock(self.project["id"]):
+                return await self._run_owned()
+        return await self._run_owned()
+
+    async def _run_owned(self) -> ProjectControllerResult:
+        try:
+            self._restore_worker_tools_for_recovery()
+            probe = Supervisor(
+                project_id=self.project["id"], run_id=self.run_id, ledger=self.adapter, runtime=self.runtime,
+                journal=self.journal, config=self.config.supervisor, manage_run=False,
+                stop_requested=self.stop_requested,
+            )
+            unresolved = await probe.reconcile_open_turns()
+            if unresolved:
+                return self._pause(PauseReason.RUNTIME_UNCERTAIN, f"unresolved external turns: {', '.join(unresolved)}")
+            probe.reconcile_resolved_reviewer_sessions()
+            return await self._run_loop()
+        except ProviderAdmissionStopped:
+            return self._pause(PauseReason.USER_INTERRUPTED, "pause requested before provider dispatch")
+        except Exception as exc:
+            self.journal.finish_run(self.run_id, "FAILED", reason=PauseReason.INVALID_STATE.value, detail=str(exc))
+            raise
 
     async def _run_loop(self) -> ProjectControllerResult:
         while True:
+            if self.stop_requested():
+                return self._pause(PauseReason.USER_INTERRUPTED, "pause requested before the next dispatch")
             gate = self._global_gate()
             if gate:
                 return self._pause(*gate)
@@ -348,6 +361,7 @@ class ProjectController:
             reviewer_capacity=self.reviewer_capacity, run_worker_turn_limit=self.config.max_total_worker_turns,
             run_reviewer_turn_limit=self.config.max_total_reviewer_turns, worker_token_reserve=self.config.reviewer_token_reserve,
             manage_run=False, reconcile_runtime=False,
+            stop_requested=self.stop_requested,
         )
         return await supervisor.run_assignment(assignment_id)
 
@@ -500,12 +514,14 @@ class ProjectController:
         if session:
             if session.config_hash != config_hash or session.runtime_identity != identity_dict:
                 raise ConfigurationDrift("persisted semantic-job runtime configuration differs from the resolved profile")
+            if self.stop_requested(): raise ProviderAdmissionStopped("pause requested before provider session resume")
             await self.runtime.resume_session(
                 thread_id=session.thread_id, role=role, profile=profile, subject_id=subject_id,
                 cwd=cwd, writable=False,
                 cumulative_usage_baseline=self.journal.latest_cumulative_usage(session.id),
             )
         else:
+            if self.stop_requested(): raise ProviderAdmissionStopped("pause requested before provider session start")
             runtime_session = await self.runtime.start_session(role=role, profile=profile, subject_id=subject_id, cwd=cwd, writable=False)
             if runtime_session.identity and runtime_session.identity != identity:
                 raise ConfigurationDrift("runtime started a semantic job with an unexpected configuration")
@@ -559,6 +575,10 @@ class ProjectController:
                 handle = None
                 try:
                     async with self.reviewer_capacity:
+                        if self.stop_requested():
+                            self.journal.fail_turn(local_id, "pause requested before provider dispatch", uncertain=False)
+                            self.journal.consume_turn(local_id)
+                            raise ProviderAdmissionStopped("pause requested before provider dispatch")
                         handle = await self.runtime.start_turn(thread_id=session.thread_id, prompt=turn_prompt, output_schema=schema)
                         self.journal.acknowledge_turn(local_id, handle)
                         result = await asyncio.wait_for(self.runtime.wait_turn(handle), timeout=self.config.supervisor.turn_timeout_seconds)

@@ -18,6 +18,8 @@ from . import __version__
 from . import git
 from .core import LedgerError, MAX_JSON, canonical, new_id, now, require_object, sha256, taskledger_home, text
 from .db import connect, transaction
+from .application.mechanics import active_specification_revision, project_controller_config
+from .repository import home_for_repository
 from .service import Service
 
 
@@ -125,36 +127,6 @@ def followup_review(service,project,principal,data):
     return {"follow_up_id":proposal["id"],"state":data["state"]}
 
 
-def home_for_repository(info, *, create: bool) -> Path:
-    if os.environ.get("TASKLEDGER_HOME"):
-        return taskledger_home(create=create)
-    common = Path(str(info["common"]))
-    repository_root = common.parent if common.name == ".git" else Path(str(info["root"]))
-    return taskledger_home(repository_root, create=create)
-
-
-def active_specification_revision(service, project, *, relative_path=None, specification_id=None):
-    """Synchronize first, then return one current specification/revision view."""
-    service.preflight(project)
-    if relative_path is not None:
-        row = service.con.execute(
-            "SELECT s.id specification_id,s.relative_path,s.lifecycle,r.id revision_id,r.file_state,r.content_hash,r.content_bytes "
-            "FROM specifications s LEFT JOIN specification_revisions r ON r.id=s.active_revision_id "
-            "WHERE s.project_id=? AND s.relative_path=?",
-            (project["id"], relative_path),
-        ).fetchone()
-    else:
-        row = service.con.execute(
-            "SELECT s.id specification_id,s.relative_path,s.lifecycle,r.id revision_id,r.file_state,r.content_hash,r.content_bytes "
-            "FROM specifications s LEFT JOIN specification_revisions r ON r.id=s.active_revision_id "
-            "WHERE s.project_id=? AND s.id=?",
-            (project["id"], specification_id),
-        ).fetchone()
-    if not row or row["lifecycle"] != "ACTIVE" or row["file_state"] != "PRESENT" or not row["content_hash"] or row["content_bytes"] is None:
-        raise LedgerError("SPECIFICATION_STATE", "Preparation requires a present active specification revision.")
-    return row
-
-
 def init_project(args, data):
     if data: raise LedgerError("UNKNOWN_FIELD","project init only accepts --repo and --confirm-branch flags.")
     if not args.repo:raise LedgerError("INVALID_REQUEST","project init requires --repo.")
@@ -190,92 +162,20 @@ def service_for_command(args) -> Service:
     return Service(connect(home),home)
 
 
-def project_controller_config(limits):
-    from .controller.project import ProjectControllerConfig
-    from .controller.supervisor import SupervisorConfig
-    require_object(limits,{"max_workers","max_reviewers","max_total_worker_turns","max_total_reviewer_turns","reviewer_token_reserve","max_final_reviewer_turns","max_task_creator_turns","max_total_task_creator_turns","max_inflight_targets","task_creator_profile","supervisor"})
-    supervisor=limits.get("supervisor",{});require_object(supervisor,{"max_worker_turns","max_consecutive_stalled_turns","max_consecutive_runtime_failures","max_reviewer_turns_per_submission","max_total_tokens","max_elapsed_seconds","turn_timeout_seconds","reviewer_profile"})
-    try:
-        config=ProjectControllerConfig(
-            max_workers=limits.get("max_workers",2),max_reviewers=limits.get("max_reviewers",1),
-            max_total_worker_turns=limits.get("max_total_worker_turns",100),max_total_reviewer_turns=limits.get("max_total_reviewer_turns",50),
-            reviewer_token_reserve=limits.get("reviewer_token_reserve",0),
-            max_final_reviewer_turns=limits.get("max_final_reviewer_turns",2),max_task_creator_turns=limits.get("max_task_creator_turns",2),
-            max_total_task_creator_turns=limits.get("max_total_task_creator_turns",6),max_inflight_targets=limits.get("max_inflight_targets"),
-            task_creator_profile=limits.get("task_creator_profile","taskledger_task_creator"),supervisor=SupervisorConfig(**supervisor),
-        );config.validate();return config
-    except (TypeError,ValueError) as exc:raise LedgerError("INVALID_REQUEST",str(exc))
-
-
-def run_project_controller(service,project,principal,run_id,config,runtime):
-    from .controller.journal import Journal
-    from .controller.project import ProjectController, ProjectControllerResult
-    journal=Journal(service.con,service.home)
-    async def execute():
-        loop = asyncio.get_running_loop()
-        shutdown = asyncio.Event()
-        shutdown_reason = {"value": "USER_INTERRUPTED"}
-
-        def request_shutdown(reason):
-            shutdown_reason["value"] = reason
-            shutdown.set()
-
-        installed = []
-        for sig, reason in ((signal.SIGINT, "USER_INTERRUPTED"), (signal.SIGTERM, "PROCESS_TERMINATED")):
-            try:
-                loop.add_signal_handler(sig, request_shutdown, reason); installed.append(sig)
-            except (NotImplementedError, RuntimeError, ValueError):
-                pass
-        controller = asyncio.create_task(ProjectController(service=service,project=project,orchestrator=principal,run_id=run_id,runtime=runtime,journal=journal,config=config).run())
-        stopper = asyncio.create_task(shutdown.wait())
-        try:
-            done, _ = await asyncio.wait({controller, stopper}, return_when=asyncio.FIRST_COMPLETED)
-            if controller in done:
-                stopper.cancel()
-                return await controller
-            controller.cancel()
-            await asyncio.gather(controller, return_exceptions=True)
-            unresolved = []
-            for turn in journal.open_turns(project_id=project["id"]):
-                result = None
-                if turn.external_turn_id:
-                    from .controller.model import RuntimeTurnHandle
-                    handle = RuntimeTurnHandle(turn.thread_id, turn.external_turn_id)
-                    try:
-                        await asyncio.wait_for(runtime.interrupt_turn(handle), timeout=5)
-                    except Exception:
-                        pass
-                    try:
-                        inspection = None
-                        for _ in range(10):
-                            inspection = await asyncio.wait_for(runtime.inspect_turn(handle), timeout=1)
-                            result = inspection.result
-                            if inspection.state in {"FAILED", "COMPLETED"}:
-                                break
-                            await asyncio.sleep(0.1)
-                        if inspection and inspection.state == "FAILED":
-                            journal.fail_turn(turn.id, inspection.error or "INTERRUPTED", uncertain=False, result=result)
-                            journal.consume_turn(turn.id)
-                            continue
-                        if inspection and inspection.state == "COMPLETED" and result is not None:
-                            journal.complete_turn(turn.id, result)
-                            journal.consume_turn(turn.id)
-                            continue
-                    except Exception:
-                        pass
-                journal.fail_turn(turn.id, "interrupted before a terminal provider result was proven", uncertain=True, result=result)
-                unresolved.append(turn.id)
-            if (journal.run(run_id) or {}).get("state") == "RUNNING":
-                journal.finish_run(run_id, "PAUSED", reason=shutdown_reason["value"], detail=("unresolved interrupted turns: " + ", ".join(unresolved)) if unresolved else "foreground execution interrupted safely")
-            return ProjectControllerResult("PAUSED", run_id, shutdown_reason["value"], "foreground execution interrupted", usage=journal.usage_report(run_id=run_id))
-        except Exception as exc:
-            if (journal.run(run_id) or {}).get("state")=="RUNNING":journal.finish_run(run_id,"FAILED",reason="INVALID_STATE",detail=str(exc))
-            raise
+def run_project_controller(service,project,principal,run_id,config,runtime, *, owner=None):
+    from .application.lifecycle import LifecycleOwner
+    owner = owner or LifecycleOwner(service,project,principal,run_id,config,runtime)
+    async def run_owned():
+        loop=asyncio.get_running_loop();installed=[]
+        signals = [(signal.SIGINT,"USER_INTERRUPTED"),(signal.SIGTERM,"PROCESS_TERMINATED")]
+        if hasattr(signal, "SIGHUP"): signals.append((signal.SIGHUP, "PROCESS_HANGUP"))
+        for sig,reason in signals:
+            try:loop.add_signal_handler(sig,owner.request_stop,reason);installed.append(sig)
+            except (NotImplementedError,RuntimeError,ValueError):pass
+        try:return await owner.run()
         finally:
-            for sig in installed:
-                loop.remove_signal_handler(sig)
-            await runtime.close()
-    return asyncio.run(execute())
+            for sig in installed:loop.remove_signal_handler(sig)
+    return asyncio.run(run_owned())
 
 
 def prepare_project_command(args, data):
@@ -287,7 +187,8 @@ def prepare_project_command(args, data):
     from .controller.journal import Journal
     from .controller.model import SessionRole
 
-    spec_path, config, requested_group_id = parse_preparation_request(data)
+    # The CLI owns presentation and waiting; reusable mechanics own preparation.
+    from .application.commands import prepare_project
     info = git.inspect(os.getcwd())
     if not info["has_commits"]:
         raise LedgerError("INITIAL_COMMIT_REQUIRED", "The repository needs an initial commit before preparation.")
@@ -296,102 +197,16 @@ def prepare_project_command(args, data):
     home = home_for_repository(info, create=False)
     if not os.environ.get("TASKLEDGER_HOME") and not git.ignored(info["root"], ".taskledger/"):
         raise LedgerError("LEDGER_DIRECTORY_NOT_IGNORED", "Add .taskledger/ to this repository's ignore rules before preparation.")
-    database = home / "taskledger.sqlite3"
-    already_initialized = database.is_file()
+    initialized = (home / "taskledger.sqlite3").is_file()
     home = home_for_repository(info, create=True)
-    service = Service(connect(home), home)
-    if not already_initialized:
-        service.init(info["root"], info["branch"])
-    project, principal = service.auth_orchestrator(args.project, args.token)
-    attempt = service.begin_preparation_attempt(project, requested_group_id)
-    runtime = None
-    runtime_closed = False
+    shared_service = Service(connect(home), home)
     try:
-        if project["canonical_branch"] != info["branch"]:
-            raise LedgerError("CANONICAL_BRANCH_NOT_CHECKED_OUT", "Preparation requires the canonical branch to be checked out.")
-        active_run = service.con.execute(
-            "SELECT id FROM controller_runs WHERE project_id=? AND state='RUNNING'", (project["id"],)
-        ).fetchone()
-        if active_run:
-            raise LedgerError("INVALID_REQUEST", "A controller run is already active.", details={"run_id": active_run["id"]})
-        existing = service.con.execute(
-            "SELECT id FROM project_preparations WHERE project_id=? AND state IN ('PLANNING','AWAITING_APPROVAL')",
-            (project["id"],),
-        ).fetchone()
-        if existing:
-            raise LedgerError("STALE_STATE", "An open preparation already exists.", details={"preparation_id": existing["id"]})
-        spec = service.con.execute(
-            "SELECT id FROM specifications WHERE project_id=? AND relative_path=? AND lifecycle='ACTIVE'",
-            (project["id"], spec_path),
-        ).fetchone()
-        if spec is None:
-            service.register_spec(project, principal, {"relative_path": spec_path})
-        revision = active_specification_revision(service, project, relative_path=spec_path)
-        diagnostics = service.preparation_diagnostics(project, {
-            "profiles": ["routine", "complex"], "local_inputs": config.local_inputs,
-            "services": config.services, "host_agent_availability": {"routine": True, "complex": True},
-        })
-        if not diagnostics["ready_for_local_preparation"]:
-            raise LedgerError("INVALID_REQUEST", "Preparation preflight failed.", details={"preflight": diagnostics})
-        runtime = AppServerRuntime(repository_root=project["repository_root"], worker_tools={})
-        identities = {
-            "task_creator": runtime.session_identity(role=SessionRole.TASK_CREATOR, profile="taskledger_task_creator", subject_id="preflight", cwd=project["repository_root"], writable=False).as_dict(),
-            "routine": runtime.session_identity(role=SessionRole.WORKER, profile="routine", subject_id="preflight", cwd=project["repository_root"], writable=True).as_dict(),
-            "complex": runtime.session_identity(role=SessionRole.WORKER, profile="complex", subject_id="preflight", cwd=project["repository_root"], writable=True).as_dict(),
-            "reviewer": runtime.session_identity(role=SessionRole.REVIEWER, profile="taskledger_reviewer", subject_id="preflight", cwd=project["repository_root"], writable=False).as_dict(),
-        }
-        journal = Journal(service.con, service.home)
-        manifest = {
-            "canonical_starting_oid": info["head_oid"], "specification_hash": revision["content_hash"],
-            "specification_revision_id": revision["revision_id"], "scope": "PREPARATION",
-            "controller_configuration_hash": sha256(canonical(config.as_dict())),
-            "taskledger_schema_version": service.con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
-            "codex_protocol_identity": runtime.protocol_identity,
-        }
-        run_id = journal.create_run(project["id"], mode="PREPARATION", config={"limits": config.as_dict(), "manifest": manifest})
-        service.link_preparation_attempt(attempt["attempt_id"], planning_run_id=run_id)
-        preparation_id = store_planning_preparation(
-            service, project, run_id=run_id, starting_oid=info["head_oid"], spec_id=revision["specification_id"],
-            spec_hash=revision["content_hash"], profile_hashes=identities, config=config,
-        )
-        service.link_preparation_attempt(attempt["attempt_id"], preparation_id=preparation_id)
-
-        async def execute():
-            nonlocal runtime_closed
-            try:
-                proposal, turn_id = await InitialPlanner(
-                    service=service, project=project, journal=journal, runtime=runtime, run_id=run_id,
-                    preparation_id=preparation_id, spec_path=spec_path, specification_bytes=revision["content_bytes"],
-                    specification_hash=revision["content_hash"], config=config,
-                ).run()
-                current = active_specification_revision(service, project, specification_id=revision["specification_id"])
-                if current["revision_id"] != revision["revision_id"] or current["content_hash"] != revision["content_hash"]:
-                    raise LedgerError("PREPARATION_STALE", "Specification changed during preparation.")
-                result = finish_preparation(service, preparation_id, proposal, turn_id)
-                journal.finish_run(run_id, "COMPLETED" if result["status"] == "AWAITING_APPROVAL" else "FAILED", reason=None if result["status"] == "AWAITING_APPROVAL" else "AMBIGUOUS_REQUIREMENT")
-                return {**result, "planning_run_id": run_id, "starting_oid": info["head_oid"], "canonical_branch": info["branch"], "profiles": identities}
-            except BaseException as exc:
-                if (journal.run(run_id) or {}).get("state") == "RUNNING":
-                    journal.finish_run(run_id, "FAILED", reason="INVALID_STATE", detail=str(exc))
-                with contextlib.suppress(Exception):
-                    with transaction(service.con):
-                        service.con.execute("UPDATE project_preparations SET state='FAILED',failure_reason=?,updated_at=? WHERE id=? AND state='PLANNING'", (str(exc), now(), preparation_id))
-                raise
-            finally:
-                await runtime.close()
-                runtime_closed = True
-
-        result = asyncio.run(execute())
-        service.finish_preparation_attempt(attempt["attempt_id"], succeeded=result["status"] == "AWAITING_APPROVAL", failure_reason=None if result["status"] == "AWAITING_APPROVAL" else "AMBIGUOUS_REQUIREMENT")
-        return {**result, "preparation_attempt_id": attempt["attempt_id"], "run_group_id": attempt["run_group_id"]}
-    except BaseException as exc:
-        service.finish_preparation_attempt(attempt["attempt_id"], succeeded=False, failure_reason=exc.code if isinstance(exc, LedgerError) else exc.__class__.__name__)
-        raise
+        if not initialized:
+            shared_service.init(info["root"], info["branch"])
+        shared_project, shared_principal = shared_service.auth_orchestrator(args.project, args.token)
+        return asyncio.run(prepare_project(shared_service, shared_project, shared_principal, data, runtime_factory=AppServerRuntime))
     finally:
-        if runtime is not None and not runtime_closed:
-            asyncio.run(runtime.close())
-        service.con.close()
-
+        shared_service.con.close()
 
 def start_prepared_project(service, project, principal, data):
     from .controller.app_server import AppServerRuntime
@@ -399,80 +214,27 @@ def start_prepared_project(service, project, principal, data):
     from .controller.journal import Journal
     from .controller.model import SessionRole
     from .controller.project import validate_execution_policy
-    require_object(data, {"preparation_id", "approve_proposal_hash", "live"}, {"preparation_id", "approve_proposal_hash", "live"})
-    if data["live"] is not True:
-        raise LedgerError("INVALID_REQUEST", "Live project execution requires live=true explicit opt in.")
-    preparation = preparation_row(service, text(data["preparation_id"], "preparation_id"))
-    if preparation["project_id"] != project["id"] or preparation["state"] != "AWAITING_APPROVAL":
-        raise LedgerError("PREPARATION_STALE", "Preparation is not awaiting approval.")
-    if text(data["approve_proposal_hash"], "approve_proposal_hash") != preparation["proposal_hash"]:
-        raise LedgerError("PREPARATION_STALE", "Approved proposal hash does not match the immutable preparation.")
-    if "sha256:" + sha256(canonical(preparation["proposal"])) != preparation["proposal_hash"]:
-        raise LedgerError("PREPARATION_STALE", "Stored proposal no longer matches its immutable fingerprint.")
-    if not proposal_sources_are_normalized(preparation["proposal"]):
-        raise LedgerError("PREPARATION_INVALID", "Prepared proposal uses a legacy duplicate source shape; prepare a new proposal.")
-    revision = active_specification_revision(service, project, specification_id=preparation["specification_id"])
-    if revision["content_hash"] != preparation["specification_hash"]:
-        raise LedgerError("PREPARATION_STALE", "Specification changed after preparation.")
-    info = git.inspect(project["repository_root"])
-    if info["branch"] != preparation["canonical_branch"] or info["head_oid"] != preparation["starting_oid"] or not git.clean(info["root"]):
-        raise LedgerError("PREPARATION_STALE", "Repository branch, commit, or cleanliness changed after preparation.")
-    stored = preparation["run_configuration"]
-    diagnostics = service.preparation_diagnostics(project, {
-        "profiles": ["routine", "complex"], "local_inputs": stored["preflight"]["local_inputs"],
-        "services": stored["preflight"]["services"], "host_agent_availability": {"routine": True, "complex": True},
-    })
-    if not diagnostics["ready_for_local_preparation"]:
-        raise LedgerError("PREPARATION_STALE", "Preflight no longer passes.", details={"preflight": diagnostics})
-    runtime = AppServerRuntime(repository_root=project["repository_root"], worker_tools={})
-    identities = {
-        "task_creator": runtime.session_identity(role=SessionRole.TASK_CREATOR, profile="taskledger_task_creator", subject_id="preflight", cwd=project["repository_root"], writable=False).as_dict(),
-        "routine": runtime.session_identity(role=SessionRole.WORKER, profile="routine", subject_id="preflight", cwd=project["repository_root"], writable=True).as_dict(),
-        "complex": runtime.session_identity(role=SessionRole.WORKER, profile="complex", subject_id="preflight", cwd=project["repository_root"], writable=True).as_dict(),
-        "reviewer": runtime.session_identity(role=SessionRole.REVIEWER, profile="taskledger_reviewer", subject_id="preflight", cwd=project["repository_root"], writable=False).as_dict(),
-    }
-    if identities != preparation["profile_hashes"] or sha256(canonical(stored)) != preparation["run_configuration_hash"]:
-        raise LedgerError("PREPARATION_STALE", "Resolved profiles or run configuration changed after preparation.")
-    active_run = service.con.execute(
-        "SELECT id FROM controller_runs WHERE project_id=? AND state='RUNNING'", (project["id"],)
-    ).fetchone()
-    if active_run:
-        raise LedgerError("PREPARATION_STALE", "Another controller run became active after preparation.", details={"run_id": active_run["id"]})
-    with command_phase("PLAN_MATERIALIZATION"):
-        applied = service.apply_plan(project, principal, materialized_plan(preparation))
-        validated = service.validate_plan(project, principal)
-    if not validated["valid"]:
-        raise LedgerError("PLAN_VALIDATION_FAILED", "Prepared plan did not pass Taskledger validation.", details={"diagnostics": validated["diagnostics"]})
-    raw_targets = [
-        {"task_id": applied["task_ids"][entry["task_ref"]], "wave": entry["wave"],
-         "worker_profile": entry["worker_profile"], "parallel_safe": entry["parallel_safe"],
-         "write_surfaces": entry["write_surfaces"]}
-        for entry in preparation["proposal"]["execution_policy"]
-    ]
-    targets = validate_execution_policy(service, project, raw_targets)
-    config = project_controller_config(stored["execution_limits"])
-    run_group_id, frozen_attempts = service.preparation_attempts_for_preparation(preparation["id"])
-    manifest = {
-        "canonical_starting_oid": info["head_oid"], "starting_plan_fingerprint": validated["fingerprint"],
-        "execution_policy_hash": hashlib.sha256(canonical(targets).encode()).hexdigest(),
-        "controller_configuration_hash": hashlib.sha256(canonical(config.as_dict()).encode()).hexdigest(),
-        "taskledger_schema_version": service.con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
-        "codex_protocol_identity": runtime.protocol_identity, "scope": "POST_APPROVAL_EXECUTION",
-        "preparation_run_id": preparation["planning_run_id"], "proposal_hash": preparation["proposal_hash"],
-    }
-    if run_group_id:
-        manifest["preparation_run_group_id"] = run_group_id
-        manifest["preparation_attempt_ids"] = [attempt["id"] for attempt in frozen_attempts]
-    journal = Journal(service.con, service.home)
-    run_id = journal.create_project_run(project["id"], config={"limits": config.as_dict(), "manifest": manifest}, targets=targets)
-    with transaction(service.con):
-        service.con.execute("UPDATE project_preparations SET state='APPROVED',execution_run_id=?,approved_at=?,updated_at=? WHERE id=? AND state='AWAITING_APPROVAL'", (run_id, now(), now(), preparation["id"]))
-    print(f"Taskledger execution run:\n{run_id}\n\nCtrl-C requests a safe pause.", file=sys.stderr, flush=True)
-    result = run_project_controller(service, project, principal, run_id, config, runtime)
-    return {"preparation_id": preparation["id"], **asdict(result)}
-
+    from .application.commands import admit_prepared_start
+    admitted = admit_prepared_start(service, project, principal, data, runtime_factory=AppServerRuntime)
+    print(f"Taskledger execution run:\n{admitted.run_id}\n\nCtrl-C requests a safe pause.", file=sys.stderr, flush=True)
+    result = run_project_controller(service, project, principal, admitted.run_id, admitted.owner.config,
+        admitted.owner.runtime, owner=admitted.owner)
+    return {"preparation_id": admitted.preparation_id, **asdict(result)}
 
 def dispatch(args, data):
+    if args.resource == "ui" and args.action is None:
+        require_object(data,{})
+        try:
+            from .ui.app import run_ui
+        except ImportError as exc:
+            if exc.name and exc.name.startswith("textual"):
+                raise LedgerError("OPTIONAL_DEPENDENCY_MISSING", "Install the visual console with: pip install 'taskledger[tui]'")
+            raise
+        from .application.host import EngineHost
+        repository = args.repo or os.getcwd()
+        host = EngineHost(repository, project_id=args.project, token=args.token)
+        asyncio.run(run_ui(host))
+        return {"status":"CLOSED"}
     command=f"{args.resource}.{args.action}"
     if command=="project.init":return init_project(args,data)
     if command=="project.prepare":return prepare_project_command(args,data)
@@ -532,9 +294,14 @@ def dispatch(args, data):
             "codex_protocol_identity":runtime.protocol_identity,
             "scope":"POST_APPROVAL_EXECUTION",
         }
-        try:run_id=journal.create_project_run(project["id"],config={"limits":config.as_dict(),"manifest":manifest},targets=targets)
-        except RuntimeError as exc:raise LedgerError("INVALID_REQUEST",str(exc))
-        result=run_project_controller(service,project,principal,run_id,config,runtime)
+        lease=journal.project_lock(project["id"]);lease.__enter__()
+        try:
+            run_id=journal.create_project_run(project["id"],config={"limits":config.as_dict(),"manifest":manifest},targets=targets)
+            from .application.lifecycle import LifecycleOwner
+            owner=LifecycleOwner(service,project,principal,run_id,config,runtime,owned_lease=lease)
+        except RuntimeError as exc:
+            lease.__exit__(None,None,None);raise LedgerError("INVALID_REQUEST",str(exc))
+        result=run_project_controller(service,project,principal,run_id,config,runtime,owner=owner)
         return asdict(result)
     if command=="controller.run-assignment":
         require_object(data,{"assignment_id","live","limits"},{"assignment_id","live"})
@@ -562,17 +329,20 @@ def dispatch(args, data):
                   "execution_policy_hash":None,"controller_configuration_hash":hashlib.sha256(canonical(asdict(config)).encode()).hexdigest(),
                   "taskledger_schema_version":service.con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
                   "codex_protocol_identity":runtime.protocol_identity,"scope":"POST_APPROVAL_EXECUTION"}
+        lease=journal.project_lock(project["id"]);lease.__enter__()
         try:run_id=journal.create_run(project["id"],mode="ASSIGNMENT",config={"assignment_id":assignment_id,"limits":asdict(config),"manifest":manifest})
-        except RuntimeError as exc:raise LedgerError("INVALID_REQUEST",str(exc))
+        except RuntimeError as exc:
+            lease.__exit__(None,None,None);raise LedgerError("INVALID_REQUEST",str(exc))
         async def execute():
             try:
                 adapter=TaskledgerLedgerAdapter(service,project,principal,worker_tool_enabled=True)
-                return await Supervisor(project_id=project["id"],run_id=run_id,ledger=adapter,runtime=runtime,journal=journal,config=config).run_assignment(assignment_id)
+                return await Supervisor(project_id=project["id"],run_id=run_id,ledger=adapter,runtime=runtime,journal=journal,config=config,owns_project_lease=False).run_assignment(assignment_id)
             except Exception as exc:
                 journal.finish_run(run_id,"FAILED",reason="INVALID_STATE",detail=str(exc));raise
             finally:
                 await runtime.close()
                 await broker.close()
+                lease.__exit__(None,None,None)
         result=asyncio.run(execute());return {"run_id":run_id,**asdict(result)}
     if command=="controller.resume":
         require_object(data,{"run_id","live"},{"run_id","live"})
@@ -584,7 +354,14 @@ def dispatch(args, data):
         from .controller.taskledger_adapter import TaskledgerLedgerAdapter
         journal=Journal(service.con,service.home);requested_id=text(data["run_id"],"run_id");existing=journal.run(requested_id)
         if not existing or existing["project_id"]!=project["id"]:raise LedgerError("INVALID_REQUEST","Controller run does not belong to this project.")
+        from .application.commands import admit_resume
+        admitted = admit_resume(service, project, principal, data, runtime_factory=AppServerRuntime)
+        resumed = asdict(asyncio.run(admitted.owner.run()))
+        return {"run_id": admitted.run_id, **resumed} if existing["mode"] == "ASSIGNMENT" else resumed
         if existing["mode"]=="PROJECT":
+            from .application.commands import admit_resume
+            admitted = admit_resume(service, project, principal, data, runtime_factory=AppServerRuntime)
+            return asdict(asyncio.run(admitted.owner.run()))
             config=project_controller_config(existing["config"]["limits"])
             runtime=AppServerRuntime(repository_root=project["repository_root"],worker_tools={})
             # Validate configured profiles before changing durable run state.
@@ -720,7 +497,7 @@ def main(argv=None):
             normalized.append(raw_argv[index]); index += 1
     try:
         args,unknown=parser().parse_known_args(normalized)
-        command=f"{args.resource}.{args.action}" if args.resource and args.action else "unknown"
+        command="ui" if args.resource=="ui" and args.action is None else (f"{args.resource}.{args.action}" if args.resource and args.action else "unknown")
         if unknown:raise LedgerError("INVALID_REQUEST","Unknown command-line flag.",details={"flags":unknown})
         if args.version:
             if args.resource or args.action or any((args.input,args.token,args.project,args.repo,args.confirm_branch)):

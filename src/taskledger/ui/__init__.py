@@ -1,0 +1,1 @@
+"""Optional Textual display adapter."""

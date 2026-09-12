@@ -376,6 +376,23 @@ Run the test suite from a checkout:
 python3 -m unittest discover -s tests -v
 ```
 
+## Visual console
+
+The optional local Textual console shows project, task, agent-turn, activity,
+usage, and intervention state through the same Taskledger mechanics used by the
+CLI. Installing the extra does not change non-visual commands:
+
+```sh
+pip install 'taskledger[tui]'
+taskledger ui
+```
+
+Use `taskledger ui --repo /absolute/path` outside the repository. Opening the
+console never starts model work and an uninitialized repository is displayed
+without creating ledger files. F1–F6 change sections, Ctrl+P requests a safe
+pause for a run owned by this process, and Ctrl+Q exits through the host cleanup
+path.
+
 Documentation and design references:
 
 - [Complete run guide](docs/RUN_GUIDE.md)

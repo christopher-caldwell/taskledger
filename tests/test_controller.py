@@ -8,16 +8,18 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from taskledger.controller.fakes import FakeLedger, FakeRuntime, TurnScript, accepted_verdict, rejected_verdict
 from taskledger.controller.app_server import AppServerRuntime
 from taskledger.controller.journal import Journal
 from taskledger.controller.model import ExecutionStatus, PauseReason, RuntimeIdentity, RuntimeTurnHandle, RuntimeTurnResult, SessionRole, SupervisorStatus, Usage
-from taskledger.controller.supervisor import Supervisor, SupervisorConfig, parse_verdict
+from taskledger.controller.supervisor import ProviderAdmissionStopped, Supervisor, SupervisorConfig, parse_verdict
 from taskledger.controller.worker_broker import WorkerBroker, broker_socket_path, request
 from taskledger.core import canonical, now, sha256
 from taskledger.db import connect, transaction
+from taskledger.notifications import bind_change_sink, unbind_change_sink
 
 
 class ControllerTests(unittest.IsolatedAsyncioTestCase):
@@ -52,6 +54,60 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, SupervisorStatus.INTEGRATED)
         self.assertEqual(result.worker_turns, 2)
         self.assertEqual(runtime.sessions_started, 2)
+
+    async def test_observer_variants_preserve_controller_semantics(self):
+        """M04: observation timing/failure cannot alter a deterministic run."""
+        class Fast:
+            def publish(self, _notice): pass
+        class Slow:
+            def publish(self, _notice): time.sleep(.002)
+        class Failing:
+            def publish(self, _notice): raise RuntimeError("observer failed")
+
+        async def run_with(sink):
+            ledger = FakeLedger()
+            runtime = FakeRuntime(
+                worker_turns=[TurnScript(effect=ledger.submit)],
+                reviewer_turns=[TurnScript(structured_output=accepted_verdict())],
+            )
+            if sink is not None: bind_change_sink(self.con, sink)
+            try:
+                supervisor = self.supervisor(ledger, runtime)
+                result = await supervisor.run_assignment("a-observer")
+                turns = [tuple(row) for row in self.con.execute(
+                    "SELECT t.state,t.prompt_kind,t.dispatch_reason FROM controller_turns t "
+                    "JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? "
+                    "ORDER BY CASE s.role WHEN 'WORKER' THEN 0 WHEN 'REVIEWER' THEN 1 ELSE 2 END,t.sequence",
+                    (supervisor.run_id,)
+                )]
+                return (result.status.value, result.worker_turns, result.reviewer_turns,
+                    tuple(role.value for role in runtime.roles.values()), tuple(turns), ledger.status.value)
+            finally:
+                if sink is not None: unbind_change_sink(self.con)
+
+        baseline = await run_with(None)
+        self.assertEqual(await run_with(Fast()), baseline)
+        self.assertEqual(await run_with(Slow()), baseline)
+        self.assertEqual(await run_with(Failing()), baseline)
+
+    async def test_pause_latch_blocks_worker_provider_admission(self):
+        ledger=FakeLedger();runtime=FakeRuntime(worker_turns=[TurnScript()],reviewer_turns=[])
+        run=self.journal.create_run("p1",mode="ASSIGNMENT",config={})
+        supervisor=Supervisor(project_id="p1",run_id=run,ledger=ledger,runtime=runtime,journal=self.journal,
+            stop_requested=lambda:True)
+        result=await supervisor.run_assignment("a1")
+        self.assertEqual(result.status,SupervisorStatus.PAUSED)
+        self.assertEqual(runtime.turns_started,0)
+
+    async def test_pause_latch_blocks_reviewer_provider_admission(self):
+        ledger=FakeLedger();ledger.submit()
+        runtime=FakeRuntime(worker_turns=[],reviewer_turns=[TurnScript(structured_output=accepted_verdict())])
+        run=self.journal.create_run("p1",mode="ASSIGNMENT",config={})
+        supervisor=Supervisor(project_id="p1",run_id=run,ledger=ledger,runtime=runtime,journal=self.journal,
+            stop_requested=lambda:True)
+        result=await supervisor.run_assignment("a1")
+        self.assertEqual(result.status,SupervisorStatus.PAUSED)
+        self.assertEqual(runtime.turns_started,0)
 
     async def test_rejection_reuses_worker_session_then_reviews_new_submission(self):
         ledger = FakeLedger()

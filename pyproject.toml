@@ -14,8 +14,14 @@ requires-python = ">=3.11"
 taskledger = "taskledger.cli:main"
 taskledger-worker-proxy = "taskledger.worker_proxy:main"
 
+[project.optional-dependencies]
+tui = ["textual==8.2.8"]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+taskledger = ["ui/*.tcss"]

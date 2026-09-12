@@ -81,12 +81,18 @@ class WorkerBroker:
         if not hasattr(self.service, "home") or not hasattr(self.service, "con"):
             return self._dispatch(action, data)
         from taskledger.db import connect
+        from taskledger.notifications import bind_change_sink, change_sink_for, unbind_change_sink
         from taskledger.service import Service
 
         isolated = Service(connect(self.service.home), self.service.home)
+        sink = change_sink_for(self.service.con)
         try:
+            if sink is not None:
+                bind_change_sink(isolated.con, sink)
             return self._dispatch(action, data, service=isolated)
         finally:
+            if sink is not None:
+                unbind_change_sink(isolated.con)
             isolated.con.close()
 
 
