@@ -1,0 +1,17 @@
+{
+  "specification": "TL-CONSOLE-1",
+  "source_repository": "christopher-caldwell/taskledger",
+  "source_commit": "c1453448436ec8d46d502eb9605876cca026e3fe",
+  "status": "Proposed specifications with standalone contract experiments; not implemented in repository",
+  "headless_acceptance_cases": 24,
+  "textual_acceptance_cases": 24,
+  "standalone_experiments_passed": 26,
+  "files": {
+    "01-headless-mechanics-spec.md": "bcbbbbe46f281ded97eec00a3587b4f4f56fcbf6592f2ec2b8f384407a6ada78",
+    "02-textual-display-spec.md": "ed5fe699548babf61c25ba91c203a5883e1f4530c96ee7d4af753fbc13bf2293",
+    "README.md": "43b00c3e93e09d27164636df4170d122e686702ec0dd54a7a47271c1ac865e93",
+    "validation/results.json": "fbfccc01182e345dd5f423b41e2045ada9f3863f09d495b9444a28a882903e8b",
+    "validation/test-output.txt": "dc18db8fcb36ecfc9c1ae63c6d19998943564288b5b55f559ce4483de4599d97",
+    "validation/test_contracts.py": "5b3c983f0e1027ccf5ea99cac7e936e13eaa7ba05f28a3722e556563262557af"
+  }
+}

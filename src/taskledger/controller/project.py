@@ -142,7 +142,7 @@ class ProjectController:
         PauseReason.PLAN_INVALID,
     }
 
-    def __init__(self, *, service, project, orchestrator, run_id: str, runtime, journal: Journal, config: ProjectControllerConfig):
+    def __init__(self, *, service, project, orchestrator, run_id: str, runtime, journal: Journal, config: ProjectControllerConfig, stop_requested=None):
         self.service = service
         self.project = project
         self.orchestrator = orchestrator
@@ -155,6 +155,7 @@ class ProjectController:
         self.worker_capacity = asyncio.Semaphore(config.max_workers)
         self.reviewer_capacity = asyncio.Semaphore(config.max_reviewers)
         self.brokers: dict[str, WorkerBroker] = {}
+        self.stop_requested = stop_requested or (lambda: False)
 
     async def run(self) -> ProjectControllerResult:
         with self.journal.project_lock(self.project["id"]):
@@ -175,6 +176,8 @@ class ProjectController:
 
     async def _run_loop(self) -> ProjectControllerResult:
         while True:
+            if self.stop_requested():
+                return self._pause(PauseReason.USER_INTERRUPTED, "pause requested before the next dispatch")
             gate = self._global_gate()
             if gate:
                 return self._pause(*gate)

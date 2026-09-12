@@ -1,0 +1,31 @@
+test_P15_attach_seeds_current_snapshot_without_waiting_for_change (__main__.FeedTests.test_P15_attach_seeds_current_snapshot_without_waiting_for_change) ... ok
+test_P16_burst_has_one_slot_and_one_queued_wake (__main__.FeedTests.test_P16_burst_has_one_slot_and_one_queued_wake) ... ok
+test_P17_publish_wakes_waiting_consumer_across_threads (__main__.FeedTests.test_P17_publish_wakes_waiting_consumer_across_threads) ... ok
+test_P18_cancelled_display_wait_does_not_cancel_producer (__main__.FeedTests.test_P18_cancelled_display_wait_does_not_cancel_producer) ... ok
+test_P19_unsubscribe_is_local_and_reattach_reads_latest (__main__.FeedTests.test_P19_unsubscribe_is_local_and_reattach_reads_latest) ... ok
+test_P20_second_subscriber_is_rejected (__main__.FeedTests.test_P20_second_subscriber_is_rejected) ... ok
+test_P21_dead_display_loop_does_not_stop_publication (__main__.FeedTests.test_P21_dead_display_loop_does_not_stop_publication) ... ok
+test_P22_slow_consumer_converges_after_repeated_bursts (__main__.FeedTests.test_P22_slow_consumer_converges_after_repeated_bursts) ... ok
+test_P23_ui_loop_advances_while_engine_thread_is_blocked (__main__.LoopTests.test_P23_ui_loop_advances_while_engine_thread_is_blocked) ... ok
+test_P24_cancelled_receipt_wait_does_not_cancel_owned_job (__main__.LoopTests.test_P24_cancelled_receipt_wait_does_not_cancel_owned_job) ... ok
+test_P25_pause_latch_is_not_paused_and_blocks_next_admission (__main__.LoopTests.test_P25_pause_latch_is_not_paused_and_blocks_next_admission) ... ok
+test_P26_database_is_created_and_used_in_engine_thread (__main__.LoopTests.test_P26_database_is_created_and_used_in_engine_thread) ... ok
+test_P01_commit_is_visible_before_notification (__main__.TransactionTests.test_P01_commit_is_visible_before_notification) ... ok
+test_P02_rollback_emits_no_committed_snapshot (__main__.TransactionTests.test_P02_rollback_emits_no_committed_snapshot) ... ok
+test_P03_notification_failure_does_not_undo_commit (__main__.TransactionTests.test_P03_notification_failure_does_not_undo_commit) ... ok
+test_P04_resnapshot_recovers_lost_publication (__main__.TransactionTests.test_P04_resnapshot_recovers_lost_publication) ... ok
+test_P05_snapshot_rejects_open_write_transaction (__main__.TransactionTests.test_P05_snapshot_rejects_open_write_transaction) ... ok
+test_P06_query_survives_write_denial (__main__.TransactionTests.test_P06_query_survives_write_denial) ... ok
+test_P07_sqlite_connection_cannot_cross_owner_thread (__main__.TransactionTests.test_P07_sqlite_connection_cannot_cross_owner_thread) ... ok
+test_P08_coalescing_does_not_delete_durable_history (__main__.TransactionTests.test_P08_coalescing_does_not_delete_durable_history) ... ok
+test_P09_full_snapshot_replacement_does_not_double_count_usage (__main__.TransactionTests.test_P09_full_snapshot_replacement_does_not_double_count_usage) ... ok
+test_P10_deeply_immutable_contract_example (__main__.TransactionTests.test_P10_deeply_immutable_contract_example) ... ok
+test_P11_stale_revision_and_wrong_epoch_are_rejected (__main__.TransactionTests.test_P11_stale_revision_and_wrong_epoch_are_rejected) ... ok
+test_P12_naive_snapshot_then_subscribe_has_a_counterexample (__main__.TransactionTests.test_P12_naive_snapshot_then_subscribe_has_a_counterexample) ... ok
+test_P13_atomic_attach_publish_permutations_converge (__main__.TransactionTests.test_P13_atomic_attach_publish_permutations_converge) ... ok
+test_P14_no_observer_does_not_change_synthetic_workload (__main__.TransactionTests.test_P14_no_observer_does_not_change_synthetic_workload) ... ok
+
+----------------------------------------------------------------------
+Ran 26 tests in 0.071s
+
+OK

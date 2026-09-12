@@ -381,3 +381,5 @@ def transaction(con: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         raise
     else:
         con.commit()
+        from .notifications import publish_committed
+        publish_committed(con)

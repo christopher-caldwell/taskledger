@@ -208,6 +208,21 @@ def project_controller_config(limits):
 
 
 def run_project_controller(service,project,principal,run_id,config,runtime):
+    from .application.lifecycle import LifecycleOwner
+    owner = LifecycleOwner(service,project,principal,run_id,config,runtime)
+    async def run_owned():
+        loop=asyncio.get_running_loop();installed=[]
+        for sig,reason in ((signal.SIGINT,"USER_INTERRUPTED"),(signal.SIGTERM,"PROCESS_TERMINATED")):
+            try:loop.add_signal_handler(sig,owner.request_stop,reason);installed.append(sig)
+            except (NotImplementedError,RuntimeError,ValueError):pass
+        try:return await owner.run()
+        finally:
+            for sig in installed:loop.remove_signal_handler(sig)
+    return asyncio.run(run_owned())
+
+
+def _legacy_run_project_controller(service,project,principal,run_id,config,runtime):
+    """Retained temporarily as a behavioral reference during lifecycle extraction."""
     from .controller.journal import Journal
     from .controller.project import ProjectController, ProjectControllerResult
     journal=Journal(service.con,service.home)
@@ -473,6 +488,19 @@ def start_prepared_project(service, project, principal, data):
 
 
 def dispatch(args, data):
+    if args.resource == "ui" and args.action is None:
+        require_object(data,{})
+        try:
+            from .ui.app import run_ui
+        except ImportError as exc:
+            if exc.name and exc.name.startswith("textual"):
+                raise LedgerError("OPTIONAL_DEPENDENCY_MISSING", "Install the visual console with: pip install 'taskledger[tui]'")
+            raise
+        from .application.host import EngineHost
+        repository = args.repo or os.getcwd()
+        host = EngineHost(repository, project_id=args.project, token=args.token)
+        asyncio.run(run_ui(host))
+        return {"status":"CLOSED"}
     command=f"{args.resource}.{args.action}"
     if command=="project.init":return init_project(args,data)
     if command=="project.prepare":return prepare_project_command(args,data)
@@ -720,7 +748,7 @@ def main(argv=None):
             normalized.append(raw_argv[index]); index += 1
     try:
         args,unknown=parser().parse_known_args(normalized)
-        command=f"{args.resource}.{args.action}" if args.resource and args.action else "unknown"
+        command="ui" if args.resource=="ui" and args.action is None else (f"{args.resource}.{args.action}" if args.resource and args.action else "unknown")
         if unknown:raise LedgerError("INVALID_REQUEST","Unknown command-line flag.",details={"flags":unknown})
         if args.version:
             if args.resource or args.action or any((args.input,args.token,args.project,args.repo,args.confirm_branch)):
