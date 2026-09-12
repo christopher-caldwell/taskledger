@@ -8,15 +8,67 @@ import json
 import os
 import signal
 import sys
+import traceback
+from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from . import __version__
 from . import git
-from .core import LedgerError, MAX_JSON, canonical, now, require_object, sha256, taskledger_home, text
+from .core import LedgerError, MAX_JSON, canonical, new_id, now, require_object, sha256, taskledger_home, text
 from .db import connect, transaction
 from .service import Service
+
+
+_error_phase: ContextVar[str] = ContextVar("taskledger_error_phase", default="COMMAND_DISPATCH")
+
+
+@contextlib.contextmanager
+def command_phase(name: str):
+    token = _error_phase.set(name)
+    try:
+        yield
+    except BaseException:
+        # Keep the phase available to the outer CLI error envelope.
+        raise
+    finally:
+        if sys.exc_info()[0] is None:
+            _error_phase.reset(token)
+
+
+def write_internal_diagnostic(args, command: str, phase: str, exc: BaseException):
+    """Persist stack-frame metadata only; requests, locals, and exception text stay out."""
+    correlation_id = new_id()
+    try:
+        info = git.inspect(os.getcwd())
+        home = home_for_repository(info, create=False)
+        if not home.is_dir():
+            return correlation_id, None
+        directory = home / "diagnostics"
+        directory.mkdir(mode=0o700, exist_ok=True)
+        try:
+            directory.chmod(0o700)
+        except OSError:
+            pass
+        record = {
+            "correlation_id": correlation_id,
+            "command": command,
+            "phase": phase,
+            "exception_class": exc.__class__.__name__,
+            "recorded_at": now(),
+            "frames": [
+                {"file": Path(frame.filename).name, "line": frame.lineno, "function": frame.name}
+                for frame in traceback.extract_tb(exc.__traceback__)
+            ],
+        }
+        path = directory / f"{correlation_id}.json"
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(canonical(record) + "\n")
+        return correlation_id, path
+    except Exception:
+        return correlation_id, None
 
 
 def emit(value: dict[str, Any]) -> None:
@@ -79,6 +131,28 @@ def home_for_repository(info, *, create: bool) -> Path:
     common = Path(str(info["common"]))
     repository_root = common.parent if common.name == ".git" else Path(str(info["root"]))
     return taskledger_home(repository_root, create=create)
+
+
+def active_specification_revision(service, project, *, relative_path=None, specification_id=None):
+    """Synchronize first, then return one current specification/revision view."""
+    service.preflight(project)
+    if relative_path is not None:
+        row = service.con.execute(
+            "SELECT s.id specification_id,s.relative_path,s.lifecycle,r.id revision_id,r.file_state,r.content_hash,r.content_bytes "
+            "FROM specifications s LEFT JOIN specification_revisions r ON r.id=s.active_revision_id "
+            "WHERE s.project_id=? AND s.relative_path=?",
+            (project["id"], relative_path),
+        ).fetchone()
+    else:
+        row = service.con.execute(
+            "SELECT s.id specification_id,s.relative_path,s.lifecycle,r.id revision_id,r.file_state,r.content_hash,r.content_bytes "
+            "FROM specifications s LEFT JOIN specification_revisions r ON r.id=s.active_revision_id "
+            "WHERE s.project_id=? AND s.id=?",
+            (project["id"], specification_id),
+        ).fetchone()
+    if not row or row["lifecycle"] != "ACTIVE" or row["file_state"] != "PRESENT" or not row["content_hash"] or row["content_bytes"] is None:
+        raise LedgerError("SPECIFICATION_STATE", "Preparation requires a present active specification revision.")
+    return row
 
 
 def init_project(args, data):
@@ -213,7 +287,7 @@ def prepare_project_command(args, data):
     from .controller.journal import Journal
     from .controller.model import SessionRole
 
-    spec_path, config = parse_preparation_request(data)
+    spec_path, config, requested_group_id = parse_preparation_request(data)
     info = git.inspect(os.getcwd())
     if not info["has_commits"]:
         raise LedgerError("INITIAL_COMMIT_REQUIRED", "The repository needs an initial commit before preparation.")
@@ -229,85 +303,99 @@ def prepare_project_command(args, data):
     if not already_initialized:
         service.init(info["root"], info["branch"])
     project, principal = service.auth_orchestrator(args.project, args.token)
-    if project["canonical_branch"] != info["branch"]:
-        raise LedgerError("CANONICAL_BRANCH_NOT_CHECKED_OUT", "Preparation requires the canonical branch to be checked out.")
-    active_run = service.con.execute(
-        "SELECT id FROM controller_runs WHERE project_id=? AND state='RUNNING'", (project["id"],)
-    ).fetchone()
-    if active_run:
-        raise LedgerError("INVALID_REQUEST", "A controller run is already active.", details={"run_id": active_run["id"]})
-    existing = service.con.execute(
-        "SELECT id FROM project_preparations WHERE project_id=? AND state IN ('PLANNING','AWAITING_APPROVAL')",
-        (project["id"],),
-    ).fetchone()
-    if existing:
-        raise LedgerError("STALE_STATE", "An open preparation already exists.", details={"preparation_id": existing["id"]})
-    spec = service.con.execute(
-        "SELECT * FROM specifications WHERE project_id=? AND relative_path=? AND lifecycle='ACTIVE'",
-        (project["id"], spec_path),
-    ).fetchone()
-    if spec is None:
-        service.register_spec(project, principal, {"relative_path": spec_path})
-        spec = service.con.execute(
-            "SELECT * FROM specifications WHERE project_id=? AND relative_path=?", (project["id"], spec_path)
-        ).fetchone()
-    service.preflight(project)
-    revision = service.con.execute("SELECT * FROM specification_revisions WHERE id=?", (spec["active_revision_id"],)).fetchone()
-    if not revision or revision["file_state"] != "PRESENT" or not revision["content_hash"]:
-        raise LedgerError("SPECIFICATION_STATE", "Preparation requires a present approved specification revision.")
-    diagnostics = service.preparation_diagnostics(project, {
-        "profiles": ["routine", "complex"], "local_inputs": config.local_inputs,
-        "services": config.services, "host_agent_availability": {"routine": True, "complex": True},
-    })
-    if not diagnostics["ready_for_local_preparation"]:
-        raise LedgerError("INVALID_REQUEST", "Preparation preflight failed.", details={"preflight": diagnostics})
-    runtime = AppServerRuntime(repository_root=project["repository_root"], worker_tools={})
-    identities = {
-        "task_creator": runtime.session_identity(role=SessionRole.TASK_CREATOR, profile="taskledger_task_creator", subject_id="preflight", cwd=project["repository_root"], writable=False).as_dict(),
-        "routine": runtime.session_identity(role=SessionRole.WORKER, profile="routine", subject_id="preflight", cwd=project["repository_root"], writable=True).as_dict(),
-        "complex": runtime.session_identity(role=SessionRole.WORKER, profile="complex", subject_id="preflight", cwd=project["repository_root"], writable=True).as_dict(),
-        "reviewer": runtime.session_identity(role=SessionRole.REVIEWER, profile="taskledger_reviewer", subject_id="preflight", cwd=project["repository_root"], writable=False).as_dict(),
-    }
-    journal = Journal(service.con, service.home)
-    manifest = {
-        "canonical_starting_oid": info["head_oid"], "specification_hash": revision["content_hash"],
-        "scope": "PREPARATION", "controller_configuration_hash": sha256(canonical(config.as_dict())),
-        "taskledger_schema_version": service.con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
-        "codex_protocol_identity": runtime.protocol_identity,
-    }
-    run_id = journal.create_run(project["id"], mode="PREPARATION", config={"limits": config.as_dict(), "manifest": manifest})
-    preparation_id = store_planning_preparation(
-        service, project, run_id=run_id, starting_oid=info["head_oid"], spec_id=spec["id"],
-        spec_hash=revision["content_hash"], profile_hashes=identities, config=config,
-    )
-
-    async def execute():
-        try:
-            proposal, turn_id = await InitialPlanner(
-                service=service, project=project, journal=journal, runtime=runtime, run_id=run_id,
-                preparation_id=preparation_id, spec_path=spec_path, config=config,
-            ).run()
-            result = finish_preparation(service, preparation_id, proposal, turn_id)
-            journal.finish_run(run_id, "COMPLETED" if result["status"] == "AWAITING_APPROVAL" else "FAILED", reason=None if result["status"] == "AWAITING_APPROVAL" else "AMBIGUOUS_REQUIREMENT")
-            return {**result, "planning_run_id": run_id, "starting_oid": info["head_oid"], "canonical_branch": info["branch"], "profiles": identities}
-        except BaseException as exc:
-            if (journal.run(run_id) or {}).get("state") == "RUNNING":
-                journal.finish_run(run_id, "FAILED", reason="INVALID_STATE", detail=str(exc))
-            with contextlib.suppress(Exception):
-                with transaction(service.con):
-                    service.con.execute("UPDATE project_preparations SET state='FAILED',failure_reason=?,updated_at=? WHERE id=? AND state='PLANNING'", (str(exc), now(), preparation_id))
-            raise
-        finally:
-            await runtime.close()
+    attempt = service.begin_preparation_attempt(project, requested_group_id)
+    runtime = None
+    runtime_closed = False
     try:
-        return asyncio.run(execute())
+        if project["canonical_branch"] != info["branch"]:
+            raise LedgerError("CANONICAL_BRANCH_NOT_CHECKED_OUT", "Preparation requires the canonical branch to be checked out.")
+        active_run = service.con.execute(
+            "SELECT id FROM controller_runs WHERE project_id=? AND state='RUNNING'", (project["id"],)
+        ).fetchone()
+        if active_run:
+            raise LedgerError("INVALID_REQUEST", "A controller run is already active.", details={"run_id": active_run["id"]})
+        existing = service.con.execute(
+            "SELECT id FROM project_preparations WHERE project_id=? AND state IN ('PLANNING','AWAITING_APPROVAL')",
+            (project["id"],),
+        ).fetchone()
+        if existing:
+            raise LedgerError("STALE_STATE", "An open preparation already exists.", details={"preparation_id": existing["id"]})
+        spec = service.con.execute(
+            "SELECT id FROM specifications WHERE project_id=? AND relative_path=? AND lifecycle='ACTIVE'",
+            (project["id"], spec_path),
+        ).fetchone()
+        if spec is None:
+            service.register_spec(project, principal, {"relative_path": spec_path})
+        revision = active_specification_revision(service, project, relative_path=spec_path)
+        diagnostics = service.preparation_diagnostics(project, {
+            "profiles": ["routine", "complex"], "local_inputs": config.local_inputs,
+            "services": config.services, "host_agent_availability": {"routine": True, "complex": True},
+        })
+        if not diagnostics["ready_for_local_preparation"]:
+            raise LedgerError("INVALID_REQUEST", "Preparation preflight failed.", details={"preflight": diagnostics})
+        runtime = AppServerRuntime(repository_root=project["repository_root"], worker_tools={})
+        identities = {
+            "task_creator": runtime.session_identity(role=SessionRole.TASK_CREATOR, profile="taskledger_task_creator", subject_id="preflight", cwd=project["repository_root"], writable=False).as_dict(),
+            "routine": runtime.session_identity(role=SessionRole.WORKER, profile="routine", subject_id="preflight", cwd=project["repository_root"], writable=True).as_dict(),
+            "complex": runtime.session_identity(role=SessionRole.WORKER, profile="complex", subject_id="preflight", cwd=project["repository_root"], writable=True).as_dict(),
+            "reviewer": runtime.session_identity(role=SessionRole.REVIEWER, profile="taskledger_reviewer", subject_id="preflight", cwd=project["repository_root"], writable=False).as_dict(),
+        }
+        journal = Journal(service.con, service.home)
+        manifest = {
+            "canonical_starting_oid": info["head_oid"], "specification_hash": revision["content_hash"],
+            "specification_revision_id": revision["revision_id"], "scope": "PREPARATION",
+            "controller_configuration_hash": sha256(canonical(config.as_dict())),
+            "taskledger_schema_version": service.con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0],
+            "codex_protocol_identity": runtime.protocol_identity,
+        }
+        run_id = journal.create_run(project["id"], mode="PREPARATION", config={"limits": config.as_dict(), "manifest": manifest})
+        service.link_preparation_attempt(attempt["attempt_id"], planning_run_id=run_id)
+        preparation_id = store_planning_preparation(
+            service, project, run_id=run_id, starting_oid=info["head_oid"], spec_id=revision["specification_id"],
+            spec_hash=revision["content_hash"], profile_hashes=identities, config=config,
+        )
+        service.link_preparation_attempt(attempt["attempt_id"], preparation_id=preparation_id)
+
+        async def execute():
+            nonlocal runtime_closed
+            try:
+                proposal, turn_id = await InitialPlanner(
+                    service=service, project=project, journal=journal, runtime=runtime, run_id=run_id,
+                    preparation_id=preparation_id, spec_path=spec_path, specification_bytes=revision["content_bytes"],
+                    specification_hash=revision["content_hash"], config=config,
+                ).run()
+                current = active_specification_revision(service, project, specification_id=revision["specification_id"])
+                if current["revision_id"] != revision["revision_id"] or current["content_hash"] != revision["content_hash"]:
+                    raise LedgerError("PREPARATION_STALE", "Specification changed during preparation.")
+                result = finish_preparation(service, preparation_id, proposal, turn_id)
+                journal.finish_run(run_id, "COMPLETED" if result["status"] == "AWAITING_APPROVAL" else "FAILED", reason=None if result["status"] == "AWAITING_APPROVAL" else "AMBIGUOUS_REQUIREMENT")
+                return {**result, "planning_run_id": run_id, "starting_oid": info["head_oid"], "canonical_branch": info["branch"], "profiles": identities}
+            except BaseException as exc:
+                if (journal.run(run_id) or {}).get("state") == "RUNNING":
+                    journal.finish_run(run_id, "FAILED", reason="INVALID_STATE", detail=str(exc))
+                with contextlib.suppress(Exception):
+                    with transaction(service.con):
+                        service.con.execute("UPDATE project_preparations SET state='FAILED',failure_reason=?,updated_at=? WHERE id=? AND state='PLANNING'", (str(exc), now(), preparation_id))
+                raise
+            finally:
+                await runtime.close()
+                runtime_closed = True
+
+        result = asyncio.run(execute())
+        service.finish_preparation_attempt(attempt["attempt_id"], succeeded=result["status"] == "AWAITING_APPROVAL", failure_reason=None if result["status"] == "AWAITING_APPROVAL" else "AMBIGUOUS_REQUIREMENT")
+        return {**result, "preparation_attempt_id": attempt["attempt_id"], "run_group_id": attempt["run_group_id"]}
+    except BaseException as exc:
+        service.finish_preparation_attempt(attempt["attempt_id"], succeeded=False, failure_reason=exc.code if isinstance(exc, LedgerError) else exc.__class__.__name__)
+        raise
     finally:
+        if runtime is not None and not runtime_closed:
+            asyncio.run(runtime.close())
         service.con.close()
 
 
 def start_prepared_project(service, project, principal, data):
     from .controller.app_server import AppServerRuntime
-    from .controller.initial_planning import materialized_plan, preparation_row
+    from .controller.initial_planning import materialized_plan, preparation_row, proposal_sources_are_normalized
     from .controller.journal import Journal
     from .controller.model import SessionRole
     from .controller.project import validate_execution_policy
@@ -321,14 +409,14 @@ def start_prepared_project(service, project, principal, data):
         raise LedgerError("PREPARATION_STALE", "Approved proposal hash does not match the immutable preparation.")
     if "sha256:" + sha256(canonical(preparation["proposal"])) != preparation["proposal_hash"]:
         raise LedgerError("PREPARATION_STALE", "Stored proposal no longer matches its immutable fingerprint.")
+    if not proposal_sources_are_normalized(preparation["proposal"]):
+        raise LedgerError("PREPARATION_INVALID", "Prepared proposal uses a legacy duplicate source shape; prepare a new proposal.")
+    revision = active_specification_revision(service, project, specification_id=preparation["specification_id"])
+    if revision["content_hash"] != preparation["specification_hash"]:
+        raise LedgerError("PREPARATION_STALE", "Specification changed after preparation.")
     info = git.inspect(project["repository_root"])
     if info["branch"] != preparation["canonical_branch"] or info["head_oid"] != preparation["starting_oid"] or not git.clean(info["root"]):
         raise LedgerError("PREPARATION_STALE", "Repository branch, commit, or cleanliness changed after preparation.")
-    spec = service.con.execute("SELECT * FROM specifications WHERE id=? AND project_id=?", (preparation["specification_id"], project["id"])).fetchone()
-    service.preflight(project)
-    revision = service.con.execute("SELECT * FROM specification_revisions WHERE id=?", (spec["active_revision_id"],)).fetchone() if spec else None
-    if not revision or revision["content_hash"] != preparation["specification_hash"]:
-        raise LedgerError("PREPARATION_STALE", "Specification changed after preparation.")
     stored = preparation["run_configuration"]
     diagnostics = service.preparation_diagnostics(project, {
         "profiles": ["routine", "complex"], "local_inputs": stored["preflight"]["local_inputs"],
@@ -350,8 +438,9 @@ def start_prepared_project(service, project, principal, data):
     ).fetchone()
     if active_run:
         raise LedgerError("PREPARATION_STALE", "Another controller run became active after preparation.", details={"run_id": active_run["id"]})
-    applied = service.apply_plan(project, principal, materialized_plan(preparation))
-    validated = service.validate_plan(project, principal)
+    with command_phase("PLAN_MATERIALIZATION"):
+        applied = service.apply_plan(project, principal, materialized_plan(preparation))
+        validated = service.validate_plan(project, principal)
     if not validated["valid"]:
         raise LedgerError("PLAN_VALIDATION_FAILED", "Prepared plan did not pass Taskledger validation.", details={"diagnostics": validated["diagnostics"]})
     raw_targets = [
@@ -362,6 +451,7 @@ def start_prepared_project(service, project, principal, data):
     ]
     targets = validate_execution_policy(service, project, raw_targets)
     config = project_controller_config(stored["execution_limits"])
+    run_group_id, frozen_attempts = service.preparation_attempts_for_preparation(preparation["id"])
     manifest = {
         "canonical_starting_oid": info["head_oid"], "starting_plan_fingerprint": validated["fingerprint"],
         "execution_policy_hash": hashlib.sha256(canonical(targets).encode()).hexdigest(),
@@ -370,6 +460,9 @@ def start_prepared_project(service, project, principal, data):
         "codex_protocol_identity": runtime.protocol_identity, "scope": "POST_APPROVAL_EXECUTION",
         "preparation_run_id": preparation["planning_run_id"], "proposal_hash": preparation["proposal_hash"],
     }
+    if run_group_id:
+        manifest["preparation_run_group_id"] = run_group_id
+        manifest["preparation_attempt_ids"] = [attempt["id"] for attempt in frozen_attempts]
     journal = Journal(service.con, service.home)
     run_id = journal.create_project_run(project["id"], config={"limits": config.as_dict(), "manifest": manifest}, targets=targets)
     with transaction(service.con):
@@ -617,6 +710,7 @@ def dispatch(args, data):
 def main(argv=None):
     # URL-safe Base64 credentials may legitimately begin with '-'.  Normalize
     # the separated spelling so argparse never mistakes such a token for a flag.
+    _error_phase.set("COMMAND_DISPATCH")
     raw_argv=list(sys.argv[1:] if argv is None else argv)
     normalized=[]; index=0
     while index < len(raw_argv):
@@ -639,8 +733,12 @@ def main(argv=None):
     except LedgerError as exc:
         emit({"ok":False,"command":command,"error":{"code":exc.code,"message":exc.message,"details":exc.details,"allowed_actions":exc.actions}});return exc.exit_code
     except Exception as exc:
-        if "args" in locals() and args.verbose:print(f"taskledger internal error: {exc.__class__.__name__}",file=sys.stderr)
-        emit({"ok":False,"command":command,"error":{"code":"INTERNAL_ERROR","message":"Taskledger encountered an unexpected internal error.","details":{},"allowed_actions":[]}});return 70
+        phase = _error_phase.get()
+        correlation_id, diagnostic_path = write_internal_diagnostic(locals().get("args"), command, phase, exc)
+        if "args" in locals() and args.verbose:
+            detail = f"; diagnostic: {diagnostic_path}" if diagnostic_path else ""
+            print(f"taskledger internal error: {exc.__class__.__name__}; correlation: {correlation_id}{detail}",file=sys.stderr)
+        emit({"ok":False,"command":command,"error":{"code":"INTERNAL_ERROR","message":"Taskledger encountered an unexpected internal error.","details":{"correlation_id":correlation_id,"phase":phase},"allowed_actions":[]}});return 70
     emit({"ok":True,"command":command,"data":result,"warnings":[]});return 0
 
 

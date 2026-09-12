@@ -135,6 +135,14 @@ CREATE TABLE IF NOT EXISTS project_preparations(
  proposal_json TEXT,proposal_hash TEXT,state TEXT NOT NULL CHECK(state IN ('PLANNING','AWAITING_APPROVAL','APPROVED','SUPERSEDED','FAILED')),
  failure_reason TEXT,execution_run_id TEXT REFERENCES controller_runs(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL,approved_at TEXT);
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_project_preparation ON project_preparations(project_id) WHERE state IN ('PLANNING','AWAITING_APPROVAL');
+CREATE TABLE IF NOT EXISTS preparation_run_groups(
+ id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS preparation_attempts(
+ id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),run_group_id TEXT NOT NULL REFERENCES preparation_run_groups(id),
+ sequence INTEGER NOT NULL,planning_run_id TEXT REFERENCES controller_runs(id),preparation_id TEXT REFERENCES project_preparations(id),
+ state TEXT NOT NULL CHECK(state IN ('STARTED','COMPLETED','FAILED')),failure_reason TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+ UNIQUE(preparation_id),UNIQUE(run_group_id,sequence));
+CREATE INDEX IF NOT EXISTS preparation_attempts_group ON preparation_attempts(run_group_id,sequence);
 """
 
 
@@ -171,6 +179,10 @@ def connect(home: Path) -> sqlite3.Connection:
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(7,?)", (now(),))
         _migrate_controller_v8(con)
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(8,?)", (now(),))
+        _migrate_preparation_v9(con)
+        con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(9,?)", (now(),))
+        _migrate_preparation_v10(con)
+        con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(10,?)", (now(),))
         return con
     except (OSError, sqlite3.Error) as exc:
         if con is not None:
@@ -326,6 +338,37 @@ def _migrate_controller_v8(con: sqlite3.Connection) -> None:
          failure_reason TEXT,execution_run_id TEXT REFERENCES controller_runs(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL,approved_at TEXT);
         CREATE UNIQUE INDEX IF NOT EXISTS one_open_project_preparation ON project_preparations(project_id) WHERE state IN ('PLANNING','AWAITING_APPROVAL');
     """)
+
+
+def _migrate_preparation_v9(con: sqlite3.Connection) -> None:
+    """Add explicit preparation-attempt lineage without guessing legacy groups."""
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS preparation_run_groups(
+         id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS preparation_attempts(
+         id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),run_group_id TEXT NOT NULL REFERENCES preparation_run_groups(id),
+         sequence INTEGER NOT NULL,planning_run_id TEXT REFERENCES controller_runs(id),preparation_id TEXT REFERENCES project_preparations(id),
+         state TEXT NOT NULL CHECK(state IN ('STARTED','COMPLETED','FAILED')),failure_reason TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+         UNIQUE(preparation_id),UNIQUE(run_group_id,sequence));
+        CREATE INDEX IF NOT EXISTS preparation_attempts_group ON preparation_attempts(run_group_id,sequence);
+    """)
+
+
+def _migrate_preparation_v10(con: sqlite3.Connection) -> None:
+    """Give grouped retries a durable ordering even for early v9 ledgers."""
+    columns = {row[1] for row in con.execute("PRAGMA table_info(preparation_attempts)")}
+    if "sequence" not in columns:
+        con.execute("ALTER TABLE preparation_attempts ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0")
+        groups = [row[0] for row in con.execute("SELECT DISTINCT run_group_id FROM preparation_attempts")]
+        for group_id in groups:
+            rows = con.execute(
+                "SELECT id FROM preparation_attempts WHERE run_group_id=? ORDER BY created_at,id", (group_id,)
+            ).fetchall()
+            for sequence, row in enumerate(rows, start=1):
+                con.execute("UPDATE preparation_attempts SET sequence=? WHERE id=?", (sequence, row["id"]))
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS preparation_attempts_group_sequence ON preparation_attempts(run_group_id,sequence)"
+    )
 
 
 @contextlib.contextmanager

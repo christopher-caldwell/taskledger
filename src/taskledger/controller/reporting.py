@@ -402,20 +402,65 @@ async def controller_report(con, run_id: str, *, include_provider_detail: bool, 
         report["economics"]["total_tokens_per_integrated_task_ratio"] = (totals["input_tokens"] + totals["output_tokens"]) / integrated
     preparation_run_id = manifest.get("preparation_run_id")
     if preparation_run_id:
-        preparation = con.execute(
-            "SELECT COALESCE(SUM(t.input_tokens+t.output_tokens),0),"
-            "SUM(CASE WHEN t.usage_missing=1 OR t.state IN ('DISPATCHING','RUNNING','UNCERTAIN') THEN 1 ELSE 0 END) "
-            "FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=?",
-            (preparation_run_id,),
-        ).fetchone()
-        preparation_tokens = int(preparation[0] or 0)
+        def preparation_usage(planning_run_id):
+            row = con.execute(
+                "SELECT COALESCE(SUM(t.input_tokens+t.output_tokens),0),"
+                "SUM(CASE WHEN t.usage_missing=1 OR t.state IN ('DISPATCHING','RUNNING','UNCERTAIN') THEN 1 ELSE 0 END) "
+                "FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=?",
+                (planning_run_id,),
+            ).fetchone()
+            return int(row[0] or 0), int(row[1] or 0)
+
+        direct_tokens, direct_incomplete = preparation_usage(preparation_run_id)
+        attempt_ids = manifest.get("preparation_attempt_ids")
+        attempt_details = []
+        group_complete = False
+        group_known_tokens = direct_tokens
+        group_id = manifest.get("preparation_run_group_id")
+        if isinstance(attempt_ids, list) and all(isinstance(attempt_id, str) for attempt_id in attempt_ids):
+            placeholders = ",".join("?" for _ in attempt_ids)
+            by_id = {
+                row["id"]: row for row in con.execute(
+                    f"SELECT * FROM preparation_attempts WHERE id IN ({placeholders}) ORDER BY created_at,id", attempt_ids
+                )
+            } if attempt_ids else {}
+            for attempt_id in attempt_ids:
+                attempt = by_id.get(attempt_id)
+                if not attempt:
+                    attempt_details.append({"attempt_id": attempt_id, "accounting_status": "MISSING_ATTEMPT_RECORD", "known_tokens": 0})
+                    continue
+                run_id = attempt["planning_run_id"]
+                if run_id is None:
+                    status = "ZERO_MODEL_FAILURE" if attempt["state"] == "FAILED" else "ZERO_MODEL_ATTEMPT"
+                    attempt_details.append({
+                        "attempt_id": attempt["id"], "state": attempt["state"], "failure_reason": attempt["failure_reason"],
+                        "planning_run_id": None, "preparation_id": attempt["preparation_id"], "known_tokens": 0,
+                        "accounting_status": status, "accounting_complete": True,
+                    })
+                    continue
+                known_tokens, incomplete = preparation_usage(run_id)
+                attempt_details.append({
+                    "attempt_id": attempt["id"], "state": attempt["state"], "failure_reason": attempt["failure_reason"],
+                    "planning_run_id": run_id, "preparation_id": attempt["preparation_id"], "known_tokens": known_tokens,
+                    "accounting_status": "INCOMPLETE" if incomplete else "COMPLETE", "accounting_complete": not incomplete,
+                })
+            group_known_tokens = sum(detail["known_tokens"] for detail in attempt_details)
+            group_complete = bool(attempt_details) and all(detail.get("accounting_complete") for detail in attempt_details)
         report["economics"]["whole_taskledger_run"] = {
             "preparation_run_id": preparation_run_id,
-            "preparation_known_tokens": preparation_tokens,
+            "direct_preparation_known_tokens": direct_tokens,
+            "preparation_known_tokens": direct_tokens,
             "post_approval_execution_known_tokens": totals["admission_tokens"],
-            "known_total_tokens": preparation_tokens + totals["admission_tokens"],
-            "accounting_complete": report["quality"]["accounting_complete"] and int(preparation[1] or 0) == 0,
+            "known_total_tokens": group_known_tokens + totals["admission_tokens"],
+            "accounting_complete": (report["quality"]["accounting_complete"] and group_complete) if attempt_details else False,
             "human_specification_authoring_included": False,
+            "preparation_lineage": {
+                "run_group_id": group_id,
+                "membership": "FROZEN" if attempt_details else "LEGACY_INCOMPLETE",
+                "attempts": attempt_details,
+                "aggregate_preparation_known_tokens": group_known_tokens,
+                "aggregate_accounting_complete": group_complete if attempt_details else None,
+            },
         }
     elif run["mode"] == "PREPARATION":
         linked = con.execute(

@@ -285,6 +285,66 @@ class Service:
         self.reconcile_integrations(project)
         self.check_specs(project, None, preflight=True)
 
+    # ---- initial-planning attempt lineage ----
+    def begin_preparation_attempt(self, project, run_group_id=None):
+        stamp = now()
+        with transaction(self.con):
+            if run_group_id is None:
+                run_group_id = new_id()
+                self.con.execute(
+                    "INSERT INTO preparation_run_groups VALUES(?,?,?)",
+                    (run_group_id, project["id"], stamp),
+                )
+            elif not self.con.execute(
+                "SELECT 1 FROM preparation_run_groups WHERE id=? AND project_id=?",
+                (run_group_id, project["id"]),
+            ).fetchone():
+                raise LedgerError("RUN_GROUP_NOT_FOUND", "Preparation run group was not found for this project.")
+            attempt_id = new_id()
+            sequence = self.con.execute(
+                "SELECT COALESCE(MAX(sequence),0)+1 FROM preparation_attempts WHERE run_group_id=?", (run_group_id,)
+            ).fetchone()[0]
+            self.con.execute(
+                "INSERT INTO preparation_attempts VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (attempt_id, project["id"], run_group_id, sequence, None, None, "STARTED", None, stamp, stamp),
+            )
+        return {"attempt_id": attempt_id, "run_group_id": run_group_id}
+
+    def link_preparation_attempt(self, attempt_id, *, planning_run_id=None, preparation_id=None):
+        assignments, params = [], []
+        if planning_run_id is not None:
+            assignments.append("planning_run_id=?"); params.append(planning_run_id)
+        if preparation_id is not None:
+            assignments.append("preparation_id=?"); params.append(preparation_id)
+        if not assignments:
+            return
+        params.extend((now(), attempt_id))
+        with transaction(self.con):
+            self.con.execute(
+                f"UPDATE preparation_attempts SET {','.join(assignments)},updated_at=? WHERE id=? AND state='STARTED'",
+                params,
+            )
+
+    def finish_preparation_attempt(self, attempt_id, *, succeeded, failure_reason=None):
+        state = "COMPLETED" if succeeded else "FAILED"
+        with transaction(self.con):
+            self.con.execute(
+                "UPDATE preparation_attempts SET state=?,failure_reason=?,updated_at=? WHERE id=? AND state='STARTED'",
+                (state, failure_reason, now(), attempt_id),
+            )
+
+    def preparation_attempts_for_preparation(self, preparation_id):
+        selected = self.con.execute(
+            "SELECT * FROM preparation_attempts WHERE preparation_id=?", (preparation_id,)
+        ).fetchone()
+        if not selected:
+            return None, []
+        rows = self.con.execute(
+            "SELECT * FROM preparation_attempts WHERE run_group_id=? AND sequence<=? ORDER BY sequence",
+            (selected["run_group_id"], selected["sequence"]),
+        ).fetchall()
+        return selected["run_group_id"], [dict(row) for row in rows]
+
     def reconcile_operations(self, project):
         """Resolve only journal outcomes that repository facts prove without interpretation."""
         operations = self.con.execute("SELECT * FROM operations WHERE project_id=? AND state='STARTED' ORDER BY started_at,id", (project["id"],)).fetchall()
@@ -491,8 +551,45 @@ class Service:
         cleaned=[]
         for item in sources:
             require_object(item, {"specification_id", "locator", "excerpt"}, {"specification_id", "locator"})
-            cleaned.append({"specification_id": text(item["specification_id"], "specification_id"), "locator": text(item["locator"], "locator"), "excerpt": item.get("excerpt")})
-        return text(data["statement"], "statement"), text(data["details"], "details"), data["implementation_required"], cleaned
+            excerpt = item.get("excerpt")
+            if excerpt is not None and not isinstance(excerpt, str):
+                raise LedgerError("INVALID_REQUEST", "Source excerpt must be a string or null.")
+            cleaned.append({"specification_id": text(item["specification_id"], "specification_id"), "locator": text(item["locator"], "locator"), "excerpt": excerpt})
+        return text(data["statement"], "statement"), text(data["details"], "details"), data["implementation_required"], self.normalize_requirement_sources(cleaned)
+
+    @staticmethod
+    def normalize_requirement_sources(sources):
+        """Match the persisted source identity while retaining all distinct excerpts."""
+        normalized, by_identity, excerpts = [], {}, []
+        for source in sources:
+            identity = (source["specification_id"], source["locator"])
+            index = by_identity.get(identity)
+            if index is None:
+                by_identity[identity] = len(normalized)
+                normalized.append({**source, "excerpt": None})
+                excerpts.append([])
+                index = len(normalized) - 1
+            if source["excerpt"] is not None and source["excerpt"] not in excerpts[index]:
+                excerpts[index].append(source["excerpt"])
+        for index, values in enumerate(excerpts):
+            normalized[index]["excerpt"] = "\n\n".join(values) if values else None
+        return normalized
+
+    def insert_requirement_sources(self, requirement_id, revision, sources):
+        try:
+            for source in sources:
+                self.con.execute(
+                    "INSERT INTO requirement_source_refs VALUES(?,?,?,?,?)",
+                    (requirement_id, revision, source["specification_id"], source["locator"], source["excerpt"]),
+                )
+        except sqlite3.IntegrityError as exc:
+            if "requirement_source_refs" in str(exc):
+                raise LedgerError(
+                    "SOURCE_REFERENCE_CONFLICT",
+                    "Requirement sources conflict with the persisted source identity.",
+                    details={"phase": "PLAN_MATERIALIZATION"},
+                ) from exc
+            raise
 
     def assignment_dispositions(self, project, data, affected_tasks):
         active = self.con.execute("SELECT a.* FROM assignments a WHERE a.project_id=? AND a.state IN ('PREPARING','ACTIVE') AND a.task_id IN (%s)" % ",".join("?" * max(1,len(affected_tasks))), (project["id"], *(affected_tasks or [""]))).fetchall()
@@ -514,7 +611,7 @@ class Service:
                 if not self.con.execute("SELECT 1 FROM specifications WHERE id=? AND project_id=? AND lifecycle='ACTIVE'", (source["specification_id"], project["id"])).fetchone(): raise LedgerError("SPECIFICATION_NOT_FOUND", "Requirement source specification is not active.")
             self.con.execute("INSERT INTO requirements VALUES(?,?,?,?,?,?,?)", (rid, project["id"], 1, "ACTIVE", stamp, stamp, None))
             self.con.execute("INSERT INTO requirement_revisions VALUES(?,?,?,?,?,?,?)", (rid, 1, statement, details, int(required), principal["id"], stamp))
-            for source in sources: self.con.execute("INSERT INTO requirement_source_refs VALUES(?,?,?,?,?)", (rid,1,source["specification_id"],source["locator"],source["excerpt"]))
+            self.insert_requirement_sources(rid, 1, sources)
             self.con.execute("UPDATE projects SET planning_started_at=COALESCE(planning_started_at,?),updated_at=? WHERE id=?", (stamp,stamp,project["id"]))
             self.invalidate_completion(project["id"], "requirement created")
             self.audit(project["id"], principal["id"], "REQUIREMENT_CREATED", "REQUIREMENT", rid)
@@ -535,7 +632,7 @@ class Service:
                 for source in sources:
                     if not self.con.execute("SELECT 1 FROM specifications WHERE id=? AND project_id=? AND lifecycle='ACTIVE'",(source["specification_id"],project["id"])).fetchone(): raise LedgerError("SPECIFICATION_NOT_FOUND","Requirement source specification is not active.")
                 self.con.execute("INSERT INTO requirement_revisions VALUES(?,?,?,?,?,?,?)",(row["id"],revision,statement,details,int(required),principal["id"],now()))
-                for source in sources:self.con.execute("INSERT INTO requirement_source_refs VALUES(?,?,?,?,?)",(row["id"],revision,source["specification_id"],source["locator"],source["excerpt"]))
+                self.insert_requirement_sources(row["id"], revision, sources)
                 self.con.execute("UPDATE requirements SET current_revision=?,updated_at=? WHERE id=?",(revision,now(),row["id"]))
             self.invalid_requirements([row["id"]],"requirement revised or retired")
             for assignment in self.con.execute("SELECT * FROM assignments WHERE project_id=? AND task_id IN (%s) AND state='ACTIVE'" % ",".join("?"*max(1,len(affected))),(project["id"],*(affected or [""]))):
@@ -559,7 +656,7 @@ class Service:
             self.assignment_dispositions(project,data,affected)
             self.con.execute("INSERT INTO requirements VALUES(?,?,?,?,?,?,?)",(replacement_id,project["id"],1,"ACTIVE",stamp,stamp,None))
             self.con.execute("INSERT INTO requirement_revisions VALUES(?,?,?,?,?,?,?)",(replacement_id,1,statement,details,int(required),principal["id"],stamp))
-            for source in sources:self.con.execute("INSERT INTO requirement_source_refs VALUES(?,?,?,?,?)",(replacement_id,1,source["specification_id"],source["locator"],source["excerpt"]))
+            self.insert_requirement_sources(replacement_id, 1, sources)
             self.con.execute("UPDATE requirements SET lifecycle='RETIRED',retired_at=?,updated_at=? WHERE id=?",(stamp,stamp,old["id"]))
             self.con.execute("INSERT INTO requirement_supersessions VALUES(?,?,?,?,?)",(old["id"],replacement_id,reason,principal["id"],stamp))
             self.invalid_requirements([old["id"]],"requirement superseded")
@@ -662,7 +759,7 @@ class Service:
                 for source in sources:
                     if not self.con.execute("SELECT 1 FROM specifications WHERE id=? AND project_id=? AND lifecycle='ACTIVE'",(source["specification_id"],project["id"])).fetchone():raise LedgerError("SPECIFICATION_NOT_FOUND","Requirement source specification is not active.")
                 self.con.execute("INSERT INTO requirements VALUES(?,?,?,?,?,?,?)",(rid,project["id"],1,"ACTIVE",stamp,stamp,None));self.con.execute("INSERT INTO requirement_revisions VALUES(?,?,?,?,?,?,?)",(rid,1,statement,details,int(required),principal["id"],stamp))
-                for source in sources:self.con.execute("INSERT INTO requirement_source_refs VALUES(?,?,?,?,?)",(rid,1,source["specification_id"],source["locator"],source["excerpt"]))
+                self.insert_requirement_sources(rid, 1, sources)
                 self.audit(project["id"],principal["id"],"REQUIREMENT_CREATED","REQUIREMENT",rid,{"plan_ref":ref})
             for ref,tid in task_ids.items():self.con.execute("INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)",(tid,project["id"],1,"PLANNED",None,stamp,stamp,None,None))
             for ref,definition in task_definitions.items():

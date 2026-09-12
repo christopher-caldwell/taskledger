@@ -42,6 +42,13 @@ Creator, stores an immutable proposal, and stops for hash approval. `project
 start` validates that preparation, materializes it, and invokes the foreground
 project controller.
 
+Preparation synchronizes the registered specification before selecting its active
+revision. The Task Creator receives the selected revision bytes and hash in its
+prompt, and the command rechecks that identity before it stores a proposal.
+Preparation attempts belong to an explicit run group. Execution snapshots the
+attempt IDs that precede its selected preparation so reporting can distinguish
+the direct planning cost from the full retry lineage.
+
 `controller run-project` remains the lower-level post-approval execution path. Its strict
 request contains `execution_policy`, `live: true`, and optional `limits`. The
 policy records task, wave, routine or complex profile, parallel safety, and

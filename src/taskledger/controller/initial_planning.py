@@ -27,8 +27,8 @@ class PreparationConfig:
         }
 
 
-def parse_preparation_request(data: dict[str, Any]) -> tuple[str, PreparationConfig]:
-    require_object(data, {"spec_path", "live", "limits", "preflight"}, {"spec_path", "live"})
+def parse_preparation_request(data: dict[str, Any]) -> tuple[str, PreparationConfig, str | None]:
+    require_object(data, {"spec_path", "live", "limits", "preflight", "run_group_id"}, {"spec_path", "live"})
     if data["live"] is not True:
         raise LedgerError("INVALID_REQUEST", "Live initial planning requires live=true explicit opt in.")
     limits = data.get("limits", {})
@@ -83,9 +83,12 @@ def parse_preparation_request(data: dict[str, Any]) -> tuple[str, PreparationCon
     services = preflight.get("services", [])
     if not isinstance(local_inputs, list) or not isinstance(services, list):
         raise LedgerError("INVALID_REQUEST", "preflight local_inputs and services must be arrays.")
+    run_group_id = data.get("run_group_id")
+    if run_group_id is not None:
+        run_group_id = text(run_group_id, "run_group_id")
     return text(data["spec_path"], "spec_path"), PreparationConfig(
         values["max_initial_planner_turns"], execution_limits, local_inputs, services
-    )
+    ), run_group_id
 
 
 def proposal_schema() -> dict[str, Any]:
@@ -94,13 +97,14 @@ def proposal_schema() -> dict[str, Any]:
         "type": "object",
         "properties": {"locator": {"type": "string", "minLength": 1}, "excerpt": {"type": ["string", "null"]}},
         "required": ["locator", "excerpt"], "additionalProperties": False,
+        "description": "Use each locator once per requirement. If several excerpts support it, combine distinct excerpts with two newlines.",
     }
     requirement = {
         "type": "object",
         "properties": {
             "ref": {"type": "string", "minLength": 1}, "statement": {"type": "string", "minLength": 1},
             "details": {"type": "string", "minLength": 1}, "implementation_required": {"type": "boolean"},
-            "sources": {"type": "array", "minItems": 1, "items": source},
+            "sources": {"type": "array", "minItems": 1, "items": source, "description": "Canonical source citations, one entry per locator."},
         },
         "required": ["ref", "statement", "details", "implementation_required", "sources"], "additionalProperties": False,
     }
@@ -158,6 +162,7 @@ def validate_proposal(value: Any) -> dict[str, Any] | None:
             return None
         if any(not isinstance(source, dict) or set(source) != {"locator", "excerpt"} or not isinstance(source["locator"], str) or not source["locator"] or source["excerpt"] is not None and not isinstance(source["excerpt"], str) for source in item["sources"]):
             return None
+        item["sources"] = normalize_proposal_sources(item["sources"])
         req_refs.add(item["ref"])
     task_refs: set[str] = set()
     for item in value["tasks"]:
@@ -220,10 +225,43 @@ def validate_proposal(value: Any) -> dict[str, Any] | None:
     return value
 
 
+def normalize_proposal_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Store one source per locator while preserving every distinct excerpt."""
+    normalized: list[dict[str, Any]] = []
+    by_locator: dict[str, int] = {}
+    excerpts: list[list[str]] = []
+    for source in sources:
+        locator = source["locator"]
+        index = by_locator.get(locator)
+        if index is None:
+            by_locator[locator] = len(normalized)
+            normalized.append({"locator": locator, "excerpt": None})
+            excerpts.append([])
+            index = len(normalized) - 1
+        excerpt = source["excerpt"]
+        if excerpt is not None and excerpt not in excerpts[index]:
+            excerpts[index].append(excerpt)
+    for index, values in enumerate(excerpts):
+        normalized[index]["excerpt"] = "\n\n".join(values) if values else None
+    return normalized
+
+
+def proposal_sources_are_normalized(value: dict[str, Any]) -> bool:
+    """Recognize the canonical source shape without changing approved JSON."""
+    for requirement in value.get("requirements", []):
+        sources = requirement.get("sources", [])
+        if normalize_proposal_sources(sources) != sources:
+            return False
+    return True
+
+
 class InitialPlanner:
-    def __init__(self, *, service, project, journal: Journal, runtime, run_id: str, preparation_id: str, spec_path: str, config: PreparationConfig):
+    def __init__(self, *, service, project, journal: Journal, runtime, run_id: str, preparation_id: str,
+                 spec_path: str, specification_bytes: bytes, specification_hash: str, config: PreparationConfig):
         self.service, self.project, self.journal, self.runtime = service, project, journal, runtime
-        self.run_id, self.preparation_id, self.spec_path, self.config = run_id, preparation_id, spec_path, config
+        self.run_id, self.preparation_id, self.spec_path, self.specification_bytes, self.specification_hash, self.config = (
+            run_id, preparation_id, spec_path, specification_bytes, specification_hash, config
+        )
 
     async def run(self) -> tuple[dict[str, Any], str]:
         identity = self.runtime.session_identity(
@@ -241,8 +279,15 @@ class InitialPlanner:
             runtime_identity=identity.as_dict(),
         )
         schema = proposal_schema()
+        try:
+            specification = self.specification_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LedgerError("SPECIFICATION_STATE", "Preparation requires a UTF-8 specification revision.") from exc
         prompt = (
-            "Inspect the repository and written specification at " + self.spec_path + ". Produce the complete initial "
+            "Inspect the repository and the immutable specification supplied below. Its path is " + self.spec_path +
+            " and its SHA-256 is " + self.specification_hash + ". This exact content is authoritative; do not reopen "
+            "the path to obtain specification content.\n\n--- immutable specification ---\n" + specification +
+            "\n--- end immutable specification ---\n\nProduce the complete initial "
             "Taskledger proposal. Use temporary refs, deterministic checks, explicit dependencies, routine/complex routing, "
             "waves, parallel safety, and prospective write surfaces. Do not modify files. If product intent is materially "
             "ambiguous, list ambiguities and do not invent a plan. Return only the structured result."
