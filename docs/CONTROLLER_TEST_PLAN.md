@@ -1,9 +1,9 @@
 # Task Ledger Supervisor — Exhaustive Test Plan
 
 **Status:** current acceptance backlog
-**Date:** 2026-09-10
+**Date:** 2026-09-10 (inventory totals reconciled 2026-09-12)
 **Scope:** deterministic Task Ledger assignment supervisor, project controller, and Codex app-server adapter
-**Inventory:** **244 no-Codex cases + 124 live-Codex cases = 368 total cases**
+**Inventory:** **247 no-Codex cases + 124 live-Codex cases = 371 total cases**
 
 This plan is intended to be exhaustive against the current supervisor design and the failure surfaces already identified. It is a living verification document: cases may be split into more granular tests as implementation reveals new boundaries, but a case should not be removed unless its invariant is deliberately retired.
 
@@ -26,9 +26,9 @@ Current inventory by priority:
 
 | Category | P0 | P1 | P2 | Total |
 |---|---:|---:|---:|---:|
-| No Codex | 140 | 83 | 21 | 244 |
+| No Codex | 143 | 83 | 21 | 247 |
 | With Codex | 47 | 62 | 15 | 124 |
-| **Total** | **187** | **145** | **36** | **368** |
+| **Total** | **190** | **145** | **36** | **371** |
 
 ## Architectural invariants under test
 
@@ -737,6 +737,6 @@ case must have exactly one of these statuses:
 
 The checked in coverage snapshot is maintained in
 [`CONTROLLER_TEST_COVERAGE.md`](CONTROLLER_TEST_COVERAGE.md). Its counts must
-sum to all 368 cases. Live cases stay `IMPLEMENTED` or `DEFERRED` until an
+sum to all 371 cases. Live cases stay `IMPLEMENTED` or `DEFERRED` until an
 opt-in run records an actual passing result. The E4 representative benchmark is
 always deferred until the user explicitly authorizes that spend.

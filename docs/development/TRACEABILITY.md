@@ -42,3 +42,14 @@ The acceptance suite exercises the end-to-end flows; unit-level coverage is orga
 | Routine escalation | `test_second_routine_rejection_requires_a_complex_assignment` |
 | Atomic plan batch | `test_plan_apply_batches_new_requirements_tasks_and_local_dependencies` |
 | Requirement replacement | `test_requirement_supersession_preserves_completed_historical_tasks` |
+
+## Controller and console evidence
+
+The original product mapping above is complemented by the
+[controller case plan](../CONTROLLER_TEST_PLAN.md), its
+[coverage ledger](../CONTROLLER_TEST_COVERAGE.md), the
+[headless M01–M24 mapping](../taskledger-ui-architecture/HEADLESS_ACCEPTANCE.md),
+and [console implementation status](../taskledger-ui-architecture/IMPLEMENTATION_STATUS.md).
+Outstanding conformance and UI acceptance work is tracked in the
+[testing backlog](../TESTING_BACKLOG.md). These references preserve distinct
+case inventories rather than treating test method totals as requirement coverage.

@@ -19,7 +19,7 @@ or real durable-recovery value.
 
 > **Status:** Taskledger 0.6.0 is experimental. The CLI happy path is tested,
 > but the full failure-injection and conformance suite is not complete. See
-> [Publishing preflight](PUBLISHING_CHECKLIST.md) before relying on it for
+> [Publishing preflight](docs/development/PUBLISHING_CHECKLIST.md) before relying on it for
 > critical work.
 
 ## What it does
@@ -395,15 +395,17 @@ path.
 
 Documentation and design references:
 
+Start with the [documentation index](docs/README.md) for current guidance and historical records.
+
 - [Complete run guide](docs/RUN_GUIDE.md)
 - [Installation architecture for AI orchestrated tools](docs/AI_ORCHESTRATED_TOOL_INSTALLATION.md)
-- [Product specification](taskledger-product-spec.md)
-- [Technical specification](taskledger-technical-spec.md)
-- [Command registry](COMMAND_REGISTRY.md)
-- [Requirement traceability](TRACEABILITY.md)
-- [Implementation handoff/checklist](taskledger-implementation-handoff.md)
+- [Product specification](docs/specifications/taskledger-product-spec.md)
+- [Technical specification](docs/specifications/taskledger-technical-spec.md)
+- [Command registry](docs/reference/COMMAND_REGISTRY.md)
+- [Requirement traceability](docs/development/TRACEABILITY.md)
+- [Historical implementation and investigation records](docs/archive/README.md)
 - [Token-efficiency benchmarks](benchmarks/token-efficiency/README.md)
-- [Publishing preflight](PUBLISHING_CHECKLIST.md)
+- [Publishing preflight](docs/development/PUBLISHING_CHECKLIST.md)
 
 ## Limitations
 

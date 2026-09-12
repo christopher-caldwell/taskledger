@@ -45,9 +45,11 @@ The experiment environment was Linux, Python 3.13.5, and SQLite 3.46.1. Exact en
 The synthetic experiment record above remains unchanged historical design
 evidence. The implemented headless layer and Task Ledger regression suite have
 now been exercised on macOS; current commands and results are recorded in
-[HEADLESS_ACCEPTANCE.md](HEADLESS_ACCEPTANCE.md). Textual Checkpoint A is in
-progress and has focused Pilot coverage under the pinned Textual 8.2.8 release;
-the complete T01–T24 matrix has not yet been run.
+[HEADLESS_ACCEPTANCE.md](HEADLESS_ACCEPTANCE.md). The Textual adapter implements the normal operator workflow and has focused
+Pilot coverage under the pinned Textual 8.2.8 release. See
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for recorded regression
+runs and limitations. Full T01–T24 acceptance remains unestablished; a focused
+test count alone does not prove every specification case.
 
 The specifications separately identify **24 headless acceptance cases and 24 Textual acceptance cases** that implementation must satisfy. Performance figures in them are proposed test targets, not measured product claims.
 
@@ -74,5 +76,5 @@ Implement and verify Part 1 without Textual first. Build Part 2 against fixture/
 Before implementing, inspect the actual repository worktree and reconcile changes since the pinned source. Preserve existing work. The specifications are proposed additions and targeted extraction work, not permission to reset the repository or redesign the scheduler.
 
 Part 1 is implemented and its current acceptance evidence is recorded above.
-The visual-console feature as a whole still requires the Part 2 Textual
-acceptance suite.
+The Textual adapter is implemented; full Part 2 acceptance still requires an
+explicit T01–T24 evidence mapping and any missing acceptance checks.

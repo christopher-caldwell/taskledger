@@ -1,5 +1,7 @@
 # Benchmark readiness blocker investigation
 
+> Historical record, archived 2026-09-12. Paths, commands, and status statements below describe the original work and may no longer apply. Use the [current documentation index](../../README.md) for operating guidance.
+
 ## Objective
 
 Investigate the remaining benchmark readiness blocker on branch

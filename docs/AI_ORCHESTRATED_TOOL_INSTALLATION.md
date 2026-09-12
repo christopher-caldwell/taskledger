@@ -23,10 +23,16 @@ The CLI is the authority. The skill and profiles are model guidance. The plugin
 is a distribution wrapper. Project state is private runtime data and is never
 part of the plugin archive.
 
-## Current installation on this machine
+For ordinary installation, updates, and removal, follow the
+[run guide](RUN_GUIDE.md). This document explains distribution contracts and
+advanced installation details.
 
-The 0.6.0 development installation created from this checkout has these exact
-locations:
+## Historical installation snapshot
+
+The following 0.6.0 development installation was recorded with the September 10,
+2026 plugin cache shown below. These paths describe one machine and were not
+revalidated during the September 12 documentation cleanup. Determine your active
+installation using the checks below; do not copy these paths as defaults:
 
 ```text
 source checkout:

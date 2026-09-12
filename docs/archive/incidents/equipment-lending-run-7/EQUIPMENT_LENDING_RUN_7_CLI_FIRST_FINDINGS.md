@@ -1,5 +1,9 @@
 # Equipment Lending run 7: CLI-first lifecycle findings through reporting
 
+> Historical record, archived 2026-09-12. Paths, commands, and status statements below describe the original work and may no longer apply. Use the [current documentation index](../../../README.md) for operating guidance.
+
+The associated [bug report](BUG_PREPARATION_STALE_SPECIFICATION_REVISION.md#resolution-recorded-2026-09-12) records subsequent source corrections. This run snapshot remains historical.
+
 ## Purpose and scope
 
 This report records every material setup, preparation, approval, materialization,

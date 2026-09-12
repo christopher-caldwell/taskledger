@@ -1,5 +1,7 @@
 # Taskledger implementation handoff
 
+> Historical record, archived 2026-09-12. Paths, commands, and status statements below describe the original work and may no longer apply. Use the [current documentation index](../../README.md) for operating guidance.
+
 **Status:** Ready for implementation. The simple-v1 decisions in this document have been folded into `taskledger-technical-spec.md`.
 
 **Authority order:**

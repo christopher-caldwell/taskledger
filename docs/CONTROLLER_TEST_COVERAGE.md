@@ -2,8 +2,9 @@
 
 This file records the implementation and execution status of every case in
 `CONTROLLER_TEST_PLAN.md`. It is a coverage ledger, not a substitute for the
-tests. Status reflects the current checkout and the latest test run recorded in
-the final section.
+tests. Status reflects the test runs recorded in the final section. It is retained
+evidence, not an automatic assertion that every later checkout passes. The
+371 inventory cases are distinct from unittest method counts.
 
 ## Status summary
 

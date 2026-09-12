@@ -19,8 +19,10 @@ broker-originated question, blocker, and submit updates; reviewer and
 integration pause boundaries; fatal primary-client cleanup of an owned active
 lifecycle; and one successful public-contract-only prepare-to-completion run.
 
-Current non-live regression evidence: 195 tests passed (11 skipped); the
-focused application/controller regression passed 128 tests (1 skipped).
+Earlier headless implementation evidence, retained from before the Textual
+workflow pass: 195 tests passed (11 skipped); the focused application/controller
+regression passed 128 tests (1 skipped). The original record does not identify
+an execution timestamp. These are historical run totals.
 
 The Textual adapter implements the functional TL-UI-1 operator console and is
 pinned to Textual 8.2.8. It uses external TCSS, one feed observer, immutable
@@ -44,9 +46,14 @@ retained. Detail requests are identity/generation guarded, forms survive
 unrelated snapshots, untrusted values use literal-safe rendering, and history
 preserves Audit/Controller source identity.
 
-Current UI evidence with Textual 8.2.8: 18 focused UI tests pass, including the
+Later Textual workflow evidence recorded in the repository by 2026-09-12
+with Textual 8.2.8: 18 focused UI tests pass, including the
 specified 140x40, 100x30, 80x24, 70x22, and 55x18 geometries. The complete
 non-live regression passes 211 tests (9 skipped).
+
+These recorded runs have not been repeated as part of documentation cleanup.
+Full T01–T24 acceptance is not established by these aggregate totals; keep the
+remaining case mapping and checks in the [testing backlog](../TESTING_BACKLOG.md).
 
 ## Known limitations / future polish
 

@@ -1,10 +1,27 @@
 # Bug: preparation binds a stale specification revision across preflight
 
+> Historical record, archived 2026-09-12. Paths, commands, and status statements below describe the original work and may no longer apply. Use the [current documentation index](../../../README.md) for operating guidance.
+
 For the complete run-7 lifecycle findings from setup through the first live
 controller report, see
 [`EQUIPMENT_LENDING_RUN_7_CLI_FIRST_FINDINGS.md`](EQUIPMENT_LENDING_RUN_7_CLI_FIRST_FINDINGS.md).
 
-## Status
+## Resolution recorded 2026-09-12
+
+Commit `d386e02` (`fix: Stale docs (#2)`) added the specification identity and
+source normalization corrections, with regression coverage in
+[`tests/test_initial_planning.py`](../../../../tests/test_initial_planning.py):
+
+- `test_prepare_rebinds_changed_specification_and_prompt_uses_selected_bytes`
+- `test_start_rejects_a_changed_specification_before_git_drift`
+- `test_mutation_during_planning_never_stores_a_proposal`
+- `test_source_normalization_is_deterministic_for_proposals_and_requirements`
+
+The original observations below are preserved as incident evidence. They do
+not establish that these defects remain present in the current checkout, or
+that the external benchmark subsequently completed.
+
+## Original status
 
 - Observed: 2026-09-11/12 UTC during Equipment Lending benchmark run 7
 - Taskledger version: `0.6.0`

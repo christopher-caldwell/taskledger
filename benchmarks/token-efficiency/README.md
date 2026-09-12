@@ -3,7 +3,11 @@
 These checkpoints compare Taskledger workflow usage without pretending that
 different models consume tokens or credits equivalently.
 
-## Current phase marker
+## Historical cohort markers (v0.3.0 and v0.4.0)
+
+This directory preserves earlier experiments. Version labels and run status
+refer to their recorded snapshots, not the current Taskledger release. Raw
+checkpoints, reconstructions, and comparisons remain together for provenance.
 
 `new-planning-v0.3.0-checkpoint.json` records `2026-08-22T19:28:55Z` as the
 start of the first brand-new v0.3.0 planning sample. The earlier v0.3.0 sample
@@ -31,9 +35,11 @@ for a future Luna/medium implementation plus Terra/high review experiment. It
 freezes Sol/high findings before exposing Taskledger review history and reports
 evaluation cost separately from operational cost.
 
-`financial-tracker-ui-terra-xhigh-interim-audit.md` records an in-progress
+`financial-tracker-ui-terra-xhigh-interim-audit.md` records an interim
 orchestrator-quality audit. Its associated usage and task-complexity JSON files
-are interim artifacts and must be regenerated after the active thread ends.
+remain interim evidence. This cleanup did not verify the external task outcome.
+Any final measurement should be added as a separate dated artifact, preserving
+the original snapshots.
 
 `comparison-financial-tracker-v0.4.0-thread-01a030bc.md` records the first
 v0.4.0 two-profile Financial Tracker run. It separates three Taskledger plan

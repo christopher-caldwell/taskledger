@@ -1,5 +1,7 @@
 # Taskledger implementation checklist
 
+> Historical record, archived 2026-09-12. Paths, commands, and status statements below describe the original work and may no longer apply. Use the [current documentation index](../../README.md) for operating guidance.
+
 - [x] Slice 0: frozen local contracts, state model, and traceability record.
 - [x] Slice 1: deterministic CLI, configuration, credentials, and JSON envelopes.
 - [x] Slice 2: SQLite schema, project initialization, and Git discovery.

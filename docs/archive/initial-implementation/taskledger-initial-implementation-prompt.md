@@ -1,3 +1,5 @@
+> Historical record, archived 2026-09-12. Paths, commands, and status statements below describe the original work and may no longer apply. Use the [current documentation index](../../README.md) for operating guidance.
+
 You are implementing Taskledger v1 in this repository. Work directly in the repository and deliver the complete working tool, not a design proposal or partial scaffold.
 
 Read these files completely before writing code:

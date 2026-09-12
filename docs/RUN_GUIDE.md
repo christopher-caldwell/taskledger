@@ -543,7 +543,7 @@ that no active work needs it and that any required backup is usable.
 ## Further reference
 
 - [Command and request-body reference](../skills/taskledger/references/commands.md)
-- [Product specification](../taskledger-product-spec.md)
-- [Technical specification](../taskledger-technical-spec.md)
-- [Requirement traceability](../TRACEABILITY.md)
-- [Publishing preflight](../PUBLISHING_CHECKLIST.md)
+- [Product specification](specifications/taskledger-product-spec.md)
+- [Technical specification](specifications/taskledger-technical-spec.md)
+- [Requirement traceability](development/TRACEABILITY.md)
+- [Publishing preflight](development/PUBLISHING_CHECKLIST.md)
