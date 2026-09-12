@@ -1,5 +1,8 @@
 # Task Ledger visual console: architecture package
 
+Current implementation coverage and remaining required work are recorded in
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+
 This package specifies **two implementation parts**, not two services:
 
 | Document | Responsibility |
