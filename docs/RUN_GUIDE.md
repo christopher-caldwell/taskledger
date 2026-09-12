@@ -153,6 +153,9 @@ It checks versions, repository state, profile configuration, declared file
 metadata, and explicitly named TCP services without reading input contents.
 A profile TOML proves configuration only; the host must separately report
 whether it can launch the exact named profile with its configured model/effort.
+On macOS, declare the actual service host and port consumed by the check (for
+example, a Compose-published PostgreSQL port), rather than assuming a Linux
+Docker socket path is a required input.
 
 ### 2. Prepare and start through the CLI
 
@@ -177,6 +180,41 @@ profiles, configuration, proposal hash, and preflight before transactionally
 materializing the plan and starting the foreground controller. It creates eligible
 assignments, continues unfinished worker turns, dispatches bounded independent
 reviewers, and invokes Taskledger verification and integration.
+
+Preparation selects one registered specification revision after synchronization
+and sends those stored bytes, with their hash, to the Task Creator. A filesystem
+change during planning or before approval is rejected instead of silently
+rebinding the proposal. Sources are likewise canonicalized before approval: one
+requirement may cite one specification locator once, with distinct excerpts
+preserved in a single entry separated by blank lines. An older approved proposal
+that is not already in that canonical form must be prepared again.
+
+Each preparation response includes a `run_group_id`. Reuse it only when retrying
+the same trial. Execution reports keep the selected preparation as a direct
+subtotal and freeze the group attempts that led to it, so a later retry cannot
+change historical cost. A preflight failure that did not call a model is shown as
+a zero-model attempt; missing or unresolved model usage remains incomplete.
+
+Unexpected CLI failures include a correlation ID and phase. With `--verbose`,
+the CLI also prints the owner-only diagnostic path under `.taskledger/diagnostics/`.
+Those records contain exception class and stack-frame metadata, not request
+bodies, local variables, or credentials.
+
+### Detached foreground launch
+
+The controller intentionally remains a foreground process. To keep it running
+after terminal detachment without retrying a terminal failure, start exactly one
+process in tmux:
+
+```sh
+tmux new-session -d -s taskledger-run 'exec taskledger project start --input approved-preparation.json'
+tmux list-panes -t taskledger-run -F '#{pane_pid}'
+```
+
+The listed pane PID is the controller because `exec` replaces the shell. Attach
+with `tmux attach -t taskledger-run`. Request a durable safe pause with
+`kill -INT <pane-pid>`; do not wrap the command in a restart loop. The controller
+records the pause and can later resume through its normal CLI path.
 
 ### 3. Resume an existing project
 
