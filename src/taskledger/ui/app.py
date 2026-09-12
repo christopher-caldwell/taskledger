@@ -134,7 +134,12 @@ class TaskledgerApp(App):
         if self._slices.get("overview") != overview_slice:
             self.query_one(OverviewView).show_snapshot(snapshot)
             self._slices["overview"] = overview_slice
-        if self._slices.get("tasks") != snapshot.tasks:
+        task_slice = (
+            snapshot.tasks,
+            snapshot.project.get("task_count"),
+            snapshot.project.get("tasks_truncated"),
+        )
+        if self._slices.get("tasks") != task_slice:
             table = self.query_one(TasksTable)
             selected = self.selected_task_id or table.selected_key()
             table.show_tasks(snapshot.tasks, selected)
@@ -146,7 +151,7 @@ class TaskledgerApp(App):
             shown, total = len(snapshot.tasks), snapshot.project.get("task_count", len(snapshot.tasks))
             note = f"Showing {shown:,} of {int(total):,} tasks" if snapshot.project.get("tasks_truncated") else ""
             self.query_one("#tasks-note", Static).update(note)
-            self._slices["tasks"] = snapshot.tasks
+            self._slices["tasks"] = task_slice
         run_id = snapshot.run.get("id") if snapshot.run else None
         session_slice = (snapshot.sessions, run_id)
         if self._slices.get("sessions") != session_slice:
@@ -210,7 +215,9 @@ class TaskledgerApp(App):
 
     async def action_refresh(self) -> None:
         try:
-            await self.client.refresh_snapshot()
+            snapshot = await self.client.refresh_snapshot()
+            if snapshot is not None:
+                self._accept_snapshot(snapshot)
         except Exception as exc:
             self.observation_error = safe_text(exc)
             self._update_banner()

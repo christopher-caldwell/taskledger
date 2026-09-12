@@ -158,7 +158,9 @@ class AgentsTable(KeyedTable):
                 integer(item.get("turn_count", 0)), optional(item.get("profile")), optional(item.get("model")),
                 optional(item.get("effort")), short_id(item.get("subject_id")),
             )))
-        self.replace_rows(rows)
+        self.clear()
+        for key, cells in rows:
+            self.add_row(*cells, key=key)
 
 
 class ActivityTable(KeyedTable):
@@ -181,7 +183,9 @@ class ActivityTable(KeyedTable):
                 optional(item.get("created_at")), optional(item.get("source")), optional(item.get("event_type")),
                 optional(item.get("entity_type")), short_id(item.get("entity_id")),
             )))
-        self.replace_rows(rows)
+        self.clear()
+        for key, cells in rows:
+            self.add_row(*cells, key=key)
 
 
 class InterventionsTable(KeyedTable):
@@ -206,15 +210,25 @@ class UsageView(Static):
     def show_usage(self, usage: Record, sessions: tuple[Record, ...]) -> None:
         known = known_tokens(usage)
         accounting = usage.get("accounting_quality", usage.get("accounting_status", "UNKNOWN"))
+        input_tokens = usage.get("input_tokens")
+        cached_input_tokens = usage.get("cached_input_tokens")
+        non_cached_input_tokens = None
+        if (
+            isinstance(input_tokens, (int, float))
+            and not isinstance(input_tokens, bool)
+            and isinstance(cached_input_tokens, (int, float))
+            and not isinstance(cached_input_tokens, bool)
+        ):
+            non_cached_input_tokens = input_tokens - cached_input_tokens
         fields = (
             ("Known tokens", integer(known)), ("Accounting status", optional(accounting)),
             ("Terminal turns", integer(usage.get("terminal_turns"))),
             ("Completed turns", integer(usage.get("completed_turns"))),
             ("Missing-usage turns", integer(usage.get("missing_usage_turns"))),
-            ("Unresolved turns", integer(usage.get("unresolved_turns"))),
-            ("Input", integer(usage.get("input_tokens"))),
-            ("Cached input", integer(usage.get("cached_input_tokens"))),
-            ("Non-cached input", integer(usage.get("non_cached_input_tokens"))),
+            ("Unresolved turns", integer(usage.get("unresolved_turn_count"))),
+            ("Input", integer(input_tokens)),
+            ("Cached input", integer(cached_input_tokens)),
+            ("Non-cached input", integer(non_cached_input_tokens)),
             ("Output", integer(usage.get("output_tokens"))),
             ("Reasoning", integer(usage.get("reasoning_tokens"))),
         )
