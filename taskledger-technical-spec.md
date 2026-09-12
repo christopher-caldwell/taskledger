@@ -400,6 +400,13 @@ FOREIGN KEY(requirement_id, requirement_revision)
 
 `locator` is an orchestrator-provided section name, line range, heading path, or other stable human-readable pointer. Taskledger does not interpret it.
 
+A requirement revision has at most one canonical source reference for each
+`(specification_id, locator)` identity. Before persistence, Taskledger groups
+submitted sources by that identity. It preserves distinct non-null excerpts in
+first-seen order and joins them into the single reference with one blank line
+between excerpts; repeated excerpts are not repeated. If a group has no
+non-null excerpts, its canonical `excerpt` remains `null`.
+
 ### 7.10a `requirement_supersessions`
 
 ```text
@@ -1504,7 +1511,15 @@ The current plan fingerprint is SHA-256 over canonical JSON containing:
 
 Execution state such as assignment, submission, or completion is not included. A task reopening creates a new revision and therefore changes the fingerprint.
 
-The byte contract is fixed: entity arrays are ordered by full UUID; source references by `(specification_id, locator, excerpt-or-empty)`; acceptance criteria by numeric `position`; and requirement links and dependencies by full UUID. The object is encoded as UTF-8 JSON with sorted object keys, compact separators, and non-ASCII text emitted directly (`ensure_ascii=False`). SHA-256 is calculated over those exact bytes. Criteria are never alphabetized by their prose. Golden fixtures must lock this behavior.
+The byte contract is fixed: entity arrays are ordered by full UUID; canonical
+source references by `(specification_id, locator)` after source normalization;
+acceptance criteria by numeric `position`; and requirement links and dependencies
+by full UUID. The fingerprint therefore includes the resulting single,
+canonicalized excerpt value for each source identity. The object is encoded as
+UTF-8 JSON with sorted object keys, compact separators, and non-ASCII text
+emitted directly (`ensure_ascii=False`). SHA-256 is calculated over those exact
+bytes. Criteria are never alphabetized by their prose. Golden fixtures must
+lock this behavior.
 
 ### 12.2 Validation algorithm
 
