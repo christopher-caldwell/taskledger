@@ -135,6 +135,48 @@ class Supervisor:
                 problems.append(turn.id)
         return problems
 
+    async def reconcile_terminal_usage(self) -> list[str]:
+        """Repair only terminal allocations with a unique local and provider boundary."""
+        unresolved: list[str] = []
+        for candidate in self.journal.terminal_missing_usage_candidates(run_id=self.run_id):
+            role = SessionRole(candidate["role"])
+            try:
+                if role == SessionRole.WORKER:
+                    cwd = self.ledger.worker_cwd(candidate["subject_id"])
+                    writable = True
+                elif role == SessionRole.REVIEWER:
+                    cwd = (
+                        self.ledger.checkpoint_reviewer_cwd(candidate["subject_id"])
+                        if candidate["prompt_kind"] == "checkpoint-reviewer"
+                        else self.ledger.reviewer_cwd(candidate["subject_id"])
+                    )
+                    writable = False
+                else:
+                    cwd = self.ledger.project["repository_root"]
+                    writable = False
+                identity = self.runtime.session_identity(
+                    role=role, profile=candidate["profile"], subject_id=candidate["subject_id"],
+                    cwd=cwd, writable=writable,
+                ).as_dict()
+                if identity != candidate["runtime_identity"]:
+                    unresolved.append(candidate["local_turn_id"])
+                    continue
+                result = await self.runtime.recover_terminal_usage(
+                    handle=RuntimeTurnHandle(candidate["thread_id"], candidate["turn_id"]),
+                    previous_turn_id=candidate["previous_turn_id"],
+                    cumulative_before=candidate["cumulative_before"],
+                    target_is_first=candidate["target_is_first"], role=role,
+                    profile=candidate["profile"], subject_id=candidate["subject_id"],
+                    cwd=cwd, writable=writable,
+                )
+                if result is None:
+                    unresolved.append(candidate["local_turn_id"])
+                    continue
+                self.journal.reconcile_usage(candidate["local_turn_id"], result)
+            except Exception:
+                unresolved.append(candidate["local_turn_id"])
+        return unresolved
+
     def reconcile_resolved_reviewer_sessions(self) -> None:
         for session in self.journal.active_sessions(project_id=self.project_id, role=SessionRole.REVIEWER.value):
             turn = self.journal.terminal_unconsumed_turn(session.id)
@@ -164,6 +206,7 @@ class Supervisor:
                     recovery = await self.reconcile_open_turns()
                     if recovery:
                         return self._pause(assignment_id, PauseReason.RUNTIME_UNCERTAIN, f"unresolved external turns: {', '.join(recovery)}")
+                    await self.reconcile_terminal_usage()
                     self.reconcile_resolved_reviewer_sessions()
 
                 while True:
@@ -334,6 +377,9 @@ class Supervisor:
             packet = self.ledger.worker_prompt_packet(
                 assignment_id, first_turn=first_turn,
                 previous_hashes=self.journal.latest_context_hashes(worker.id),
+                include_policy_update=(
+                    not first_turn and self.journal.worker_prompt_policy_version(worker.id) < 2
+                ),
             )
         else:
             text = self.ledger.worker_prompt(assignment_id, first_turn=first_turn)

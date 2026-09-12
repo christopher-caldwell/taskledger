@@ -114,7 +114,8 @@ class TaskledgerLedgerAdapter:
         return self.worker_prompt_packet(assignment_id, first_turn=first_turn).text
 
     def worker_prompt_packet(
-        self, assignment_id: str, *, first_turn: bool, previous_hashes: dict[str, str] | None = None
+        self, assignment_id: str, *, first_turn: bool, previous_hashes: dict[str, str] | None = None,
+        include_policy_update: bool = False,
     ) -> PromptPacket:
         assignment = self._assignment(assignment_id)
         context = json.loads(assignment["context_json"] or self.service.context(assignment))
@@ -148,10 +149,16 @@ class TaskledgerLedgerAdapter:
                 changed["questions"] = changed_questions
         instruction = (
             "Load this persisted Taskledger assignment context. Continue all authorized work until you submit, create a blocking question or blocker, or the task becomes invalid. "
-            "A normal turn ending is not completion. Use only assignment scoped worker operations. Do not load Codex skill files or invoke the Taskledger CLI; the current context is already included below."
+            "A normal turn ending is not completion. Do not load the Taskledger orchestration skill or invoke the Taskledger CLI; Taskledger context and assignment-scoped operations are already supplied. "
+            "Implementation skills explicitly required by the durable assignment/specification may be loaded and used."
             if first_turn
-            else "Continue the same Task Ledger assignment. The assignment remains ACTIVE. Continue until submission or a durable blocker. Do not reload Codex skill files."
+            else "Continue the same Task Ledger assignment. The assignment remains ACTIVE. Continue until submission or a durable blocker."
         )
+        if include_policy_update:
+            instruction += (
+                " Worker instruction policy update: the earlier blanket prohibition on loading Codex skills is superseded. "
+                "Do not load the Taskledger orchestration skill or invoke its CLI. Implementation skills explicitly required by the durable assignment/specification may be loaded and used."
+            )
         broker = ""
         if self.worker_socket:
             broker = (
@@ -183,6 +190,7 @@ class TaskledgerLedgerAdapter:
         return PromptPacket(
             text=prompt,
             dispatch_reason=reason,
+            prompt_builder_version="controller-prompt-v3",
             controller_payload_bytes=len(prompt.encode("utf-8")),
             static_assignment_bytes=len(static_payload.encode("utf-8")),
             dynamic_state_bytes=len(dynamic_payload.encode("utf-8")),

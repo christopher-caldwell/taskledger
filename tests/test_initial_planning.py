@@ -11,7 +11,7 @@ from io import StringIO
 from unittest.mock import patch
 
 from taskledger.controller.fakes import FakeLedger, FakeRuntime, TurnScript, accepted_verdict
-from taskledger.controller.model import RuntimeTurnHandle, RuntimeTurnResult, Usage, UsagePrecision
+from taskledger.controller.model import DispatchReason, PromptPacket, RuntimeTurnHandle, RuntimeTurnResult, SessionRole, Usage, UsagePrecision
 from taskledger.controller.initial_planning import (
     InitialPlanner,
     PreparationConfig,
@@ -23,6 +23,7 @@ from taskledger.controller.initial_planning import (
 from taskledger.controller.journal import Journal
 from taskledger.controller.reporting import controller_report
 from taskledger.db import connect
+from taskledger.core import canonical, sha256
 from taskledger.service import Service
 from taskledger.cli import prepare_project_command, run_project_controller, start_prepared_project
 from taskledger.controller.project import ProjectControllerResult
@@ -543,6 +544,148 @@ class InitialPlanningTests(unittest.TestCase):
             release_integration.set()
             asyncio.run(host.close())
         self.assertTrue(all(runtime.closed for runtime in (planning, execution, resumed)))
+
+    def test_engine_host_recovers_terminal_usage_then_delivers_answer_and_policy_update(self):
+        from pathlib import Path
+        import subprocess
+
+        from taskledger.application.host import EngineHost
+        from taskledger.controller.fakes import accepted_verdict
+        from taskledger.controller.supervisor import SupervisorConfig
+
+        _, requirement = self.fixture.command("requirement", "create", {
+            "statement": "recover accounting", "details": "recovery is observable",
+            "implementation_required": True,
+            "sources": [{"specification_id": self.spec_id, "locator": "1"}],
+        }, project=self.project_id)
+        _, task = self.fixture.command("task", "create", {
+            "objective": "recover accounting", "implementation_scope": "README",
+            "acceptance_criteria": ["recovery is implemented"], "required_checks": [],
+            "requirement_ids": [requirement["data"]["requirement_id"]],
+            "dependency_task_ids": [],
+        }, project=self.project_id)
+        task_id = task["data"]["task_id"]
+        self.fixture.command("plan", "validate", {}, project=self.project_id)
+        _, created = self.fixture.command(
+            "assignment", "create", {"task_id": task_id, "worker_profile": "routine"},
+            project=self.project_id,
+        )
+        assignment_id = created["data"]["assignment_id"]
+        worktree = Path(created["data"]["worktree_path"])
+        worker_token = self.fixture.assignment_token(created)
+        worker = self.service.authenticate(self.project_id, worker_token, "WORKER")
+        question = self.service.worker_question(worker, {"body": "Which implementation?", "blocking": True})
+
+        config = SupervisorConfig(max_total_tokens=1000)
+        run_id = self.journal.create_run(
+            self.project_id, mode="ASSIGNMENT",
+            config={"assignment_id": assignment_id, "limits": config.__dict__},
+        )
+        seed_runtime = FakeRuntime(worker_turns=[], reviewer_turns=[])
+        identity = seed_runtime.session_identity(
+            role=SessionRole.WORKER, profile="routine", subject_id=assignment_id,
+            cwd=str(worktree), writable=True,
+        ).as_dict()
+        session = self.journal.create_session(
+            run_id=run_id, project_id=self.project_id, role="WORKER", profile="routine",
+            subject_id=assignment_id, external_thread_id="retained-thread",
+            config_hash=sha256(canonical(identity)), runtime_identity=identity,
+        )
+        baseline = Usage(30, 5, 8, 2, 1)
+        prior = self.journal.begin_turn(
+            session.id, "worker", packet=PromptPacket("legacy", DispatchReason.INITIAL_WORK)
+        )
+        prior_handle = RuntimeTurnHandle(session.thread_id, "provider-prior")
+        self.journal.acknowledge_turn(prior, prior_handle)
+        self.journal.complete_turn(prior, RuntimeTurnResult(
+            prior_handle, usage=baseline, usage_precision=UsagePrecision.THREAD_TOTAL_DELTA,
+            cumulative_before=Usage(), cumulative_after=baseline,
+        ))
+        self.journal.consume_turn(prior)
+        missing = self.journal.begin_turn(
+            session.id, "worker", packet=PromptPacket("legacy continuation", DispatchReason.ACTIVE_CONTINUATION)
+        )
+        missing_handle = RuntimeTurnHandle(session.thread_id, "provider-missing")
+        self.journal.acknowledge_turn(missing, missing_handle)
+        self.journal.complete_turn(missing, RuntimeTurnResult(
+            missing_handle, usage_missing=True, usage_precision=UsagePrecision.MISSING,
+        ))
+        self.journal.finish_run(run_id, "PAUSED", reason="BUDGET_EXHAUSTED")
+
+        recovery_runtime = FakeRuntime(worker_turns=[], reviewer_turns=[])
+        recovery_runtime.roles[session.thread_id] = SessionRole.WORKER
+        recovery_runtime.provider_histories[session.thread_id] = {
+            "turns": [{"id": "provider-missing"}, {"id": "provider-prior"}],
+            "cumulative_usage": baseline + Usage(4, 1, 3),
+        }
+
+        def implement_and_submit():
+            (worktree / "README").write_text("recovered\n")
+            subprocess.run(["git", "-C", str(worktree), "add", "README"], check=True, capture_output=True)
+            subprocess.run([
+                "git", "-C", str(worktree), "-c", "user.name=Controller Test",
+                "-c", "user.email=controller@example.invalid", "commit", "-qm", "recover",
+            ], check=True, capture_output=True)
+            local_service = Service(connect(self.fixture.home), self.fixture.home)
+            try:
+                local_worker = local_service.authenticate(self.project_id, worker_token, "WORKER")
+                local_service.worker_submit(local_worker, {
+                    "summary": "implemented", "evidence": [{"label": "fixture", "details": "implemented"}],
+                    "risks": [], "unresolved_questions": [], "follow_up_work": [],
+                })
+            finally:
+                local_service.con.close()
+
+        criterion = self.service.con.execute(
+            "SELECT id FROM task_acceptance_criteria WHERE task_id=?", (task_id,)
+        ).fetchone()[0]
+        continuation_runtime = FakeRuntime(
+            worker_turns=[TurnScript(effect=implement_and_submit)],
+            reviewer_turns=[TurnScript(structured_output=accepted_verdict((criterion,)))],
+        )
+        continuation_runtime.roles[session.thread_id] = SessionRole.WORKER
+        runtimes = iter((recovery_runtime, continuation_runtime))
+        host = EngineHost(
+            str(self.fixture.root), project_id=self.project_id,
+            runtime_factory=lambda **_: next(runtimes),
+        )
+
+        async def wait_terminal(operation_id):
+            for _ in range(300):
+                status = await host.operation_status(operation_id)
+                if status.phase not in {"UNKNOWN_OPERATION", "ACCEPTED"}:
+                    return status
+                await asyncio.sleep(.01)
+            self.fail(f"{operation_id} did not finish")
+
+        async def scenario():
+            first = await host.resume_run("recover-accounting", run_id=run_id, live=True)
+            self.assertEqual(first.disposition, "ACCEPTED")
+            paused = await wait_terminal("recover-accounting")
+            self.assertEqual(paused.result.get("status"), "PAUSED")
+            self.assertEqual(paused.result.get("pause_reason"), "BLOCKED")
+            self.assertEqual(recovery_runtime.turns_started, 0)
+            self.assertEqual(self.journal.missing_usage_count(run_id=run_id), 0)
+
+            answered = await host.answer_question(
+                "answer-recovered", question_id=question["question_id"], answer="Use the specified implementation",
+                resolve_blocker=True, resolution="Decision supplied",
+            )
+            self.assertEqual(answered.disposition, "APPLIED")
+            second = await host.resume_run("continue-recovered", run_id=run_id, live=True)
+            self.assertEqual(second.disposition, "ACCEPTED")
+            completed = await wait_terminal("continue-recovered")
+            self.assertEqual(completed.result.get("status"), "INTEGRATED", completed)
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            asyncio.run(host.close())
+        worker_prompts = [item["prompt"] for item in continuation_runtime.prompts if item["thread_id"] == session.thread_id]
+        self.assertEqual(len(worker_prompts), 1)
+        self.assertIn("Which implementation?", worker_prompts[0])
+        self.assertIn("Use the specified implementation", worker_prompts[0])
+        self.assertEqual(worker_prompts[0].count("earlier blanket prohibition"), 1)
 
     def test_pause_during_actual_reviewer_execution_reconciles_and_pauses(self):
         """M14: interrupt a dispatched reviewer turn, not only its admission latch."""

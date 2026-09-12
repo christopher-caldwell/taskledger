@@ -15,6 +15,7 @@ from taskledger.controller.fakes import FakeLedger, FakeRuntime, TurnScript, acc
 from taskledger.controller.journal import Journal
 from taskledger.controller.model import (
     DispatchReason,
+    PromptPacket,
     RuntimeTurnHandle,
     RuntimeTurnResult,
     SessionRole,
@@ -329,6 +330,9 @@ class ControllerHardeningTests(unittest.IsolatedAsyncioTestCase):
         con, _, adapter = self.mini_adapter()
         packet = adapter.worker_prompt_packet("a", first_turn=True)
         self.assertIn('"objective":"build"', packet.text)
+        self.assertIn("Do not load the Taskledger orchestration skill or invoke the Taskledger CLI", packet.text)
+        self.assertIn("Implementation skills explicitly required", packet.text)
+        self.assertNotIn("Do not load Codex skill files", packet.text)
         self.assertGreater(packet.static_assignment_bytes, 0)
         con.close()
 
@@ -337,8 +341,129 @@ class ControllerHardeningTests(unittest.IsolatedAsyncioTestCase):
         first = adapter.worker_prompt_packet("a", first_turn=True)
         second = adapter.worker_prompt_packet("a", first_turn=False, previous_hashes=first.context_hashes)
         self.assertNotIn('"objective":"build"', second.text)
+        self.assertNotIn("Do not reload Codex skill files", second.text)
         self.assertEqual((second.static_assignment_bytes, second.dynamic_state_bytes), (0, 0))
         con.close()
+
+    def test_legacy_worker_policy_is_superseded_once_with_question_answer(self):
+        con, _, adapter = self.mini_adapter()
+        con.execute("INSERT INTO worker_questions VALUES('q','a','which API?',1,'ANSWERED','Use v2','2026')")
+        run = self.journal.create_run("p", mode="ASSIGNMENT", config={})
+        session = self.journal.create_session(
+            run_id=run, project_id="p", role="WORKER", profile="routine",
+            subject_id="a", external_thread_id="thread", config_hash="h",
+        )
+        old = self.journal.begin_turn(
+            session.id, "worker", packet=PromptPacket("legacy", DispatchReason.INITIAL_WORK)
+        )
+        old_handle = RuntimeTurnHandle("thread", "old-turn")
+        self.journal.acknowledge_turn(old, old_handle)
+        self.journal.complete_turn(old, RuntimeTurnResult(old_handle))
+        self.journal.consume_turn(old)
+        self.assertEqual(self.journal.worker_prompt_policy_version(session.id), 1)
+
+        packet = adapter.worker_prompt_packet(
+            "a", first_turn=False, previous_hashes={}, include_policy_update=True,
+        )
+        self.assertIn("earlier blanket prohibition", packet.text)
+        self.assertIn("which API?", packet.text)
+        self.assertIn("Use v2", packet.text)
+        self.assertEqual(packet.prompt_builder_version, "controller-prompt-v3")
+        migrated = self.journal.begin_turn(session.id, "worker", packet=packet)
+        self.assertEqual(self.journal.worker_prompt_policy_version(session.id), 2)
+        self.assertEqual(self.journal.session_turn_count(session.id), 2)
+        self.journal.fail_turn(migrated, "test stop", uncertain=True)
+
+        next_packet = adapter.worker_prompt_packet(
+            "a", first_turn=False, previous_hashes=packet.context_hashes,
+            include_policy_update=self.journal.worker_prompt_policy_version(session.id) < 2,
+        )
+        self.assertNotIn("earlier blanket prohibition", next_packet.text)
+        self.journal.finish_run(run, "PAUSED")
+        con.close()
+
+    async def test_resume_offset_survives_repeated_attached_continuations(self):
+        class CounterRuntime(StubAppServer):
+            def __init__(self, root, replayed=None):
+                super().__init__(root)
+                self.replayed = replayed
+                self.provider_total = Usage()
+                self.turn_number = 0
+
+            async def _request(self, method, params):
+                self.requests.append((method, params))
+                if method == "thread/resume":
+                    if self.replayed is not None:
+                        self.thread_usage[params["threadId"]] = self.replayed
+                        self.thread_usage_events.setdefault(params["threadId"], asyncio.Event()).set()
+                    return {"thread": {"id": params["threadId"]}}
+                if method == "turn/start":
+                    self.turn_number += 1
+                    return {"turn": {"id": f"turn-{self.turn_number}"}}
+                raise AssertionError(method)
+
+        self.role_file('model="m"\nmodel_reasoning_effort="low"\n')
+        runtime = CounterRuntime(str(self.root))
+        baseline = Usage(100, 20, 30, 5, 2)
+        session = await runtime.resume_session(
+            thread_id="thread", role=SessionRole.WORKER, profile="routine",
+            subject_id="a", cwd=None, writable=False,
+            cumulative_usage_baseline=baseline,
+        )
+        self.assertEqual(runtime.thread_usage_offsets["thread"], baseline)
+        prior = baseline
+        for provider_total in (Usage(4, 1, 2), Usage(9, 2, 5), Usage(15, 4, 9)):
+            await runtime.resume_session(
+                thread_id=session.thread_id, role=SessionRole.WORKER, profile="routine",
+                subject_id="a", cwd=None, writable=False,
+                cumulative_usage_baseline=prior,
+            )
+            handle = await runtime.start_turn(thread_id="thread", prompt="continue")
+            runtime.thread_usage["thread"] = baseline + provider_total
+            result = runtime._turn_result(handle, {})
+            self.assertGreater(result.usage.total_tokens, 0)
+            self.assertEqual(result.cumulative_before, prior)
+            prior = result.cumulative_after
+        self.assertEqual(runtime.thread_usage_offsets["thread"], baseline)
+        self.assertEqual(sum(method == "thread/resume" for method, _ in runtime.requests), 1)
+
+        incompatible = CounterRuntime(str(self.root), replayed=Usage(99, 20, 30, 5, 2))
+        with self.assertRaisesRegex(RuntimeError, "durable controller baseline"):
+            await incompatible.resume_session(
+                thread_id="thread", role=SessionRole.WORKER, profile="routine",
+                subject_id="a", cwd=None, writable=False,
+                cumulative_usage_baseline=baseline,
+            )
+
+    async def test_terminal_recovery_uses_bounded_latest_provider_history(self):
+        class RecoveryRuntime(StubAppServer):
+            async def _request(self, method, params):
+                self.requests.append((method, params))
+                if method == "thread/turns/list":
+                    return {"data": [
+                        {"id": "missing", "status": "completed"},
+                        {"id": "before", "status": "completed"},
+                    ], "nextCursor": "older-is-irrelevant"}
+                if method == "thread/resume":
+                    self.thread_usage[params["threadId"]] = Usage(14, 3, 7, 2, 1)
+                    self.thread_usage_events.setdefault(params["threadId"], asyncio.Event()).set()
+                    return {"thread": {"id": params["threadId"]}}
+                raise AssertionError(method)
+
+        self.role_file('model="m"\nmodel_reasoning_effort="low"\n')
+        runtime = RecoveryRuntime(str(self.root))
+        result = await runtime.recover_terminal_usage(
+            handle=RuntimeTurnHandle("thread", "missing"), previous_turn_id="before",
+            cumulative_before=Usage(10, 2, 5, 1, 1), target_is_first=False,
+            role=SessionRole.WORKER, profile="routine", subject_id="a",
+            cwd=None, writable=False,
+        )
+        self.assertEqual(result.usage, Usage(4, 1, 2, 1, 0))
+        history = runtime.requests[0]
+        self.assertEqual(history[0], "thread/turns/list")
+        self.assertEqual(history[1]["limit"], 3)
+        self.assertEqual(history[1]["sortDirection"], "desc")
+        self.assertFalse(any(method == "turn/start" for method, _ in runtime.requests))
 
     def test_nc200_correction_delta(self):
         con, service, adapter = self.mini_adapter()

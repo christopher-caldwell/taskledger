@@ -142,6 +142,35 @@ class FakeRuntime:
             raise value
         return value
 
+    async def recover_terminal_usage(
+        self, *, handle, previous_turn_id, cumulative_before, target_is_first,
+        role, profile, subject_id, cwd, writable,
+    ):
+        value = self.provider_histories.get(handle.thread_id)
+        if not isinstance(value, dict):
+            return None
+        turns = value.get("turns", [])
+        if not turns or turns[0].get("id") != handle.turn_id:
+            return None
+        if turns[0].get("status", "completed") not in {"completed", "failed", "interrupted"}:
+            return None
+        if target_is_first:
+            if len(turns) != 1 or value.get("nextCursor"):
+                return None
+        elif len(turns) < 2 or turns[1].get("id") != previous_turn_id:
+            return None
+        after = value.get("cumulative_usage")
+        if not isinstance(after, Usage):
+            return None
+        try:
+            usage = after.subtract(cumulative_before)
+        except ValueError:
+            return None
+        return RuntimeTurnResult(
+            handle, usage=usage, usage_precision=UsagePrecision.THREAD_TOTAL_DELTA,
+            cumulative_before=cumulative_before, cumulative_after=after,
+        )
+
     async def close(self):
         self.closed = True
 

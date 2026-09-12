@@ -50,6 +50,12 @@ class AgentRuntime(Protocol):
 
     async def interrupt_turn(self, handle: RuntimeTurnHandle) -> None: ...
 
+    async def recover_terminal_usage(
+        self, *, handle: RuntimeTurnHandle, previous_turn_id: str | None,
+        cumulative_before: Usage, target_is_first: bool, role: SessionRole,
+        profile: str, subject_id: str, cwd: str | None, writable: bool,
+    ) -> RuntimeTurnResult | None: ...
+
     def usage_events(self, handle: RuntimeTurnHandle) -> tuple[dict[str, Any], ...]: ...
 
 

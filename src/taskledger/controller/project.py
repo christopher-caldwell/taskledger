@@ -176,6 +176,7 @@ class ProjectController:
             unresolved = await probe.reconcile_open_turns()
             if unresolved:
                 return self._pause(PauseReason.RUNTIME_UNCERTAIN, f"unresolved external turns: {', '.join(unresolved)}")
+            await probe.reconcile_terminal_usage()
             probe.reconcile_resolved_reviewer_sessions()
             return await self._run_loop()
         except ProviderAdmissionStopped:

@@ -143,7 +143,17 @@ class AppServerRuntime:
         await self._ensure_started()
         identity = self.session_identity(role=role, profile=profile, subject_id=subject_id, cwd=cwd, writable=writable)
         resolved = self._profile(profile, role)
-        if thread_id not in self.session_config:
+        already_attached = thread_id in self.session_config
+        if already_attached:
+            config = self.session_config[thread_id]
+            if any(config.get(key) != value for key, value in identity.as_dict().items()):
+                raise RuntimeError("CONFIGURATION_CONFLICT: attached thread configuration changed")
+            if cumulative_usage_baseline is not None:
+                current = self.thread_usage.get(thread_id)
+                if current != cumulative_usage_baseline:
+                    raise RuntimeError("Codex cumulative usage does not match the durable controller baseline")
+            return RuntimeSession(thread_id, identity)
+        else:
             self.session_config[thread_id] = {
                 **identity.as_dict(), "cwd": cwd, "sandboxPolicy": identity.sandbox, "subject_id": subject_id,
                 "writable": writable, "developerInstructions": resolved.developer_instructions,
@@ -192,8 +202,80 @@ class AppServerRuntime:
             elif replayed != cumulative_usage_baseline:
                 raise RuntimeError("Codex cumulative usage does not match the durable controller baseline")
             else:
-                self.thread_usage_offsets[thread_id] = Usage()
+                self.thread_usage_offsets.setdefault(thread_id, Usage())
         return RuntimeSession(thread_id, identity)
+
+    async def recover_terminal_usage(
+        self, *, handle: RuntimeTurnHandle, previous_turn_id: str | None,
+        cumulative_before: Usage, target_is_first: bool, role: SessionRole,
+        profile: str, subject_id: str, cwd: str | None, writable: bool,
+    ) -> RuntimeTurnResult | None:
+        """Replay one provably isolated terminal allocation without starting a turn."""
+        await self._ensure_started()
+        page = await self._request("thread/turns/list", {
+            "threadId": handle.thread_id, "limit": 3,
+            "sortDirection": "desc", "itemsView": "summary",
+        })
+        turns = page.get("data", [])
+        if not turns or turns[0].get("id") != handle.turn_id:
+            return None
+        if turns[0].get("status") not in {"completed", "failed", "interrupted"}:
+            return None
+        if target_is_first:
+            if len(turns) != 1 or page.get("nextCursor"):
+                return None
+        elif len(turns) < 2 or turns[1].get("id") != previous_turn_id:
+            return None
+
+        identity = self.session_identity(
+            role=role, profile=profile, subject_id=subject_id, cwd=cwd, writable=writable
+        )
+        if handle.thread_id not in self.session_config:
+            resolved = self._profile(profile, role)
+            config = {
+                **identity.as_dict(), "cwd": cwd, "sandboxPolicy": identity.sandbox,
+                "subject_id": subject_id, "writable": writable,
+                "developerInstructions": resolved.developer_instructions,
+                "nativeConfig": self._runtime_config(resolved, identity.sandbox, cwd),
+            }
+            self.session_config[handle.thread_id] = config
+        config = self.session_config[handle.thread_id]
+        if any(config.get(key) != value for key, value in identity.as_dict().items()):
+            raise RuntimeError("CONFIGURATION_CONFLICT: terminal recovery thread configuration changed")
+        params: dict[str, Any] = {
+            "threadId": handle.thread_id, "excludeTurns": False,
+            "model": config["model"], "cwd": cwd,
+            "sandbox": "workspace-write" if writable else "read-only",
+            "baseInstructions": self.BASE_INSTRUCTIONS, "config": config["nativeConfig"],
+        }
+        if config.get("developerInstructions"):
+            params["developerInstructions"] = config["developerInstructions"]
+        self._assert_controller_config(config["nativeConfig"])
+        event = self.thread_usage_events.setdefault(handle.thread_id, asyncio.Event())
+        event.clear()
+        self.thread_usage.pop(handle.thread_id, None)
+        self.thread_usage_offsets[handle.thread_id] = Usage()
+        response = await self._request("thread/resume", params)
+        if response.get("thread", {}).get("id") != handle.thread_id:
+            raise RuntimeError("Codex resumed a different thread")
+        if response.get("model") not in {None, identity.model} or response.get("reasoningEffort") not in {None, identity.effort}:
+            raise RuntimeError("CONFIGURATION_CONFLICT: Codex resumed the thread with a different model/effort")
+        if not event.is_set():
+            try:
+                await asyncio.wait_for(event.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                pass
+        cumulative_after = self.thread_usage.get(handle.thread_id)
+        if cumulative_after is None:
+            return None
+        try:
+            usage = cumulative_after.subtract(cumulative_before)
+        except ValueError:
+            return None
+        return RuntimeTurnResult(
+            handle, usage=usage, usage_precision=UsagePrecision.THREAD_TOTAL_DELTA,
+            cumulative_before=cumulative_before, cumulative_after=cumulative_after,
+        )
 
     async def start_turn(self, *, thread_id: str, prompt: str, output_schema: dict[str, Any] | None = None) -> RuntimeTurnHandle:
         await self._ensure_started()

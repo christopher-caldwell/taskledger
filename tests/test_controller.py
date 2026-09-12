@@ -14,7 +14,7 @@ from pathlib import Path
 from taskledger.controller.fakes import FakeLedger, FakeRuntime, TurnScript, accepted_verdict, rejected_verdict
 from taskledger.controller.app_server import AppServerRuntime
 from taskledger.controller.journal import Journal
-from taskledger.controller.model import ExecutionStatus, PauseReason, RuntimeIdentity, RuntimeTurnHandle, RuntimeTurnResult, SessionRole, SupervisorStatus, Usage
+from taskledger.controller.model import ExecutionStatus, PauseReason, RuntimeIdentity, RuntimeTurnHandle, RuntimeTurnResult, SessionRole, SupervisorStatus, Usage, UsagePrecision
 from taskledger.controller.supervisor import ProviderAdmissionStopped, Supervisor, SupervisorConfig, parse_verdict
 from taskledger.controller.worker_broker import WorkerBroker, broker_socket_path, request
 from taskledger.core import canonical, now, sha256
@@ -43,6 +43,160 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         config = SupervisorConfig(**limits)
         run_id = self.journal.create_run("p1", mode="ASSIGNMENT", config=config.__dict__)
         return Supervisor(project_id="p1", run_id=run_id, ledger=ledger, runtime=runtime, journal=self.journal, config=config)
+
+    def seed_terminal_missing(self, runtime, *, subject_id="a1", two_missing=False):
+        run_id = self.journal.create_run("p1", mode="ASSIGNMENT", config={})
+        identity = runtime.session_identity(
+            role=SessionRole.WORKER, profile="routine", subject_id=subject_id,
+            cwd="/tmp", writable=True,
+        ).as_dict()
+        session = self.journal.create_session(
+            run_id=run_id, project_id="p1", role="WORKER", profile="routine",
+            subject_id=subject_id, external_thread_id="thread-recovery",
+            config_hash=sha256(canonical(identity)), runtime_identity=identity,
+        )
+        baseline = Usage(100, 20, 30, 10, 4)
+        previous = self.journal.begin_turn(session.id, "worker")
+        previous_handle = RuntimeTurnHandle(session.thread_id, "provider-before")
+        self.journal.acknowledge_turn(previous, previous_handle)
+        self.journal.complete_turn(previous, RuntimeTurnResult(
+            previous_handle, usage=baseline,
+            usage_precision=UsagePrecision.THREAD_TOTAL_DELTA,
+            cumulative_before=Usage(), cumulative_after=baseline,
+        ))
+        self.journal.consume_turn(previous)
+        if two_missing:
+            self.con.execute(
+                "UPDATE controller_turns SET usage_missing=1,usage_precision='MISSING',usage_after_json=NULL WHERE id=?",
+                (previous,),
+            )
+        target = self.journal.begin_turn(session.id, "worker")
+        target_handle = RuntimeTurnHandle(session.thread_id, "provider-missing")
+        self.journal.acknowledge_turn(target, target_handle)
+        self.journal.complete_turn(target, RuntimeTurnResult(
+            target_handle, usage_missing=True, usage_precision=UsagePrecision.MISSING,
+        ))
+        runtime.roles[session.thread_id] = SessionRole.WORKER
+        return run_id, session, target, baseline
+
+    async def test_terminal_missing_usage_recovery_is_exact_zero_turn_and_idempotent(self):
+        runtime = FakeRuntime(worker_turns=[], reviewer_turns=[])
+        run_id, session, target, baseline = self.seed_terminal_missing(runtime)
+        final = baseline + Usage(7, 2, 5, 1, 3)
+        runtime.provider_histories[session.thread_id] = {
+            "turns": [
+                {"id": "provider-missing", "status": "completed"},
+                {"id": "provider-before", "status": "completed"},
+            ],
+            "cumulative_usage": final,
+        }
+        supervisor = Supervisor(
+            project_id="p1", run_id=run_id, ledger=FakeLedger(), runtime=runtime,
+            journal=self.journal, manage_run=False,
+        )
+        self.assertEqual(await supervisor.reconcile_terminal_usage(), [])
+        self.assertEqual(runtime.turns_started, 0)
+        row = self.con.execute(
+            "SELECT id,usage_missing,input_tokens,output_tokens,usage_before_json,usage_after_json FROM controller_turns WHERE id=?",
+            (target,),
+        ).fetchone()
+        self.assertEqual((row["id"], row["usage_missing"], row["input_tokens"], row["output_tokens"]), (target, 0, 7, 5))
+        self.assertEqual(Usage(**json.loads(row["usage_before_json"])), baseline)
+        self.assertEqual(Usage(**json.loads(row["usage_after_json"])), final)
+        self.assertEqual(await supervisor.reconcile_terminal_usage(), [])
+        self.assertEqual(runtime.turns_started, 0)
+        self.journal.finish_run(run_id, "PAUSED")
+
+    async def test_first_terminal_turn_recovers_only_when_provider_history_proves_first(self):
+        runtime = FakeRuntime(worker_turns=[], reviewer_turns=[])
+        run_id = self.journal.create_run("p1", mode="ASSIGNMENT", config={})
+        identity = runtime.session_identity(
+            role=SessionRole.WORKER, profile="routine", subject_id="first",
+            cwd="/tmp", writable=True,
+        ).as_dict()
+        session = self.journal.create_session(
+            run_id=run_id, project_id="p1", role="WORKER", profile="routine",
+            subject_id="first", external_thread_id="first-thread",
+            config_hash=sha256(canonical(identity)), runtime_identity=identity,
+        )
+        local_id = self.journal.begin_turn(session.id, "worker")
+        handle = RuntimeTurnHandle(session.thread_id, "first-provider-turn")
+        self.journal.acknowledge_turn(local_id, handle)
+        self.journal.complete_turn(local_id, RuntimeTurnResult(
+            handle, usage_missing=True, usage_precision=UsagePrecision.MISSING,
+        ))
+        runtime.provider_histories[session.thread_id] = {
+            "turns": [{"id": handle.turn_id}], "cumulative_usage": Usage(6, 1, 2),
+        }
+        supervisor = Supervisor(
+            project_id="p1", run_id=run_id, ledger=FakeLedger(assignment_id="first"),
+            runtime=runtime, journal=self.journal, manage_run=False,
+        )
+        self.assertEqual(await supervisor.reconcile_terminal_usage(), [])
+        self.assertEqual(self.con.execute(
+            "SELECT usage_missing,input_tokens,output_tokens FROM controller_turns WHERE id=?", (local_id,)
+        ).fetchone()[:], (0, 6, 2))
+        self.journal.finish_run(run_id, "PAUSED")
+
+    async def test_terminal_missing_usage_recovery_fails_closed_for_unprovable_evidence(self):
+        cases = (
+            ("missing replay", {"turns": [{"id": "provider-missing"}, {"id": "provider-before"}]}),
+            ("later turn", {"turns": [{"id": "provider-later"}, {"id": "provider-missing"}], "cumulative_usage": Usage(200)}),
+            ("backwards cumulative", {"turns": [{"id": "provider-missing"}, {"id": "provider-before"}], "cumulative_usage": Usage(99, 20, 30, 10, 4)}),
+        )
+        for label, history in cases:
+            with self.subTest(label=label):
+                runtime = FakeRuntime(worker_turns=[], reviewer_turns=[])
+                run_id, session, target, _ = self.seed_terminal_missing(runtime, subject_id=label)
+                runtime.provider_histories[session.thread_id] = history
+                supervisor = Supervisor(project_id="p1", run_id=run_id, ledger=FakeLedger(), runtime=runtime, journal=self.journal, manage_run=False)
+                self.assertEqual(await supervisor.reconcile_terminal_usage(), [target])
+                self.assertEqual(self.con.execute("SELECT usage_missing FROM controller_turns WHERE id=?", (target,)).fetchone()[0], 1)
+                self.assertEqual(runtime.turns_started, 0)
+                self.journal.finish_run(run_id, "PAUSED")
+
+        runtime = FakeRuntime(worker_turns=[], reviewer_turns=[])
+        run_id, _, target, _ = self.seed_terminal_missing(runtime, subject_id="two", two_missing=True)
+        supervisor = Supervisor(project_id="p1", run_id=run_id, ledger=FakeLedger(), runtime=runtime, journal=self.journal, manage_run=False)
+        self.assertEqual(await supervisor.reconcile_terminal_usage(), [])
+        self.assertEqual(self.con.execute("SELECT usage_missing FROM controller_turns WHERE id=?", (target,)).fetchone()[0], 1)
+        self.journal.finish_run(run_id, "PAUSED")
+
+    async def test_terminal_usage_recovery_rejects_wrong_persisted_identity(self):
+        class WrongIdentityRuntime(FakeRuntime):
+            async def recover_terminal_usage(self, **kwargs):
+                return RuntimeTurnResult(
+                    RuntimeTurnHandle("wrong-thread", "wrong-turn"), usage=Usage(1),
+                    usage_precision=UsagePrecision.THREAD_TOTAL_DELTA,
+                    cumulative_before=kwargs["cumulative_before"],
+                    cumulative_after=kwargs["cumulative_before"] + Usage(1),
+                )
+        runtime = WrongIdentityRuntime(worker_turns=[], reviewer_turns=[])
+        run_id, _, target, _ = self.seed_terminal_missing(runtime, subject_id="wrong")
+        supervisor = Supervisor(project_id="p1", run_id=run_id, ledger=FakeLedger(), runtime=runtime, journal=self.journal, manage_run=False)
+        self.assertEqual(await supervisor.reconcile_terminal_usage(), [target])
+        self.assertEqual(self.con.execute("SELECT usage_missing FROM controller_turns WHERE id=?", (target,)).fetchone()[0], 1)
+        self.journal.finish_run(run_id, "PAUSED")
+
+    async def test_successful_terminal_recovery_clears_gate_and_continues(self):
+        ledger = FakeLedger()
+        runtime = FakeRuntime(
+            worker_turns=[TurnScript(effect=ledger.submit)],
+            reviewer_turns=[TurnScript(structured_output=accepted_verdict())],
+        )
+        run_id, session, _, baseline = self.seed_terminal_missing(runtime)
+        runtime.provider_histories[session.thread_id] = {
+            "turns": [{"id": "provider-missing"}, {"id": "provider-before"}],
+            "cumulative_usage": baseline + Usage(3, 1, 2),
+        }
+        result = await Supervisor(
+            project_id="p1", run_id=run_id, ledger=ledger, runtime=runtime,
+            journal=self.journal, config=SupervisorConfig(max_total_tokens=1000),
+            manage_run=False,
+        ).run_assignment("a1")
+        self.assertEqual(result.status, SupervisorStatus.INTEGRATED)
+        self.assertEqual(self.journal.missing_usage_count(run_id=run_id), 0)
+        self.journal.finish_run(run_id, "COMPLETED")
 
     async def test_normal_turn_completion_continues_until_submission(self):
         ledger = FakeLedger()

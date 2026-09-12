@@ -344,6 +344,14 @@ class Journal:
         ).fetchone()
         return json.loads(row[0]) if row and row[0] else {}
 
+    def worker_prompt_policy_version(self, session_id: str) -> int:
+        current = self.con.execute(
+            "SELECT 1 FROM controller_turns WHERE session_id=? AND prompt_kind='worker' "
+            "AND prompt_builder_version='controller-prompt-v3' LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return 2 if current else 1
+
     def latest_cumulative_usage(self, session_id: str) -> Usage | None:
         row = self.con.execute(
             "SELECT usage_after_json FROM controller_turns "
@@ -423,7 +431,16 @@ class Journal:
             self._persist_usage_locked(local_turn_id, result)
 
     def _persist_usage_locked(self, local_turn_id: str, result: RuntimeTurnResult) -> None:
-        row = self.con.execute("SELECT * FROM controller_turns WHERE id=?", (local_turn_id,)).fetchone()
+        row = self.con.execute(
+            "SELECT t.*,s.external_thread_id FROM controller_turns t "
+            "JOIN controller_sessions s ON s.id=t.session_id WHERE t.id=?",
+            (local_turn_id,),
+        ).fetchone()
+        if not row or (
+            row["external_thread_id"] != result.handle.thread_id
+            or row["external_turn_id"] != result.handle.turn_id
+        ):
+            raise RuntimeError("terminal usage identity does not match the persisted allocation")
         before_json = canonical(result.cumulative_before.__dict__) if result.cumulative_before is not None else None
         after_json = canonical(result.cumulative_after.__dict__) if result.cumulative_after is not None else None
         missing = result.usage_missing or result.usage_precision in {UsagePrecision.MISSING, UsagePrecision.PARTIAL_OBSERVATION}
@@ -498,6 +515,48 @@ class Journal:
             "SELECT COUNT(*) FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id WHERE s.run_id=? AND t.state IN ('COMPLETED','FAILED','UNCERTAIN') AND t.usage_missing=1",
             (run_id,),
         ).fetchone()[0])
+
+    def terminal_missing_usage_candidates(self, *, run_id: str) -> list[dict[str, Any]]:
+        """Return only allocations whose local cumulative boundary is unambiguous."""
+        rows = self.con.execute(
+            "SELECT t.*,s.run_id,s.project_id,s.role,s.profile,s.subject_id,s.external_thread_id,s.runtime_identity_json "
+            "FROM controller_turns t JOIN controller_sessions s ON s.id=t.session_id "
+            "WHERE s.run_id=? AND t.state IN ('COMPLETED','FAILED','UNCERTAIN') AND t.usage_missing=1 "
+            "ORDER BY s.created_at,s.id,t.sequence",
+            (run_id,),
+        ).fetchall()
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            if not row["external_thread_id"] or not row["external_turn_id"]:
+                continue
+            latest = self.con.execute(
+                "SELECT MAX(sequence) FROM controller_turns WHERE session_id=?", (row["session_id"],)
+            ).fetchone()[0]
+            if row["sequence"] != latest:
+                continue
+            previous = self.con.execute(
+                "SELECT external_turn_id,usage_after_json,usage_missing FROM controller_turns "
+                "WHERE session_id=? AND sequence=?",
+                (row["session_id"], row["sequence"] - 1),
+            ).fetchone()
+            if previous is None:
+                baseline = Usage()
+                previous_turn_id = None
+                target_is_first = True
+            elif previous["usage_missing"] or not previous["usage_after_json"] or not previous["external_turn_id"]:
+                continue
+            else:
+                baseline = Usage(**json.loads(previous["usage_after_json"]))
+                previous_turn_id = previous["external_turn_id"]
+                target_is_first = False
+            candidates.append({
+                "local_turn_id": row["id"], "thread_id": row["external_thread_id"],
+                "turn_id": row["external_turn_id"], "previous_turn_id": previous_turn_id,
+                "cumulative_before": baseline, "target_is_first": target_is_first,
+                "role": row["role"], "profile": row["profile"], "subject_id": row["subject_id"],
+                "prompt_kind": row["prompt_kind"], "runtime_identity": json.loads(row["runtime_identity_json"]),
+            })
+        return candidates
 
     def consecutive_stalled_turns(self, session_id: str) -> int:
         rows = self.con.execute(
