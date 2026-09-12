@@ -170,6 +170,63 @@ class InitialPlanningTests(unittest.TestCase):
         finally:
             fresh.tearDown()
 
+    def test_engine_host_releases_prepare_after_first_time_initialization_failure(self):
+        from tests.test_acceptance import TaskledgerAcceptance
+        from taskledger.application.host import EngineHost
+        fresh = TaskledgerAcceptance("test_version_flag_returns_installed_version")
+        fresh.setUp()
+        try:
+            fresh.git("checkout", "--orphan", "retry-prepare")
+            profiles = fresh.root / ".codex" / "agents"
+            profiles.mkdir(parents=True)
+            template = 'name = "test"\nmodel = "fake-model"\nmodel_reasoning_effort = "low"\n'
+            for name in ("taskledger-worker-routine.toml", "taskledger-worker-complex.toml"):
+                (profiles / name).write_text(template)
+            runtime = FakeRuntime(
+                worker_turns=[], reviewer_turns=[],
+                task_creator_turns=[TurnScript(structured_output=proposal())],
+            )
+            host = EngineHost(str(fresh.root), runtime_factory=lambda **_: runtime)
+
+            async def wait_terminal(operation_id):
+                for _ in range(300):
+                    status = await host.operation_status(operation_id)
+                    if status.phase != "ACCEPTED":
+                        return status
+                    await asyncio.sleep(.01)
+                self.fail(f"{operation_id} did not finish")
+
+            async def scenario():
+                first = await host.prepare_project(
+                    "prepare-before-initial-commit", spec_path="spec.md", live=True,
+                    limits={"max_initial_planner_turns": 1},
+                    preflight={"local_inputs": [], "services": []},
+                )
+                self.assertEqual(first.disposition, "ACCEPTED")
+                failed = await wait_terminal("prepare-before-initial-commit")
+                self.assertEqual(failed.phase, "FAILED")
+                self.assertEqual(failed.error.code, "INITIAL_COMMIT_REQUIRED")
+                self.assertFalse(host._is_pause_requested("prepare-before-initial-commit"))
+                self.assertIsNone(host._lifecycle_operation_id)
+
+                fresh.git("add", ".")
+                fresh.git("commit", "-qm", "initial")
+                second = await host.prepare_project(
+                    "prepare-after-initial-commit", spec_path="spec.md", live=True,
+                    limits={"max_initial_planner_turns": 1},
+                    preflight={"local_inputs": [], "services": []},
+                )
+                self.assertEqual(second.disposition, "ACCEPTED", second.error)
+                succeeded = await wait_terminal("prepare-after-initial-commit")
+                self.assertEqual(succeeded.phase, "SUCCEEDED", succeeded.error)
+
+            try:
+                asyncio.run(scenario())
+            finally:
+                asyncio.run(host.close())
+        finally:
+            fresh.tearDown()
+
     def test_bounded_planner_persists_immutable_proposal_and_materializes(self):
         runtime = FakeRuntime(worker_turns=[], reviewer_turns=[], task_creator_turns=[TurnScript(structured_output=proposal())])
         run_id = self.journal.create_run(self.project_id, mode="PREPARATION", config={"manifest": {"scope": "PREPARATION"}})

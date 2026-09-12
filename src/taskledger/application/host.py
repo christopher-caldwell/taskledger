@@ -297,15 +297,16 @@ class EngineHost:
             self._active[request_id] = lambda _reason="USER_INTERRUPTED": stop.set()
 
         async def work():
-            self._set_transient_operation(request_id, "prepare_project", "INITIALIZING")
-            try: self._ensure_initialized_for_prepare()
-            finally: self._transient_operation = None
             try:
+                self._set_transient_operation(request_id, "prepare_project", "INITIALIZING")
+                try: self._ensure_initialized_for_prepare()
+                finally: self._transient_operation = None
                 return await prepare_project(self.service, self.project, self.principal, payload,
                     runtime_factory=self.runtime_factory, stop_requested=stop.is_set)
             finally:
-                with self._active_lock: self._active.pop(request_id, None)
-                with self._active_lock: self._pause_requested.discard(request_id)
+                with self._active_lock:
+                    self._active.pop(request_id, None)
+                    self._pause_requested.discard(request_id)
                 if self._lifecycle_operation_id == request_id: self._lifecycle_operation_id = None
         return self._admit_owned_operation(request_id, fingerprint, receipt, work)
 
