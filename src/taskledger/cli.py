@@ -93,7 +93,7 @@ def load_input(name: str | None) -> dict[str, Any]:
 def parser() -> argparse.ArgumentParser:
     p=argparse.ArgumentParser(add_help=False, exit_on_error=False)
     p.add_argument("resource", nargs="?");p.add_argument("action", nargs="?")
-    p.add_argument("--input");p.add_argument("--token");p.add_argument("--project");p.add_argument("--repo");p.add_argument("--confirm-branch");p.add_argument("--verbose",action="store_true");p.add_argument("--version",action="store_true")
+    p.add_argument("--input");p.add_argument("--token");p.add_argument("--project");p.add_argument("--repo");p.add_argument("--confirm-branch");p.add_argument("--spec");p.add_argument("--commit-setup",action="store_true");p.add_argument("--verbose",action="store_true");p.add_argument("--version",action="store_true")
     return p
 
 
@@ -208,7 +208,7 @@ def prepare_project_command(args, data):
     finally:
         shared_service.con.close()
 
-def start_prepared_project(service, project, principal, data):
+def start_prepared_project(service, project, principal, data, *, announce=True):
     from .controller.app_server import AppServerRuntime
     from .controller.initial_planning import materialized_plan, preparation_row, proposal_sources_are_normalized
     from .controller.journal import Journal
@@ -216,10 +216,120 @@ def start_prepared_project(service, project, principal, data):
     from .controller.project import validate_execution_policy
     from .application.commands import admit_prepared_start
     admitted = admit_prepared_start(service, project, principal, data, runtime_factory=AppServerRuntime)
-    print(f"Taskledger execution run:\n{admitted.run_id}\n\nCtrl-C requests a safe pause.", file=sys.stderr, flush=True)
+    if announce:
+        print(f"Taskledger execution run:\n{admitted.run_id}\n\nCtrl-C requests a safe pause.", file=sys.stderr, flush=True)
     result = run_project_controller(service, project, principal, admitted.run_id, admitted.owner.config,
         admitted.owner.runtime, owner=admitted.owner)
     return {"preparation_id": admitted.preparation_id, **asdict(result)}
+
+
+def _human_bootstrap(args) -> None:
+    if args.action or any((args.input, args.token, args.project, args.repo, args.spec)) or (bool(args.confirm_branch) != args.commit_setup):
+        raise LedgerError("INVALID_REQUEST", "Usage: taskledger bootstrap [--confirm-branch <branch> --commit-setup]")
+    from .operator import bootstrap
+
+    result = bootstrap(os.getcwd(), confirm_branch=args.confirm_branch, commit_setup=args.commit_setup)
+    if result["status"] == "CANCELLED":
+        print("Taskledger bootstrap cancelled.")
+        return
+    print("Taskledger bootstrap complete.\n")
+    print(f"Canonical branch: {result['canonical_branch']}")
+    if result["added"]:
+        print("\nAdded:")
+        for item in result["added"]:
+            print(f"  {item}")
+    if result["existing"]:
+        print("\nExisting:")
+        for item in result["existing"]:
+            print(f"  {item}")
+    if result["repository_configuration_changed"]:
+        if result.get("setup_commit_oid"):
+            print(f"\nSetup committed: {result['setup_commit_oid']}")
+        else:
+            print("\nRepository configuration changed.\nCommit these changes before running `taskledger prepare`.")
+
+
+def _operator_spec_path(repository_root: str, value: str) -> str:
+    root = Path(repository_root)
+    candidate = Path(value)
+    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    try:
+        return resolved.relative_to(root.resolve()).as_posix()
+    except ValueError:
+        raise LedgerError("INVALID_REQUEST", "The specification must be inside the current repository.")
+
+
+def _human_prepare(args) -> None:
+    if args.action or args.commit_setup or not args.spec or any((args.input, args.repo, args.confirm_branch)):
+        raise LedgerError("INVALID_REQUEST", "Usage: taskledger prepare --spec <path>")
+    info = git.inspect(os.getcwd())
+    spec_path = _operator_spec_path(str(info["root"]), args.spec)
+    result = prepare_project_command(args, {"spec_path": spec_path, "live": True})
+    from .operator import forget_approval, format_proposal, remember_approval
+
+    print(format_proposal(spec_path, result["proposal"]))
+    service = service_for_command(args)
+    try:
+        project, _principal = service.auth_orchestrator(args.project, args.token)
+        if result["status"] != "AWAITING_APPROVAL":
+            forget_approval(service)
+            print("\nThis preparation cannot be approved until its ambiguities are resolved.")
+            return
+        try:
+            answer = input("\nApprove this plan? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() in {"y", "yes"}:
+            remember_approval(service, project, result, spec_path)
+            print("\nPlan approved. Run `taskledger start` or `taskledger ui`.")
+        else:
+            forget_approval(service)
+            print("\nPlan not approved.")
+    finally:
+        service.con.close()
+
+
+def _human_start(args) -> None:
+    if args.action or args.commit_setup or any((args.input, args.repo, args.confirm_branch, args.spec)):
+        raise LedgerError("INVALID_REQUEST", "Usage: taskledger start")
+    from .operator import approved_preparation, forget_approval
+
+    service = service_for_command(args)
+    try:
+        project, principal = service.auth_orchestrator(args.project, args.token)
+        preparation, approval = approved_preparation(service, project)
+        limits = preparation["run_configuration"]["execution_limits"]
+        tasks = preparation["proposal"]["tasks"]
+        print("Starting Taskledger\n")
+        print(f"Specification: {approval['spec_path']}")
+        print(f"Tasks: {len(tasks)}")
+        print(f"Workers: up to {limits['max_workers']}")
+        print(f"Reviewers: up to {limits['max_reviewers']}\n")
+        print("Controller running.\nCtrl-C requests a safe pause.", flush=True)
+        result = start_prepared_project(service, project, principal, {
+            "preparation_id": preparation["id"],
+            "approve_proposal_hash": preparation["proposal_hash"],
+            "live": True,
+        }, announce=False)
+        forget_approval(service)
+        print(f"\nController stopped: {result.get('outcome', 'UNKNOWN')}")
+    finally:
+        service.con.close()
+
+
+def dispatch_human(args) -> None:
+    if args.resource == "bootstrap":
+        _human_bootstrap(args)
+    elif args.resource == "prepare":
+        _human_prepare(args)
+    elif args.resource == "start":
+        _human_start(args)
+    elif args.resource == "ui":
+        if args.spec or args.confirm_branch or args.input or args.commit_setup:
+            raise LedgerError("INVALID_REQUEST", "Usage: taskledger ui")
+        dispatch(args, {})
+    else:
+        raise LedgerError("INVALID_REQUEST", "Unknown human command.")
 
 def dispatch(args, data):
     if args.resource == "ui" and args.action is None:
@@ -253,7 +363,7 @@ def dispatch(args, data):
         if command=="worker.submit":return service.worker_submit(principal,data)
         raise LedgerError("INVALID_REQUEST","Unknown worker command.")
     project,principal=service.auth_orchestrator(args.project,args.token)
-    if command not in {"project.show","project.recover","controller.show","controller.report"}:service.preflight(project)
+    if command not in {"project.show","project.recover","controller.show","controller.report","plan.preview","plan.commit"}:service.preflight(project)
     if command=="project.show":
         service.preflight(project);valid,fingerprint,diagnostics=service.plan_current(project["id"])
         return {"project_id":project["id"],"repository_root":project["repository_root"],"canonical_branch":project["canonical_branch"],"effective_phase":service.phase(project),"plan":{"valid":valid,"fingerprint":fingerprint,"diagnostics":diagnostics},"progress":service.progress(project),"pending_reviews":service.con.execute("SELECT COUNT(*) FROM specification_reviews WHERE project_id=? AND state='PENDING'",(project["id"],)).fetchone()[0]}
@@ -458,6 +568,12 @@ def dispatch(args, data):
     if command=="task.integrate":return service.integrate_task(project,principal,data)
     if command=="plan.apply":return service.apply_plan(project,principal,data)
     if command=="plan.validate":require_object(data,{});return service.validate_plan(project,principal)
+    if command=="plan.preview":
+        from .operator import preview_model_plan
+        return preview_model_plan(service,project,data)
+    if command=="plan.commit":
+        from .operator import commit_model_plan
+        return commit_model_plan(service,project,principal,data)
     if command=="assignment.create":return service.assignment_create(project,principal,data)
     if command=="assignment.revoke":return service.assignment_revoke(project,principal,data)
     if command=="assignment.rotate-token":return service.rotate_token(project,principal,data)
@@ -499,23 +615,39 @@ def main(argv=None):
         args,unknown=parser().parse_known_args(normalized)
         command="ui" if args.resource=="ui" and args.action is None else (f"{args.resource}.{args.action}" if args.resource and args.action else "unknown")
         if unknown:raise LedgerError("INVALID_REQUEST","Unknown command-line flag.",details={"flags":unknown})
+        human = bool(args.resource in {"bootstrap", "prepare", "start", "ui"} and args.action is None and not args.version)
         if args.version:
-            if args.resource or args.action or any((args.input,args.token,args.project,args.repo,args.confirm_branch)):
+            if args.resource or args.action or args.commit_setup or any((args.input,args.token,args.project,args.repo,args.confirm_branch,args.spec)):
                 raise LedgerError("INVALID_REQUEST","--version cannot be combined with another command or flag.")
             command="version";result={"version":__version__}
-        else:result=dispatch(args,load_input(args.input))
+        elif human:
+            command=args.resource;dispatch_human(args);return 0
+        else:
+            if args.commit_setup:
+                raise LedgerError("INVALID_REQUEST", "--commit-setup is only valid with `taskledger bootstrap --confirm-branch <branch>`.")
+            if args.spec:
+                raise LedgerError("INVALID_REQUEST", "--spec is only valid with `taskledger prepare`.")
+            result=dispatch(args,load_input(args.input))
     except argparse.ArgumentError as exc:
         command="unknown"
         emit({"ok":False,"command":command,"error":{"code":"INVALID_REQUEST","message":str(exc),"details":{},"allowed_actions":[]}});return 2
     except LedgerError as exc:
-        emit({"ok":False,"command":command,"error":{"code":exc.code,"message":exc.message,"details":exc.details,"allowed_actions":exc.actions}});return exc.exit_code
+        if locals().get("human"):
+            print(f"Taskledger error: {exc.message}", file=sys.stderr)
+        else:
+            emit({"ok":False,"command":command,"error":{"code":exc.code,"message":exc.message,"details":exc.details,"allowed_actions":exc.actions}})
+        return exc.exit_code
     except Exception as exc:
         phase = _error_phase.get()
         correlation_id, diagnostic_path = write_internal_diagnostic(locals().get("args"), command, phase, exc)
         if "args" in locals() and args.verbose:
             detail = f"; diagnostic: {diagnostic_path}" if diagnostic_path else ""
             print(f"taskledger internal error: {exc.__class__.__name__}; correlation: {correlation_id}{detail}",file=sys.stderr)
-        emit({"ok":False,"command":command,"error":{"code":"INTERNAL_ERROR","message":"Taskledger encountered an unexpected internal error.","details":{"correlation_id":correlation_id,"phase":phase},"allowed_actions":[]}});return 70
+        if locals().get("human"):
+            print(f"Taskledger encountered an unexpected internal error. Correlation: {correlation_id}", file=sys.stderr)
+        else:
+            emit({"ok":False,"command":command,"error":{"code":"INTERNAL_ERROR","message":"Taskledger encountered an unexpected internal error.","details":{"correlation_id":correlation_id,"phase":phase},"allowed_actions":[]}})
+        return 70
     emit({"ok":True,"command":command,"data":result,"warnings":[]});return 0
 
 

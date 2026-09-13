@@ -76,7 +76,7 @@ def snapshot(
     return ConsoleSnapshot(
         1, SnapshotVersion(epoch,revision), "now",
         rec(id="p",repository_root="/repo",canonical_branch="main",effective_phase="EXECUTING",progress=progress,task_count=task_count,tasks_truncated=tasks_truncated,cache_health="HEALTHY",available_actions=actions),
-        preparation, rec(id="r",state=run_state,owned_by_host=owned,pause_requested=False,pause_reason="USER_INTERRUPTED",pause_detail="safe boundary"), tasks, sessions,
+        preparation, rec(id="r",state=run_state,owned_by_host=owned,pause_requested=False,pause_reason="USER_INTERRUPTED",pause_detail="safe boundary") if run_state else None, tasks, sessions,
         usage or rec(
             known_token_subtotal=31240,accounting_quality="INCOMPLETE",completed_turns=2,
             unresolved_turn_count=3,input_tokens=100,cached_input_tokens=75,
@@ -318,6 +318,20 @@ class ConsoleUiTests(unittest.IsolatedAsyncioTestCase):
             app.screen.query_one("#budget-amount").value="5";app.screen.query_one("#budget-reason").value="finish"
             await pilot.click("#grant");await pilot.pause()
             self.assertEqual(next(call for call in client.calls if call[0]=="extend_budget")[2]["amount"],5)
+
+    async def test_approved_preparation_is_immediate_primary_action(self):
+        from taskledger.ui.app import TaskledgerApp
+        prep=rec(id="prep",state="AWAITING_APPROVAL",proposal_hash="hash",operator_approved=True)
+        actions=(("code","START_PREPARED"),("enabled",True))
+        client=FakeClient(snapshot(preparation=prep,run_state=None,actions=(actions,)));app=TaskledgerApp(client)
+        async with app.run_test(size=(100,30)) as pilot:
+            await pilot.pause()
+            primary=app.query_one("#primary-action")
+            self.assertEqual(str(primary.label),"START RUN")
+            self.assertTrue(primary.has_focus)
+            await pilot.press("enter");await pilot.pause()
+            start=next(call for call in client.calls if call[0]=="start_prepared_project")
+            self.assertEqual(start[2],{"preparation_id":"prep","approve_proposal_hash":"hash","live":True})
 
     async def test_resume_blocker_operation_outcome_and_guarded_exit(self):
         from taskledger.ui.app import TaskledgerApp

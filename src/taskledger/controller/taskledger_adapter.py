@@ -163,10 +163,21 @@ class TaskledgerLedgerAdapter:
         if self.worker_socket:
             broker = (
                 "\nUse `python3 -m taskledger.worker_proxy <action> --socket " + self.worker_socket
-                + " --input -` for Taskledger worker operations. The proxy is already limited to this assignment; no credential is available in the model environment."
+                + " --input -` for Taskledger worker operations. The proxy is already limited to this assignment; no credential is available in the model environment. "
+                "Never inspect Taskledger databases, rollout files, controller internals, or the installed Taskledger skill. "
+                "A successful check may create an evidence commit, so a clean worktree afterward is expected. "
+                "Call checkpoint only when checkpoint_progress.next is present and checkpoint_progress.pending is null. "
+                "After a successful submit, stop immediately without another command or operation."
             )
         elif self.worker_tool_enabled:
-            broker = "\nUse the assignment-scoped `taskledger_*` tools for context, checks, checkpoints, evidence, questions, blockers, follow-up work, and submission. No credential is available in the model environment."
+            broker = (
+                "\nUse only the assignment-scoped `taskledger_*` tools for durable worker operations. No credential is available in the model environment. "
+                "Never inspect Taskledger databases, rollout files, controller internals, or the installed Taskledger skill. "
+                "A successful taskledger_check may create an evidence commit, so a clean worktree afterward is expected; use its receipt_id and do not rerun an already successful current check. "
+                "Call taskledger_checkpoint only when checkpoint_progress.next is present and checkpoint_progress.pending is null. "
+                "For taskledger_submit, unresolved_questions items use body/blocking/blocker_category and risks use description/blocking/blocker_category. "
+                "If validation fails, correct only the reported fields and retry once. After taskledger_submit succeeds, stop immediately without another command, check, or tool call."
+            )
         static_payload = canonical(context) if first_turn else ""
         dynamic_payload = canonical(changed) if changed else ""
         if first_turn:

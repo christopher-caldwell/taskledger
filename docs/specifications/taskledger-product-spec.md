@@ -88,7 +88,7 @@ The user owns product decisions and approvals. Human input is required for produ
 
 ### 5.2 Task Creator
 
-The Task Creator is a bounded strong model job. For initial planning it is launched by `project prepare`, reads the specification, and returns an immutable structured proposal containing requirements, tasks, acceptance criteria, deterministic checks, dependencies, worker routing, execution waves, declared write surfaces, assumptions, and ambiguities. Python validates and stores that proposal; `project start` materializes it only after exact hash approval. It may be invoked again when final review finds an implementation defect that needs semantic decomposition. It does not schedule work or monitor execution.
+The Task Creator is a bounded strong model job. For human terminal preparation it is launched by `project prepare`, reads the specification, and returns an immutable structured proposal containing requirements, tasks, acceptance criteria, deterministic checks, dependencies, worker routing, execution waves, declared write surfaces, assumptions, and ambiguities. Explicit `$taskledger` preparation instead uses the invoking Codex task to create the same proposal and commits it only after exact user-approved preview hashing. The Task Creator may be invoked again when final review finds an implementation defect that needs semantic decomposition. It does not schedule work or monitor execution.
 
 ### 5.3 Python controller
 
@@ -422,7 +422,7 @@ evidence, and require new current-plan tasks to link to active requirements.
 
 ### PS-030 — Approved semantic plan
 
-The bounded Task Creator creates or revises the requirements, tasks, requirement links, dependencies, routing, and concurrency policy that make up the plan. The user approves the plan. Taskledger does not generate or prioritize it, and the Python controller does not add semantic scheduling decisions during execution.
+A semantic planning model creates or revises the requirements, tasks, requirement links, dependencies, routing, and concurrency policy that make up the plan. This is the bounded Task Creator for human terminal preparation and the current Codex task for explicit `$taskledger` preparation. The user approves the plan. Taskledger does not generate or prioritize it, and the Python controller does not add semantic scheduling decisions during execution.
 
 Taskledger may accept a batch of new requirements and tasks with request-local
 references. The entire batch must commit or roll back as one ledger transaction;
@@ -447,7 +447,7 @@ Taskledger must return all detected validation errors in one result when practic
 
 ### PS-032 — Semantic responsibility
 
-Taskledger must not claim that a requirement is truly atomic, that a task is optimally bounded, that acceptance criteria are sufficient, or that the plan semantically covers the specification. Those judgments belong to the bounded Task Creator and the user approval process.
+Taskledger must not claim that a requirement is truly atomic, that a task is optimally bounded, that acceptance criteria are sufficient, or that the plan semantically covers the specification. Those judgments belong to the selected semantic planning model and the user approval process.
 
 ### PS-033 — Plan validity
 

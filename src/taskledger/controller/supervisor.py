@@ -324,6 +324,11 @@ class Supervisor:
                     new_worker_turns += 1
                     if execution.state == TurnExecutionState.UNCERTAIN:
                         return self._pause(assignment_id, PauseReason.RUNTIME_UNCERTAIN, execution.error or "worker outcome uncertain", new_worker_turns, new_reviewer_turns, reviews)
+                    if execution.state == TurnExecutionState.KNOWN_FAILED and execution.error:
+                        if execution.error == "TASKLEDGER_PROVIDER_TOKEN_LIMIT":
+                            return self._pause(assignment_id, PauseReason.BUDGET_EXHAUSTED, "worker provider-turn token guard interrupted a runaway turn", new_worker_turns, new_reviewer_turns, reviews)
+                        if execution.error.startswith("TASKLEDGER_"):
+                            return self._pause(assignment_id, PauseReason.STALLED, f"worker loop guard interrupted the turn: {execution.error}", new_worker_turns, new_reviewer_turns, reviews)
             except ProviderAdmissionStopped:
                 return self._pause(assignment_id, PauseReason.USER_INTERRUPTED, "pause requested before provider dispatch",
                     new_worker_turns, new_reviewer_turns, reviews)

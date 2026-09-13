@@ -7,7 +7,7 @@ The acceptance suite exercises the end-to-end flows; unit-level coverage is orga
 | PS-001–PS-003 | Project initialization, detached/mismatched branch handling, canonical branch protection |
 | PS-010–PS-014 | Registered specification hashing, change detection, pending review gate, scoped review invalidation |
 | PS-020–PS-024 | Immutable requirement revisions, source traceability, direct/task-backed coverage, retirement and supersession history |
-| PS-030–PS-033 | Transactional batch materialization, plan fingerprinting, all-at-once structural validation, current-plan gate |
+| PS-030–PS-033 | Transactional batch materialization, read-only model-plan preview, exact-hash commit, plan fingerprinting, all-at-once structural validation, current-plan gate |
 | PS-040–PS-045 | Task lifecycle, revisions, cancellation, reopen, split-by-ordinary-operations |
 | PS-050–PS-052 | Dependency reachability and assignment eligibility |
 | PS-060–PS-063 | Worktree assignment context, scoped credentials, explicit worker-profile routing, revocation |
@@ -34,7 +34,8 @@ The acceptance suite exercises the end-to-end flows; unit-level coverage is orga
 | H | `test_direct_requirement_and_specification_review_gate`, `test_pending_review_retargets_latest_observation` |
 | I | `test_direct_requirement_and_specification_review_gate` |
 | J, K | `test_recovery_snapshot_and_external_rewrite_remove_credit` |
-| Required checks | `test_required_checks_must_be_reported_as_successful_submission_evidence` |
+| Required checks and generated-file isolation | `test_required_checks_must_be_reported_as_successful_submission_evidence`, `test_worker_python_check_does_not_dirty_evidence_revision_with_bytecode` |
+| Weak-model worker loop guardrails | `test_worker_broker_validation_names_exact_submit_field`, `test_worker_broker_rejects_checkpoint_without_plan_before_service_call`, `test_worker_broker_submit_is_terminal_and_latched_by_durable_state`, `test_dynamic_submit_interrupts_provider_turn_as_successful_terminal`, `test_repeated_dynamic_tool_calls_trip_turn_guard`, `test_provider_token_guard_interrupts_one_runaway_turn`, `test_submission_guard_interruption_completes_provider_turn` |
 | Assignment-scoped correction delivery | `test_rejection_preserves_history_and_allows_correction`, `test_correction_packets_are_assignment_scoped` |
 | Lightweight checkpoints, replacement, retention, export | `test_lightweight_assignment_uses_durable_gated_checkpoints` |
 | Preflight and event cursor | `test_preflight_and_event_wait_expose_host_boundary_and_cursor` |
@@ -42,6 +43,7 @@ The acceptance suite exercises the end-to-end flows; unit-level coverage is orga
 | Routine escalation | `test_second_routine_rejection_requires_a_complex_assignment` |
 | Atomic plan batch | `test_plan_apply_batches_new_requirements_tasks_and_local_dependencies` |
 | Requirement replacement | `test_requirement_supersession_preserves_completed_historical_tasks` |
+| Explicit-skill plan gate | `OperatorWorkflowTests.test_model_preview_is_read_only_and_commit_creates_only_preparation`, `OperatorWorkflowTests.test_model_commit_rejects_plan_drift_without_persistence` |
 
 ## Controller and console evidence
 

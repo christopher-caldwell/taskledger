@@ -28,6 +28,8 @@ DataTable { height: 1fr; background: $surface; }
 .action-bar { height: 3; padding: 0 1; align-vertical: middle; }
 .action-bar Button { margin-right: 1; }
 .action-bar .section-note { width: 1fr; }
+.primary-action-bar { height: 5; padding: 1 2; background: $surface; }
+#primary-action { min-width: 24; text-style: bold; }
 #tasks-master-detail { height: 1fr; }
 #tasks-table { width: 1fr; }
 #task-inline-detail {

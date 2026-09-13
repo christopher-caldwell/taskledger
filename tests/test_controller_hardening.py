@@ -7,8 +7,9 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from taskledger.controller.app_server import AppServerRuntime
 from taskledger.controller.fakes import FakeLedger, FakeRuntime, TurnScript, accepted_verdict
@@ -27,7 +28,8 @@ from taskledger.controller.project import ProjectController, ProjectControllerCo
 from taskledger.controller.reporting import controller_report
 from taskledger.controller.supervisor import Supervisor, SupervisorConfig
 from taskledger.controller.taskledger_adapter import TaskledgerLedgerAdapter
-from taskledger.core import now
+from taskledger.controller.worker_broker import WorkerBroker
+from taskledger.core import LedgerError, now
 from taskledger.db import connect, transaction
 
 
@@ -103,6 +105,268 @@ class ControllerHardeningTests(unittest.IsolatedAsyncioTestCase):
         """)
         service = MiniService(con)
         return con, service, TaskledgerLedgerAdapter(service, {"id": "p"}, {})
+
+    def test_worker_broker_validation_names_exact_submit_field(self):
+        with self.assertRaises(LedgerError) as raised:
+            WorkerBroker._validate_submit({
+                "summary": "done", "evidence": [{"label": "check", "details": "passed"}],
+                "risks": [], "unresolved_questions": [
+                    {"description": "none", "blocking": False, "blocker_category": None}
+                ], "follow_up_work": [],
+            })
+        self.assertEqual(raised.exception.details["field_path"], "submit.unresolved_questions[0].body")
+        self.assertEqual(raised.exception.details["unexpected_fields"], ["description"])
+
+    def test_worker_broker_rejects_checkpoint_without_plan_before_service_call(self):
+        class BrokerService:
+            def __init__(inner):
+                inner.con = sqlite3.connect(":memory:")
+                inner.con.row_factory = sqlite3.Row
+                inner.con.execute("CREATE TABLE tasks(id TEXT PRIMARY KEY,state TEXT)")
+                inner.con.execute("INSERT INTO tasks VALUES('t','ASSIGNED')")
+                inner.checkpoint_calls = 0
+            def worker_assignment(inner, _principal):
+                return {"id": "p"}, {"id": "a", "task_id": "t"}
+            def checkpoint_progress(inner, _assignment):
+                return {"pending": None, "next": None}
+            def worker_checkpoint(inner, _principal, _data):
+                inner.checkpoint_calls += 1
+                return {}
+        service = BrokerService()
+        try:
+            broker = WorkerBroker(service, object(), self.root / "worker.sock")
+            with self.assertRaises(LedgerError) as raised:
+                broker._dispatch("checkpoint", {"summary": "x", "evidence": []})
+            self.assertEqual(raised.exception.code, "CHECKPOINT_NOT_AVAILABLE")
+            self.assertFalse(raised.exception.details["retryable"])
+            self.assertEqual(service.checkpoint_calls, 0)
+        finally:
+            service.con.close()
+
+    def test_worker_broker_submit_is_terminal_and_latched_by_durable_state(self):
+        class BrokerService:
+            def __init__(inner):
+                inner.con = sqlite3.connect(":memory:")
+                inner.con.row_factory = sqlite3.Row
+                inner.con.execute("CREATE TABLE tasks(id TEXT PRIMARY KEY,state TEXT)")
+                inner.con.execute("INSERT INTO tasks VALUES('t','ASSIGNED')")
+                inner.check_calls = 0
+            def worker_assignment(inner, _principal):
+                return {"id": "p"}, {"id": "a", "task_id": "t"}
+            def worker_submit(inner, _principal, _data):
+                inner.con.execute("UPDATE tasks SET state='SUBMITTED' WHERE id='t'")
+                return {"submission_id": "s", "state": "PENDING"}
+            def worker_check(inner, _principal, _data):
+                inner.check_calls += 1
+                return {"receipt_id": "r", "source_revision": "head"}
+        service = BrokerService()
+        try:
+            broker = WorkerBroker(service, object(), self.root / "worker.sock")
+            result = broker._dispatch("submit", {
+                "summary": "done", "evidence": [{"label": "x", "details": "y"}],
+                "risks": [], "unresolved_questions": [], "follow_up_work": [],
+            })
+            self.assertEqual(result["_terminal"], "SUBMITTED")
+            with self.assertRaises(LedgerError) as raised:
+                broker._dispatch("check", {"command": "test"})
+            self.assertEqual(raised.exception.code, "ASSIGNMENT_ALREADY_SUBMITTED")
+            self.assertEqual(service.check_calls, 0)
+        finally:
+            service.con.close()
+
+    async def test_dynamic_submit_interrupts_provider_turn_as_successful_terminal(self):
+        class Stdin:
+            def __init__(inner): inner.lines = []
+            def write(inner, value): inner.lines.append(value)
+            async def drain(inner): return None
+        runtime = AppServerRuntime(repository_root=str(Path.cwd()))
+        stdin = Stdin()
+        runtime.process = type("Process", (), {"stdin": stdin})()
+        runtime.session_config["thread"] = {"subject_id": "assignment"}
+        runtime.worker_tools["assignment"] = lambda action, data: {
+            "submission_id": "submission", "state": "PENDING", "_terminal": "SUBMITTED"
+        }
+        runtime.turn_threads["turn"] = "thread"
+        request = AsyncMock(return_value={})
+        with patch.object(runtime, "_request", new=request):
+            await runtime._handle_dynamic_tool_call({
+                "id": 7, "params": {"threadId": "thread", "turnId": "turn", "tool": "taskledger_submit", "arguments": {}},
+            })
+            await asyncio.sleep(0)
+        self.assertEqual(runtime.turn_interrupt_reasons["turn"], "TASKLEDGER_SUBMISSION_RECORDED")
+        request.assert_awaited_with("turn/interrupt", {"threadId": "thread", "turnId": "turn"})
+        response = json.loads(stdin.lines[0])
+        self.assertTrue(response["result"]["success"])
+        self.assertIn('"_terminal":"SUBMITTED"', response["result"]["contentItems"][0]["text"])
+
+    async def test_repeated_dynamic_tool_calls_trip_turn_guard(self):
+        runtime = AppServerRuntime(repository_root=str(Path.cwd()))
+        runtime.turn_threads["turn"] = "thread"
+        request = AsyncMock(return_value={})
+        with patch.object(runtime, "_request", new=request):
+            for _ in range(runtime.MAX_REPEAT_DYNAMIC_TOOL_CALLS_PER_TURN):
+                runtime._admit_dynamic_tool_call("turn", "context", {})
+            with self.assertRaises(LedgerError) as raised:
+                runtime._admit_dynamic_tool_call("turn", "context", {})
+            await asyncio.sleep(0)
+        self.assertEqual(raised.exception.code, "REPEATED_TOOL_CALL")
+        self.assertEqual(runtime.turn_interrupt_reasons["turn"], "TASKLEDGER_REPEATED_TOOL_CALL_LIMIT")
+
+    async def test_total_dynamic_tool_limit_allows_limit_and_rejects_next(self):
+        runtime = AppServerRuntime(repository_root=str(Path.cwd()))
+        runtime.turn_threads["turn"] = "thread"
+        request = AsyncMock(return_value={})
+        with patch.object(runtime, "_request", new=request):
+            for number in range(runtime.MAX_DYNAMIC_TOOL_CALLS_PER_TURN):
+                runtime._admit_dynamic_tool_call("turn", "context", {"attempt": number})
+            self.assertNotIn("turn", runtime.turn_interrupt_reasons)
+            with self.assertRaises(LedgerError) as raised:
+                runtime._admit_dynamic_tool_call("turn", "context", {"attempt": "overflow"})
+            await asyncio.sleep(0)
+        self.assertEqual(raised.exception.code, "TURN_TOOL_LIMIT")
+        self.assertEqual(runtime.turn_interrupt_reasons["turn"], "TASKLEDGER_DYNAMIC_TOOL_CALL_LIMIT")
+        request.assert_awaited_once_with("turn/interrupt", {"threadId": "thread", "turnId": "turn"})
+
+    async def test_dynamic_guard_total_limit_takes_precedence_and_interrupts_once(self):
+        runtime = AppServerRuntime(repository_root=str(Path.cwd()))
+        runtime.turn_threads["turn"] = "thread"
+        signature = "context:" + json.dumps({}, separators=(",", ":"), sort_keys=True)
+        runtime.turn_dynamic_tool_calls["turn"] = runtime.MAX_DYNAMIC_TOOL_CALLS_PER_TURN
+        runtime.turn_tool_signatures["turn"] = Counter({
+            signature: runtime.MAX_REPEAT_DYNAMIC_TOOL_CALLS_PER_TURN,
+        })
+        request = AsyncMock(return_value={})
+        with patch.object(runtime, "_request", new=request):
+            with self.assertRaises(LedgerError) as raised:
+                runtime._admit_dynamic_tool_call("turn", "context", {})
+            runtime._schedule_guard_interrupt("turn", "TASKLEDGER_REPEATED_TOOL_CALL_LIMIT")
+            await asyncio.sleep(0)
+        self.assertEqual(raised.exception.code, "TURN_TOOL_LIMIT")
+        self.assertEqual(runtime.turn_interrupt_reasons["turn"], "TASKLEDGER_DYNAMIC_TOOL_CALL_LIMIT")
+        request.assert_awaited_once()
+
+    async def test_failed_dynamic_tool_limit_interrupts_on_eighth_failure(self):
+        class Stdin:
+            def __init__(inner): inner.lines = []
+            def write(inner, value): inner.lines.append(value)
+            async def drain(inner): return None
+
+        runtime = AppServerRuntime(repository_root=str(Path.cwd()))
+        runtime.process = type("Process", (), {"stdin": Stdin()})()
+        runtime.session_config["thread"] = {"subject_id": "assignment"}
+        runtime.turn_threads["turn"] = "thread"
+        calls = []
+        def fail(_action, data):
+            calls.append(data["attempt"])
+            raise LedgerError("INVALID_REQUEST", "deliberate failure")
+        runtime.worker_tools["assignment"] = fail
+        request = AsyncMock(return_value={})
+        with patch.object(runtime, "_request", new=request):
+            for number in range(runtime.MAX_FAILED_DYNAMIC_TOOL_CALLS_PER_TURN - 1):
+                await runtime._handle_dynamic_tool_call({
+                    "id": number, "params": {"threadId": "thread", "turnId": "turn",
+                    "tool": "taskledger_context", "arguments": {"attempt": number}},
+                })
+            self.assertNotIn("turn", runtime.turn_interrupt_reasons)
+            await runtime._handle_dynamic_tool_call({
+                "id": 99, "params": {"threadId": "thread", "turnId": "turn",
+                "tool": "taskledger_context", "arguments": {"attempt": 99}},
+            })
+            await asyncio.sleep(0)
+        self.assertEqual(len(calls), runtime.MAX_FAILED_DYNAMIC_TOOL_CALLS_PER_TURN)
+        self.assertEqual(runtime.turn_interrupt_reasons["turn"], "TASKLEDGER_FAILED_TOOL_CALL_LIMIT")
+        request.assert_awaited_once_with("turn/interrupt", {"threadId": "thread", "turnId": "turn"})
+
+    async def test_terminal_latched_tool_call_does_not_dispatch_or_inflate_failures(self):
+        class Stdin:
+            def __init__(inner): inner.lines = []
+            def write(inner, value): inner.lines.append(value)
+            async def drain(inner): return None
+
+        runtime = AppServerRuntime(repository_root=str(Path.cwd()))
+        runtime.process = type("Process", (), {"stdin": Stdin()})()
+        runtime.session_config["thread"] = {"subject_id": "assignment"}
+        runtime.turn_threads["turn"] = "thread"
+        runtime.turn_interrupt_reasons["turn"] = "TASKLEDGER_SUBMISSION_RECORDED"
+        handler = Mock()
+        runtime.worker_tools["assignment"] = handler
+        await runtime._handle_dynamic_tool_call({
+            "id": 1, "params": {"threadId": "thread", "turnId": "turn",
+            "tool": "taskledger_context", "arguments": {}},
+        })
+        handler.assert_not_called()
+        self.assertEqual(runtime.turn_failed_dynamic_tool_calls["turn"], 0)
+        response = json.loads(runtime.process.stdin.lines[0])
+        self.assertEqual(json.loads(response["result"]["contentItems"][0]["text"])["error"]["code"], "TURN_TERMINAL")
+
+    async def test_command_limit_allows_limit_and_interrupts_on_next(self):
+        runtime = AppServerRuntime(repository_root=str(Path.cwd()))
+        runtime.turn_threads["turn"] = "thread"
+        request = AsyncMock(return_value={})
+        with patch.object(runtime, "_request", new=request):
+            for _ in range(runtime.MAX_COMMAND_EXECUTIONS_PER_TURN):
+                runtime._record_command_execution("turn")
+            self.assertNotIn("turn", runtime.turn_interrupt_reasons)
+            runtime._record_command_execution("turn")
+            await asyncio.sleep(0)
+        self.assertEqual(runtime.turn_interrupt_reasons["turn"], "TASKLEDGER_COMMAND_EXECUTION_LIMIT")
+        request.assert_awaited_once_with("turn/interrupt", {"threadId": "thread", "turnId": "turn"})
+
+    async def test_provider_token_guard_interrupts_one_runaway_turn(self):
+        runtime = AppServerRuntime(repository_root=str(Path.cwd()))
+        runtime.turn_threads["turn"] = "thread"
+        runtime.turn_usage_before["turn"] = Usage(100, 50, 10)
+        runtime.thread_usage["thread"] = Usage(
+            100 + runtime.MAX_PROVIDER_TOKENS_PER_TURN, 50, 11,
+        )
+        request = AsyncMock(return_value={})
+        with patch.object(runtime, "_request", new=request):
+            runtime._enforce_provider_token_guard("thread", "turn")
+            await asyncio.sleep(0)
+        self.assertEqual(runtime.turn_interrupt_reasons["turn"], "TASKLEDGER_PROVIDER_TOKEN_LIMIT")
+        request.assert_awaited_with("turn/interrupt", {"threadId": "thread", "turnId": "turn"})
+
+    async def test_provider_token_guard_allows_exact_limit_and_stops_limit_plus_one(self):
+        runtime = AppServerRuntime(repository_root=str(Path.cwd()))
+        runtime.turn_threads["turn"] = "thread"
+        runtime.turn_usage_before["turn"] = Usage(100, 50, 10)
+        request = AsyncMock(return_value={})
+        with patch.object(runtime, "_request", new=request):
+            runtime.thread_usage["thread"] = Usage(
+                100 + runtime.MAX_PROVIDER_TOKENS_PER_TURN, 50, 10,
+            )
+            runtime._enforce_provider_token_guard("thread", "turn")
+            self.assertNotIn("turn", runtime.turn_interrupt_reasons)
+            runtime.thread_usage["thread"] = Usage(
+                101 + runtime.MAX_PROVIDER_TOKENS_PER_TURN, 50, 10,
+            )
+            runtime._enforce_provider_token_guard("thread", "turn")
+            await asyncio.sleep(0)
+        self.assertEqual(runtime.turn_interrupt_reasons["turn"], "TASKLEDGER_PROVIDER_TOKEN_LIMIT")
+        request.assert_awaited_once_with("turn/interrupt", {"threadId": "thread", "turnId": "turn"})
+
+    async def test_submission_guard_interruption_completes_provider_turn(self):
+        runtime = AppServerRuntime(repository_root=str(Path.cwd()))
+        handle = RuntimeTurnHandle("thread", "turn")
+        runtime.turn_interrupt_reasons["turn"] = "TASKLEDGER_SUBMISSION_RECORDED"
+        runtime.turn_usage_events["turn"] = asyncio.Event();runtime.turn_usage_events["turn"].set()
+        runtime.turn_waiters["turn"] = asyncio.get_running_loop().create_future()
+        await runtime._finish_turn_after_usage(handle, {"id": "turn", "status": "interrupted"})
+        result = await runtime.wait_turn(handle)
+        self.assertEqual(result.handle, handle)
+
+    async def test_supervisor_classifies_provider_turn_guard_as_budget_pause(self):
+        ledger = FakeLedger()
+        runtime = FakeRuntime(
+            worker_turns=[TurnScript(failure="TASKLEDGER_PROVIDER_TOKEN_LIMIT")], reviewer_turns=[],
+        )
+        run = self.journal.create_run("p", mode="ASSIGNMENT", config={})
+        result = await Supervisor(
+            project_id="p", run_id=run, ledger=ledger, runtime=runtime,
+            journal=self.journal, config=SupervisorConfig(),
+        ).run_assignment("a1")
+        self.assertEqual(result.pause_reason.value, "BUDGET_EXHAUSTED")
+        self.assertEqual(runtime.turns_started, 1)
 
     @unittest.skipUnless(
         os.environ.get("TASKLEDGER_ZERO_MODEL_CODEX") == "1",

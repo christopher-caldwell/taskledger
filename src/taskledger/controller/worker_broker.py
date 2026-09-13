@@ -62,7 +62,7 @@ class WorkerBroker:
 
     def _dispatch(self, action: str, data: dict[str, Any], *, service=None) -> dict[str, Any]:
         service = service or self.service
-        project, _ = service.worker_assignment(self.principal)
+        project, assignment = service.worker_assignment(self.principal)
         methods = {
             "context": lambda: service.worker_context(self.principal, data),
             "check": lambda: service.worker_check(self.principal, data),
@@ -75,7 +75,97 @@ class WorkerBroker:
         }
         if action not in methods:
             raise LedgerError("AUTHORIZATION_DENIED", "Worker broker action is not allowed.")
-        return methods[action]()
+        if hasattr(service, "con") and "task_id" in assignment.keys():
+            task = service.con.execute("SELECT state FROM tasks WHERE id=?", (assignment["task_id"],)).fetchone()
+            if task and task["state"] == "SUBMITTED":
+                raise LedgerError(
+                    "ASSIGNMENT_ALREADY_SUBMITTED",
+                    "This assignment already has a durable submission. Stop immediately; do not run another command or worker operation.",
+                    details={"terminal": True, "retryable": False, "allowed_actions": []},
+                )
+        if action == "submit":
+            self._validate_submit(data)
+        elif action == "checkpoint":
+            self._validate_checkpoint(data)
+            progress = service.checkpoint_progress(assignment)
+            if progress.get("pending"):
+                raise LedgerError(
+                    "CHECKPOINT_ALREADY_PENDING", "A checkpoint is already awaiting review. Stop this turn.",
+                    details={"terminal": True, "retryable": False, "allowed_actions": []},
+                )
+            if not progress.get("next"):
+                raise LedgerError(
+                    "CHECKPOINT_NOT_AVAILABLE",
+                    "No checkpoint is available for this assignment. Use the exact required checks and submit when complete.",
+                    details={"terminal": False, "retryable": False, "allowed_actions": ["check", "submit"]},
+                )
+        result = methods[action]()
+        if action == "submit" and result.get("state") in {"PENDING", "BLOCKED"}:
+            return {
+                **result,
+                "_terminal": "SUBMITTED",
+                "instruction": "Submission recorded durably. Stop immediately; do not run another command or worker operation.",
+            }
+        if action == "check":
+            return {
+                **result,
+                "evidence_commit_oid": result.get("source_revision"),
+                "worktree_clean_after_evidence_commit_is_expected": True,
+                "instruction": "Use this receipt_id in submission evidence. Do not rerun an already successful current check.",
+            }
+        return result
+
+    @staticmethod
+    def _fields(value: Any, path: str, *, allowed: set[str], required: set[str]) -> None:
+        if not isinstance(value, dict):
+            raise LedgerError(
+                "INVALID_REQUEST", f"{path} must be an object.",
+                details={"field_path": path, "expected_fields": sorted(required), "retryable": True},
+            )
+        missing, extra = sorted(required - set(value)), sorted(set(value) - allowed)
+        if missing or extra:
+            field = f"{path}.{missing[0]}" if missing else f"{path}.{extra[0]}"
+            raise LedgerError(
+                "INVALID_REQUEST", f"Invalid worker tool payload at {field}.",
+                details={
+                    "field_path": field, "missing_fields": missing, "unexpected_fields": extra,
+                    "expected_fields": sorted(required), "retryable": True,
+                    "instruction": "Correct only the named fields and retry once.",
+                },
+            )
+
+    @classmethod
+    def _validate_checkpoint(cls, data: dict[str, Any]) -> None:
+        cls._fields(data, "checkpoint", allowed={"summary", "evidence"}, required={"summary", "evidence"})
+        if isinstance(data.get("evidence"), list):
+            for index, item in enumerate(data["evidence"]):
+                cls._fields(
+                    item, f"checkpoint.evidence[{index}]",
+                    allowed={"label", "details", "receipt_id"}, required={"label", "details"},
+                )
+
+    @classmethod
+    def _validate_submit(cls, data: dict[str, Any]) -> None:
+        cls._fields(
+            data, "submit",
+            allowed={"summary", "evidence", "risks", "unresolved_questions", "follow_up_work"},
+            required={"summary", "evidence", "risks", "unresolved_questions", "follow_up_work"},
+        )
+        collections = (
+            ("evidence", {"label", "details", "command", "exit_code", "artifact_path", "receipt_id", "artifact_id"}, {"label", "details"}),
+            ("risks", {"description", "blocking", "blocker_category"}, {"description", "blocking", "blocker_category"}),
+            ("unresolved_questions", {"body", "blocking", "blocker_category"}, {"body", "blocking", "blocker_category"}),
+            ("follow_up_work", {"body"}, {"body"}),
+        )
+        for name, allowed, required in collections:
+            values = data.get(name)
+            if not isinstance(values, list):
+                raise LedgerError(
+                    "INVALID_REQUEST", f"submit.{name} must be an array.",
+                    details={"field_path": f"submit.{name}", "retryable": True},
+                )
+            for index, item in enumerate(values):
+                cls._fields(item, f"submit.{name}[{index}]", allowed=allowed, required=required)
 
     def dispatch(self, action: str, data: dict[str, Any]) -> dict[str, Any]:
         if not hasattr(self.service, "home") or not hasattr(self.service, "con"):

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import sqlite3
 from pathlib import Path
 from typing import Iterator
 
 from .core import LedgerError, now
+
+
+_savepoints = itertools.count(1)
 
 
 SCHEMA = """
@@ -128,12 +132,13 @@ CREATE TABLE IF NOT EXISTS controller_events(
  small_attributes_json TEXT NOT NULL DEFAULT '{}',occurred_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS controller_events_run ON controller_events(run_id,sequence);
 CREATE TABLE IF NOT EXISTS project_preparations(
- id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),planning_run_id TEXT NOT NULL REFERENCES controller_runs(id),
+ id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),planning_run_id TEXT REFERENCES controller_runs(id),
  task_creator_turn_id TEXT REFERENCES controller_turns(id),starting_oid TEXT NOT NULL,canonical_branch TEXT NOT NULL,
  specification_id TEXT NOT NULL REFERENCES specifications(id),specification_hash TEXT NOT NULL,
  profile_hashes_json TEXT NOT NULL,run_configuration_json TEXT NOT NULL,run_configuration_hash TEXT NOT NULL,
  proposal_json TEXT,proposal_hash TEXT,state TEXT NOT NULL CHECK(state IN ('PLANNING','AWAITING_APPROVAL','APPROVED','SUPERSEDED','FAILED')),
- failure_reason TEXT,execution_run_id TEXT REFERENCES controller_runs(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL,approved_at TEXT);
+ failure_reason TEXT,execution_run_id TEXT REFERENCES controller_runs(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL,approved_at TEXT,
+ origin TEXT NOT NULL DEFAULT 'TASK_CREATOR' CHECK(origin IN ('TASK_CREATOR','INVOKING_MODEL')));
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_project_preparation ON project_preparations(project_id) WHERE state IN ('PLANNING','AWAITING_APPROVAL');
 CREATE TABLE IF NOT EXISTS preparation_run_groups(
  id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),created_at TEXT NOT NULL);
@@ -145,7 +150,7 @@ CREATE TABLE IF NOT EXISTS preparation_attempts(
 CREATE INDEX IF NOT EXISTS preparation_attempts_group ON preparation_attempts(run_group_id,sequence);
 """
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 
 
 def connect_existing(home: Path) -> sqlite3.Connection:
@@ -212,6 +217,8 @@ def connect(home: Path) -> sqlite3.Connection:
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(9,?)", (now(),))
         _migrate_preparation_v10(con)
         con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(10,?)", (now(),))
+        _migrate_preparation_v11(con)
+        con.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(11,?)", (now(),))
         return con
     except (OSError, sqlite3.Error) as exc:
         if con is not None:
@@ -400,8 +407,58 @@ def _migrate_preparation_v10(con: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_preparation_v11(con: sqlite3.Connection) -> None:
+    """Allow an invoking model to commit a preparation without fabricating a controller run."""
+    columns = {row[1] for row in con.execute("PRAGMA table_info(project_preparations)")}
+    if "origin" in columns:
+        return
+    con.execute("PRAGMA foreign_keys=OFF")
+    try:
+        con.executescript("""
+            BEGIN IMMEDIATE;
+            CREATE TABLE project_preparations_v11(
+             id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),planning_run_id TEXT REFERENCES controller_runs(id),
+             task_creator_turn_id TEXT REFERENCES controller_turns(id),starting_oid TEXT NOT NULL,canonical_branch TEXT NOT NULL,
+             specification_id TEXT NOT NULL REFERENCES specifications(id),specification_hash TEXT NOT NULL,
+             profile_hashes_json TEXT NOT NULL,run_configuration_json TEXT NOT NULL,run_configuration_hash TEXT NOT NULL,
+             proposal_json TEXT,proposal_hash TEXT,state TEXT NOT NULL CHECK(state IN ('PLANNING','AWAITING_APPROVAL','APPROVED','SUPERSEDED','FAILED')),
+             failure_reason TEXT,execution_run_id TEXT REFERENCES controller_runs(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL,approved_at TEXT,
+             origin TEXT NOT NULL DEFAULT 'TASK_CREATOR' CHECK(origin IN ('TASK_CREATOR','INVOKING_MODEL')));
+            INSERT INTO project_preparations_v11(
+             id,project_id,planning_run_id,task_creator_turn_id,starting_oid,canonical_branch,
+             specification_id,specification_hash,profile_hashes_json,run_configuration_json,run_configuration_hash,
+             proposal_json,proposal_hash,state,failure_reason,execution_run_id,created_at,updated_at,approved_at,origin)
+            SELECT id,project_id,planning_run_id,task_creator_turn_id,starting_oid,canonical_branch,
+             specification_id,specification_hash,profile_hashes_json,run_configuration_json,run_configuration_hash,
+             proposal_json,proposal_hash,state,failure_reason,execution_run_id,created_at,updated_at,approved_at,'TASK_CREATOR'
+            FROM project_preparations;
+            DROP TABLE project_preparations;
+            ALTER TABLE project_preparations_v11 RENAME TO project_preparations;
+            CREATE UNIQUE INDEX one_open_project_preparation ON project_preparations(project_id) WHERE state IN ('PLANNING','AWAITING_APPROVAL');
+            COMMIT;
+        """)
+    except Exception:
+        if con.in_transaction:
+            con.rollback()
+        raise
+    finally:
+        con.execute("PRAGMA foreign_keys=ON")
+
+
 @contextlib.contextmanager
 def transaction(con: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    if con.in_transaction:
+        name = f"taskledger_nested_{next(_savepoints)}"
+        con.execute(f"SAVEPOINT {name}")
+        try:
+            yield con
+        except Exception:
+            con.execute(f"ROLLBACK TO {name}")
+            con.execute(f"RELEASE {name}")
+            raise
+        else:
+            con.execute(f"RELEASE {name}")
+        return
     con.execute("BEGIN IMMEDIATE")
     try:
         yield con

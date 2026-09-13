@@ -1,9 +1,23 @@
 # Taskledger command registry
 
+## Human operator commands
+
+These commands use prompts and human-readable output rather than JSON envelopes:
+
+- `taskledger bootstrap`
+- `taskledger bootstrap --confirm-branch <exact-name> --commit-setup` (model-safe setup)
+- `taskledger prepare --spec <repository-relative-or-absolute-path>`
+- `taskledger start`
+- `taskledger ui`
+
+`start` and `ui` are alternative foreground execution frontends. The remaining
+commands in this registry retain the deterministic machine-oriented JSON
+protocol.
+
 This table is the exhaustive public command registry. Taskledger has no
 interactive `--help` contract; callers must not probe unlisted commands or flags.
 
-All commands emit the stable JSON envelope in Technical Specification §9. Unknown JSON fields are rejected by the request parser. Commands except first-time `project init` and `project prepare` require a token; `project prepare` creates or loads the repository-local orchestrator credential. Other orchestrator commands resolve `--project`, current repository, then the credential file, while worker commands resolve only from the worker credential.
+All machine commands emit the stable JSON envelope in Technical Specification §9. Unknown JSON fields are rejected by the request parser. Commands except first-time `project init` and `project prepare` require a token; `project prepare` creates or loads the repository-local orchestrator credential. Other orchestrator commands resolve `--project`, current repository, then the credential file, while worker commands resolve only from the worker credential.
 
 | Command | Role | Request body | Gate |
 |---|---|---|---|
@@ -16,6 +30,7 @@ All commands emit the stable JSON envelope in Technical Specification §9. Unkno
 | `spec register`, `spec check`, `spec review` | orchestrator | path / `{}` / review decision | review maintenance allowed during gates |
 | `requirement create`, `update`, `retire`, `supersede`, `list`, `verify`, `invalidate` | orchestrator | complete definition / replacement / filter / evidence | supersession preserves completed history; verification requires current valid plan |
 | `task create`, `update`, `cancel`, `reopen`, `list`, `integrate` | orchestrator | complete definition / action / filter | integration requires accepted exact submission |
+| `plan preview`, `commit` | orchestrator | specification + complete proposal + optional limits/preflight; commit also requires exact approved plan hash | preview is read-only; commit stores a startable invoking-model preparation without launching agents or execution |
 | `plan apply`, `validate` | orchestrator | new-item batch / `{}` | apply is transactional; validation remains explicit |
 | `assignment create`, `revoke`, `rotate-token` | orchestrator | task+worker profile+optional mode/checkpoints / assignment+reason / assignment | lightweight mode retains one worker through approved vertical checkpoints |
 | `checkpoint review-context`, `verify` | orchestrator | checkpoint / criteria+decision | intermediate approval binds an immutable commit and never integrates or accepts final work |

@@ -24,4 +24,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-taskledger = ["ui/*.tcss"]
+taskledger = ["ui/*.tcss", "assets/*.toml"]

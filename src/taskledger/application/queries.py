@@ -123,6 +123,10 @@ class ConsoleQueries:
             run_values["pause_requested"] = self.pause_requested(run_values["id"])
         events = sorted([record(x) for x in (*audit, *controller)], key=lambda x: (x.get("created_at", ""), x.get("source", ""), x.get("sequence", 0)), reverse=True)[:200]
         project_values = dict(current_project)
+        preparation_values = dict(prep) if prep else None
+        if preparation_values is not None:
+            from taskledger.operator import approval_matches
+            preparation_values["operator_approved"] = approval_matches(self.service, current_project, prep)
         owned_running = bool(run_values and run_values["state"] == "RUNNING" and run_values["owned_by_host"])
         actions = [
             {"code": "PREPARE", "enabled": not bool(run_values and run_values["state"] == "RUNNING"),
@@ -146,7 +150,7 @@ class ConsoleQueries:
         if prep and prep["state"] == "AWAITING_APPROVAL":
             interventions.append(record(id=prep["id"], kind="PREPARATION_APPROVAL", description="Exact proposal approval required",
                 state=prep["state"], scope_id=prep["id"], created_at=prep["created_at"]))
-        return ConsoleSnapshot(1, SnapshotVersion(self.epoch, self.revision), now(), record(**project_values), record(prep) if prep else None, record(**run_values) if run_values else None, tuple(record(x) for x in tasks), tuple(record(x) for x in sessions), record(**usage_values), tuple(interventions), tuple(events), operation)
+        return ConsoleSnapshot(1, SnapshotVersion(self.epoch, self.revision), now(), record(**project_values), record(**preparation_values) if preparation_values else None, record(**run_values) if run_values else None, tuple(record(x) for x in tasks), tuple(record(x) for x in sessions), record(**usage_values), tuple(interventions), tuple(events), operation)
 
     def task_detail(self, task_id: str) -> Record:
         con = self.service.con

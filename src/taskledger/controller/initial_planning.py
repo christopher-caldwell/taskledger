@@ -333,19 +333,19 @@ class InitialPlanner:
         raise LedgerError("INVALID_REQUEST", "Task Creator did not produce a valid initial proposal within its turn budget.")
 
 
-def store_planning_preparation(service, project, *, run_id: str, starting_oid: str, spec_id: str, spec_hash: str, profile_hashes: dict[str, Any], config: PreparationConfig) -> str:
+def store_planning_preparation(service, project, *, run_id: str | None, starting_oid: str, spec_id: str, spec_hash: str, profile_hashes: dict[str, Any], config: PreparationConfig, origin: str = "TASK_CREATOR") -> str:
     preparation_id, stamp = new_id(), now()
     config_json = canonical(config.as_dict())
     with transaction(service.con):
         service.con.execute(
-            "INSERT INTO project_preparations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO project_preparations(id,project_id,planning_run_id,task_creator_turn_id,starting_oid,canonical_branch,specification_id,specification_hash,profile_hashes_json,run_configuration_json,run_configuration_hash,proposal_json,proposal_hash,state,failure_reason,execution_run_id,created_at,updated_at,approved_at,origin) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (preparation_id, project["id"], run_id, None, starting_oid, project["canonical_branch"], spec_id, spec_hash,
-             canonical(profile_hashes), config_json, sha256(config_json), None, None, "PLANNING", None, None, stamp, stamp, None),
+             canonical(profile_hashes), config_json, sha256(config_json), None, None, "PLANNING", None, None, stamp, stamp, None, origin),
         )
     return preparation_id
 
 
-def finish_preparation(service, preparation_id: str, proposal: dict[str, Any], turn_id: str) -> dict[str, Any]:
+def finish_preparation(service, preparation_id: str, proposal: dict[str, Any], turn_id: str | None) -> dict[str, Any]:
     digest = "sha256:" + sha256(canonical(proposal))
     state = "FAILED" if proposal["ambiguities"] else "AWAITING_APPROVAL"
     reason = "UNRESOLVED_AMBIGUITIES" if proposal["ambiguities"] else None

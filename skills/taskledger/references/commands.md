@@ -1,11 +1,20 @@
 # Taskledger command reference
 
-All commands return one JSON envelope on stdout. Success is `{"ok":true,"command":"...","data":...,"warnings":[]}`. Failure is `{"ok":false,"command":"...","error":...}`.
+Machine commands return one JSON envelope on stdout. Success is `{"ok":true,"command":"...","data":...,"warnings":[]}`. Failure is `{"ok":false,"command":"...","error":...}`.
 
 This file is the exhaustive public command and input registry. The CLI does not
 provide an interactive help surface; do not probe unlisted commands or flags.
 
 `taskledger --version` returns the installed version in the same JSON envelope.
+
+Human commands use prompts and plain text:
+
+- `taskledger bootstrap`
+- `taskledger prepare --spec <repository-path>`
+- `taskledger start`
+- `taskledger ui`
+
+Model-safe bootstrap is `taskledger bootstrap --confirm-branch <exact-name> --commit-setup`. It requires a clean repository, installs only missing setup, commits only generated setup paths as `Configure Taskledger`, and never overwrites a profile. This mode is intended for explicit `$taskledger` LOAD; ordinary human bootstrap remains interactive.
 
 Use `taskledger <resource> <action> --input -` and supply exactly one JSON object on stdin. Read-only commands accept `{}` unless a filter is shown.
 
@@ -40,6 +49,14 @@ Use `taskledger <resource> <action> --input -` and supply exactly one JSON objec
 - `task list`: `{"filter":"eligible"}`; filters are `all`, `eligible`, `active`, `submitted`, `accepted`, `completed`, `blocked`, `cancelled`.
 - `plan apply`: transactionally creates a new plan batch using local `ref` values. Requirements use the `requirement create` fields plus `ref`. Tasks use `ref`, the task-definition fields, `requirement_refs`, and `dependency_refs`; optional `requirement_ids` and `dependency_task_ids` may point to existing project items. Local refs are resolved to returned UUID mappings. This command creates only new items and does not validate the plan.
 - `plan validate`: `{}`.
+- `plan preview`: accepts `{"spec_path":"spec.md","proposal":<proposal>,"limits":<optional-project-prepare-limits>,"preflight":{"local_inputs":[],"services":[]}}`. The proposal contains exactly `requirements`, `tasks`, `execution_policy`, `assumptions`, and `ambiguities` using the shapes below. Preview normalizes and validates it, resolves the exact Git/spec/profile/configuration envelope, and returns `rendered_plan`, `normalized_proposal`, `proposal_hash`, and `plan_hash` without changing specifications, tasks, preparations, sessions, or controller runs. A valid but ambiguous proposal returns `NEEDS_REVISION` and cannot be committed.
+- `plan commit`: accepts the identical preview request plus `"approve_plan_hash":"sha256:..."`. It recomputes the entire envelope and rejects drift before mutation. On success it registers or activates the exact specification revision, stores an `INVOKING_MODEL` preparation, records its exact operator approval, returns `READY`, and does not materialize tasks or start a controller. Active assignments or a running controller reject this path.
+
+The model proposal shapes are:
+
+- Requirement: `{"ref":"R1","statement":"Observable behavior","details":"Independent detail","implementation_required":true,"sources":[{"locator":"Section X","excerpt":null}]}`.
+- Task: `{"ref":"T1","objective":"Bounded outcome","implementation_scope":"Owned files and behavior","acceptance_criteria":["Observable criterion"],"required_checks":["python3 -m unittest"],"requirement_refs":["R1"],"dependency_refs":[]}`.
+- Execution policy: `{"task_ref":"T1","wave":1,"worker_profile":"routine","parallel_safe":true,"write_surfaces":["src/example.py"]}`.
 
 ## Assignment and worker
 

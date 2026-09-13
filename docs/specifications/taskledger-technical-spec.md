@@ -758,6 +758,12 @@ aggregate Task Creator turns. `controller_final_reviews` binds each bounded
 integrated review to the exact canonical OID and plan fingerprint so a stale
 result cannot complete the project.
 
+`project_preparations.origin` distinguishes `TASK_CREATOR` from
+`INVOKING_MODEL`. Invoking-model preparations have no planning controller run or
+Task Creator turn, so `planning_run_id` is nullable. Every other immutable
+baseline, profile, configuration, proposal, and start-time validation remains
+identical.
+
 ---
 
 ## 8. Authentication and Authorization
@@ -1002,6 +1008,20 @@ preflight, and the stored proposal fingerprint. Any mismatch returns
 `PREPARATION_STALE`. It materializes the approved plan, validates it, resolves
 temporary task refs, creates the existing post-approval project controller run,
 links that run to the preparation, and remains in the foreground.
+
+#### `taskledger plan preview` and `taskledger plan commit`
+
+`plan preview` accepts a repository-relative specification, the complete Task
+Creator proposal shape, and optional preparation limits and preflight inputs.
+It normalizes and structurally validates the proposal and returns a hash over
+the proposal, specification bytes, canonical Git baseline, resolved profiles,
+and run configuration. It performs no durable planning mutation.
+
+`plan commit` accepts the identical request plus the exact approved plan hash.
+It recomputes every input before mutation, rejects ambiguity or drift, activates
+the approved exact specification revision, and stores an `INVOKING_MODEL`
+preparation with no controller run or session. It records the approval for the
+human `start` and UI adapters but does not materialize tasks or launch execution.
 
 ### 10.1A Controller commands
 
@@ -2284,6 +2304,24 @@ An assignment supervisor repeats this state machine after every worker turn:
 
 A routine assignment revoked by the existing rejection threshold is never resumed. The target is rerouted to complex, a new assignment is created through the existing service, and a new worker thread owns that attempt.
 
+Worker freedom inside one provider turn is bounded independently from the outer
+turn count. The app-server runtime interrupts a worker turn after 24 dynamic
+Taskledger calls, more than three identical calls, eight failed Taskledger
+calls, 32 shell-command completions, or 750,000 provider input-plus-output
+tokens. These are high-water circuit breakers, not expected operating targets.
+A provider-token interruption pauses for budget exhaustion; an operation-loop
+interruption pauses as stalled. The durable reason is recorded on the controller
+run.
+
+`worker submit` is terminal within its provider turn. The broker returns an
+explicit terminal marker, rejects later worker operations from the durable
+`SUBMITTED` task state, and the runtime interrupts the provider turn after it
+delivers the successful tool response. That intentional interruption is
+classified as a completed worker turn so the scheduler proceeds directly to
+review. Checkpoint calls are rejected before service mutation when no next
+checkpoint exists or one is already pending. Broker validation errors include
+the exact nested field path and one bounded correction instruction.
+
 The scheduler has one iterative loop. Final-review defects materialize validated
 correction targets and return to that same loop; repeated correction cycles do
 not recursively enter another scheduler. A project-level aggregate Task Creator
@@ -2574,7 +2612,7 @@ The implementation must not include:
 - arbitrary plugin systems; or
 - automatic conflict resolution.
 
-The bounded Task Creator may use semantic model judgment during an explicit planning job. After approval, the Python controller launches bounded Codex jobs and operates the workflow through existing Taskledger services.
+The bounded Task Creator or an explicitly invoked `$taskledger` Codex task may use semantic model judgment during a planning job. After a separately started execution, the Python controller launches bounded Codex jobs and operates the workflow through existing Taskledger services.
 
 ---
 

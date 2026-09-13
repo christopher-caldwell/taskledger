@@ -416,7 +416,7 @@ class HostIntegrationTests(unittest.TestCase):
             opened.close()
             con = sqlite3.connect(fixture.home / "taskledger.sqlite3")
             after = con.execute("SELECT group_concat(version, ',') FROM schema_migrations ORDER BY version").fetchone()[0]
-            con.execute("DELETE FROM schema_migrations WHERE version=10")
+            con.execute("DELETE FROM schema_migrations WHERE version=11")
             con.commit(); con.close()
             self.assertEqual(before, after)
             with self.assertRaisesRegex(Exception, "explicit schema upgrade"):

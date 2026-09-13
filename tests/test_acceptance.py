@@ -104,30 +104,26 @@ class TaskledgerAcceptance(unittest.TestCase):
         self.assertEqual(report["identity"]["run_id"], run_id)
         self.assertEqual(report["quality"]["provider_detail"]["status"], "UNAVAILABLE")
 
-    def test_skill_declares_context_free_worker_spawn_contract(self):
+    def test_skill_declares_guarded_model_preparation_contract(self):
         skill=(ROOT/"skills"/"taskledger"/"SKILL.md").read_text()
+        planning=(ROOT/"skills"/"taskledger"/"references"/"planning.md").read_text()
         self.assertIn("foreground Python controller",skill)
-        self.assertIn("controller run-project",skill)
-        self.assertIn("Prefer `routine`",skill)
-        self.assertIn("Classify parallel safety separately",skill)
-        self.assertIn("prospective write set",skill)
-        self.assertIn("handle a new request directly by default",skill)
-        self.assertIn("second rejection",skill)
-        self.assertIn("`required_checks`",skill)
-        self.assertIn("Concrete routing examples",skill)
-        self.assertIn("small complex foundation followed by routine rollout tasks",skill)
-        self.assertIn("complete project suite",skill)
-        self.assertIn("registered specifications as frozen",skill)
-        self.assertIn("primary purpose is to re-audit already integrated work",skill)
-        self.assertIn("exhaustive public command and input registry",skill)
-        self.assertIn("safe worktree prerequisites",skill)
-        self.assertIn("`project cleanup`",skill)
-        self.assertIn("retains every assignment branch and commit",skill)
-        self.assertIn("Retained workers and vertical checkpoints",skill)
-        self.assertIn("`project wait`",skill)
-        self.assertIn("`evidence export`",skill)
-        self.assertIn("correction packet",skill)
-        self.assertNotIn("primary orchestrator remains responsible",skill)
+        self.assertIn("explicitly invokes `$taskledger`",skill)
+        self.assertIn("## 1. LOAD",skill)
+        self.assertIn("## 2. PLAN",skill)
+        self.assertIn("## 3. APPROVAL",skill)
+        self.assertIn("## 4. COMMIT",skill)
+        self.assertIn("taskledger plan preview",skill.replace("`", ""))
+        self.assertIn("taskledger start",skill)
+        self.assertIn("taskledger ui",skill)
+        self.assertIn("A requested change is not approval",skill)
+        self.assertIn("do not launch the Task Creator",skill)
+        self.assertIn("Prefer `routine`",planning)
+        self.assertIn("Classify worker complexity separately from parallel safety",planning)
+        self.assertIn("prospective write surfaces",planning)
+        self.assertIn("small complex foundation followed by routine rollout tasks",planning)
+        self.assertIn("complete project suite",planning)
+        self.assertIn("primary purpose is to re-audit already integrated work",planning)
 
         installation=(ROOT/"docs"/"AI_ORCHESTRATED_TOOL_INSTALLATION.md").read_text()
         self.assertIn("Installation is a set of contracts",installation)
@@ -184,7 +180,10 @@ class TaskledgerAcceptance(unittest.TestCase):
 
         migrated=connect(prior_schema_home)
         self.assertEqual(migrated.execute("SELECT worker_profile FROM assignments").fetchone()[0],"complex")
-        self.assertEqual([row[0] for row in migrated.execute("SELECT version FROM schema_migrations ORDER BY version")],[1,2,3,4,5,6,7,8,9,10])
+        self.assertEqual([row[0] for row in migrated.execute("SELECT version FROM schema_migrations ORDER BY version")],[1,2,3,4,5,6,7,8,9,10,11])
+        preparation_columns={row[1]:row for row in migrated.execute("PRAGMA table_info(project_preparations)")}
+        self.assertEqual(preparation_columns["planning_run_id"][3],0)
+        self.assertIn("TASK_CREATOR",preparation_columns["origin"][4])
         migrated.close()
 
     def test_task_create_confirms_success_after_post_commit_error(self):
@@ -514,6 +513,27 @@ class TaskledgerAcceptance(unittest.TestCase):
         _,reviewer_receipt=self.command("submission","check",{"submission_id":submitted["data"]["submission_id"],"command":required,"timeout_seconds":30},project=project)
         self.assertEqual(reviewer_receipt["data"]["role"],"REVIEWER")
         self.assertEqual(self.command("submission","verify",verification,project=project)[0],0)
+
+    def test_worker_python_check_does_not_dirty_evidence_revision_with_bytecode(self):
+        project=self.init()
+        _,spec=self.command("spec","register",{"relative_path":"spec.md"},project=project)
+        _,req=self.command("requirement","create",{
+            "statement":"Importable module","details":"The module imports cleanly","implementation_required":True,
+            "sources":[{"specification_id":spec["data"]["specification_id"],"locator":"1"}],
+        },project=project)
+        required="python3 -c \"import module\""
+        _,task=self.command("task","create",{
+            "objective":"Add module","implementation_scope":"module.py","acceptance_criteria":["Module imports"],
+            "required_checks":[required],"requirement_ids":[req["data"]["requirement_id"]],"dependency_task_ids":[],
+        },project=project)
+        self.command("plan","validate",{},project=project)
+        _,assignment=self.command("assignment","create",{"task_id":task["data"]["task_id"],"worker_profile":"routine"},project=project)
+        worktree=Path(assignment["data"]["worktree_path"]);(worktree/"module.py").write_text("VALUE = 1\n")
+        _,receipt=self.command("worker","check",{"command":required,"timeout_seconds":30},token=self.assignment_token(assignment))
+        self.assertEqual(receipt["data"]["status"],"SUCCEEDED")
+        self.assertFalse(receipt["data"]["source_changed_during_execution"])
+        self.assertFalse((worktree/"__pycache__").exists())
+        self.assertEqual(subprocess.run(["git","-C",str(worktree),"status","--porcelain"],text=True,capture_output=True,check=True).stdout,"")
 
     def test_correction_packets_are_assignment_scoped(self):
         project=self.init();_,first_task=self.setup_task(project)

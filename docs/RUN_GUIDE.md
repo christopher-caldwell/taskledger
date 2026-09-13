@@ -131,6 +131,65 @@ in managed repositories; update those separately as described below.
 
 ## Quick start
 
+For the normal operator workflow, run these commands from the repository:
+
+```sh
+taskledger bootstrap
+git add .gitignore .codex/agents
+git commit -m "Configure Taskledger"
+taskledger prepare --spec ./specs/init.md
+taskledger start
+```
+
+`bootstrap` confirms the current symbolic branch, ignores Taskledger's local
+state, installs any missing default profiles without overwriting customized
+profiles, and initializes the project. `prepare` uses the standard Task Creator
+and controller defaults, presents the proposal for review, and remembers an
+approval of the exact preparation ID and proposal hash. `start` passes that
+identity to the existing authoritative start validation and runs the controller
+in the foreground.
+
+Use `taskledger ui` instead of `taskledger start` for the Textual frontend. They
+are alternative in-process execution frontends; the UI does not attach to a
+separately running terminal controller.
+
+The detailed JSON protocol described below remains available for automation,
+models, debugging, and advanced configuration.
+
+### Explicit `$taskledger` preparation
+
+Explicit skill invocation is a separate preparation path. The current Codex
+task inspects the repository, creates the complete plan, and calls the read-only
+`plan preview` protocol. It shows the deterministic rendered plan and exact
+plan hash, asks `Approve this plan?`, and ends its turn.
+
+Only an unambiguous approval of that current hash permits `plan commit`. Commit
+rechecks the specification, Git baseline, profiles, preflight inputs, services,
+execution configuration, and proposal before storing an `INVOKING_MODEL`
+preparation. It does not invoke the Task Creator, create assignments, or start
+the controller. The user then chooses `taskledger start` or `taskledger ui`.
+
+For a clean repository that still needs setup, the skill uses:
+
+```sh
+taskledger bootstrap --confirm-branch <exact-branch> --commit-setup
+```
+
+That mode commits only Taskledger-generated setup paths with the message
+`Configure Taskledger`. It refuses any pre-existing dirty worktree.
+
+The repository also includes an opt-in live skill evaluation matrix. After
+installing the checkout's skill, run:
+
+```sh
+python3 scripts/evaluate_taskledger_skill.py --repetitions 3
+```
+
+It creates temporary fixture repositories, starts fresh Codex sessions, checks
+the approval stop, sends a revision, approves the replacement, verifies durable
+state, deletes the evaluation sessions, and never starts execution. Live model
+runs are intentionally excluded from the default test suite.
+
 ### 1. Prepare the managed repository
 
 From the repository root:
@@ -292,6 +351,12 @@ tree fingerprints, timing, exit status, and bounded retained output. The primary
 runs the same declared checks with `submission check` at the exact submitted
 commit. Worker receipts never satisfy reviewer obligations. A command that
 changes source is marked stale and must be rerun from a clean current state.
+Worker checks disable Python bytecode writes and may first create an evidence
+commit for intentional dirty assignment changes; a clean worktree after a
+successful check is expected. A successful worker submission ends that provider
+turn mechanically. Generous per-turn limits on tool calls, repeated calls,
+failed calls, commands, and provider tokens stop pathological low-cost-agent
+loops while preserving their durable progress for inspection and resume.
 
 Register intentional individual evidence files only. Symlinks, traversal,
 directories, and oversized files are rejected. Retained artifacts live outside

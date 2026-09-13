@@ -7,8 +7,11 @@ import re
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
+
+from taskledger.core import LedgerError, canonical
 
 from .model import (
     RuntimeIdentity,
@@ -29,6 +32,11 @@ class AppServerRuntime:
     # JSONL tool output/history can exceed asyncio's default 64 KiB line limit.
     # Keep an explicit finite bound rather than allowing unbounded messages.
     MAX_MESSAGE_BYTES = 8 * 1024 * 1024
+    MAX_DYNAMIC_TOOL_CALLS_PER_TURN = 24
+    MAX_FAILED_DYNAMIC_TOOL_CALLS_PER_TURN = 8
+    MAX_REPEAT_DYNAMIC_TOOL_CALLS_PER_TURN = 3
+    MAX_COMMAND_EXECUTIONS_PER_TURN = 32
+    MAX_PROVIDER_TOKENS_PER_TURN = 750_000
 
     BASE_INSTRUCTIONS = (
         "You are a bounded Taskledger execution agent. Perform only the supplied worker, reviewer, "
@@ -59,6 +67,11 @@ class AppServerRuntime:
         self.turn_usage_events: dict[str, asyncio.Event] = {}
         self.turn_exact_usage: dict[str, Usage] = {}
         self.turn_exact_response_ids: dict[str, set[str]] = {}
+        self.turn_dynamic_tool_calls: Counter[str] = Counter()
+        self.turn_failed_dynamic_tool_calls: Counter[str] = Counter()
+        self.turn_command_executions: Counter[str] = Counter()
+        self.turn_tool_signatures: dict[str, Counter[str]] = {}
+        self.turn_interrupt_reasons: dict[str, str] = {}
         self.session_config: dict[str, dict[str, Any]] = {}
         self.profiles = ProfileResolver(self.repository_root)
         self.worker_sockets = worker_sockets or {}
@@ -317,7 +330,10 @@ class AppServerRuntime:
             if status == "completed":
                 return RuntimeTurnInspection("COMPLETED", self._turn_result(handle, turn))
             if status == "interrupted":
-                return RuntimeTurnInspection("FAILED", self._turn_result(handle, turn), "INTERRUPTED")
+                reason = self.turn_interrupt_reasons.get(handle.turn_id)
+                if reason == "TASKLEDGER_SUBMISSION_RECORDED":
+                    return RuntimeTurnInspection("COMPLETED", self._turn_result(handle, turn))
+                return RuntimeTurnInspection("FAILED", self._turn_result(handle, turn), reason or "INTERRUPTED")
             if status in {"failed", "error"}:
                 return RuntimeTurnInspection("FAILED", self._turn_result(handle, turn), self._error_text(turn.get("error")))
             return RuntimeTurnInspection(
@@ -518,6 +534,8 @@ class AppServerRuntime:
                     turn_id = params.get("turnId")
                     if turn_id and item.get("type") in {"agentMessage", "agent_message"}:
                         self.turn_text[turn_id] = item.get("text", "")
+                    elif turn_id and item.get("type") in {"commandExecution", "command_execution"}:
+                        self._record_command_execution(turn_id)
                 elif method == "thread/tokenUsage/updated":
                     thread_id = params.get("threadId")
                     turn_id = params.get("turnId")
@@ -540,6 +558,7 @@ class AppServerRuntime:
                             self.thread_usage_events.setdefault(thread_id, asyncio.Event()).set()
                             if turn_id:
                                 self.turn_usage_events.setdefault(turn_id, asyncio.Event()).set()
+                                self._enforce_provider_token_guard(thread_id, turn_id)
                 elif method == "rawResponse/completed":
                     turn_id = params.get("turnId")
                     response_id = params.get("responseId")
@@ -599,8 +618,12 @@ class AppServerRuntime:
                 pass
         if not waiter.done():
             if turn.get("status") in {"failed", "error", "interrupted"}:
-                error = "INTERRUPTED" if turn.get("status") == "interrupted" else self._error_text(turn.get("error"))
-                waiter.set_exception(RuntimeError(error))
+                reason = self.turn_interrupt_reasons.get(handle.turn_id)
+                if turn.get("status") == "interrupted" and reason == "TASKLEDGER_SUBMISSION_RECORDED":
+                    waiter.set_result(self._turn_result(handle, turn))
+                else:
+                    error = reason or ("INTERRUPTED" if turn.get("status") == "interrupted" else self._error_text(turn.get("error")))
+                    waiter.set_exception(RuntimeError(error))
             else:
                 waiter.set_result(self._turn_result(handle, turn))
 
@@ -625,31 +648,115 @@ class AppServerRuntime:
     async def _handle_dynamic_tool_call(self, message: dict[str, Any]) -> None:
         assert self.process and self.process.stdin
         params = message.get("params", {})
+        turn_id = params.get("turnId")
         config = self.session_config.get(params.get("threadId"), {})
         handler = self.worker_tools.get(config.get("subject_id"))
         tool = params.get("tool", "")
         action = tool.removeprefix("taskledger_").replace("_", "-")
+        arguments = params.get("arguments") or {}
         try:
             if handler is None or not tool.startswith("taskledger_"):
                 raise RuntimeError("dynamic worker tool is not authorized for this thread")
-            result = await asyncio.to_thread(handler, action, params.get("arguments") or {})
+            self._admit_dynamic_tool_call(turn_id, action, arguments)
+            result = await asyncio.to_thread(handler, action, arguments)
             payload = {"contentItems": [{"type": "inputText", "text": json.dumps(result, separators=(",", ":"))}], "success": True}
+            terminal = result.get("_terminal") if isinstance(result, dict) else None
+        except LedgerError as exc:
+            if turn_id and exc.code not in {"TURN_TERMINAL", "TURN_TOOL_LIMIT", "REPEATED_TOOL_CALL"}:
+                self.turn_failed_dynamic_tool_calls[turn_id] += 1
+            error = {
+                "code": exc.code, "message": exc.message, "details": exc.details,
+                "instruction": exc.details.get("instruction", "Correct only the reported fields; do not inspect Taskledger internals."),
+            }
+            payload = {"contentItems": [{"type": "inputText", "text": canonical({"ok": False, "error": error})}], "success": False}
+            terminal = None
         except Exception as exc:
-            payload = {"contentItems": [{"type": "inputText", "text": str(exc)}], "success": False}
+            if turn_id:
+                self.turn_failed_dynamic_tool_calls[turn_id] += 1
+            payload = {"contentItems": [{"type": "inputText", "text": canonical({
+                "ok": False,
+                "error": {"code": "WORKER_TOOL_FAILED", "message": str(exc), "details": {},
+                          "instruction": "Correct only the reported fields; do not inspect Taskledger internals."},
+            })}], "success": False}
+            terminal = None
         self.process.stdin.write((json.dumps({"id": message["id"], "result": payload}, separators=(",", ":")) + "\n").encode())
         await self.process.stdin.drain()
+        if turn_id and terminal == "SUBMITTED":
+            self._schedule_guard_interrupt(turn_id, "TASKLEDGER_SUBMISSION_RECORDED")
+        elif turn_id and self.turn_failed_dynamic_tool_calls[turn_id] >= self.MAX_FAILED_DYNAMIC_TOOL_CALLS_PER_TURN:
+            self._schedule_guard_interrupt(turn_id, "TASKLEDGER_FAILED_TOOL_CALL_LIMIT")
+
+    def _admit_dynamic_tool_call(self, turn_id: str | None, action: str, arguments: dict[str, Any]) -> None:
+        if not turn_id:
+            raise RuntimeError("dynamic worker tool call is missing its provider turn id")
+        if turn_id in self.turn_interrupt_reasons:
+            raise LedgerError(
+                "TURN_TERMINAL", "This worker turn is already terminal. Stop immediately.",
+                details={"terminal": True, "retryable": False},
+            )
+        self.turn_dynamic_tool_calls[turn_id] += 1
+        signature = action + ":" + canonical(arguments)
+        signatures = self.turn_tool_signatures.setdefault(turn_id, Counter())
+        signatures[signature] += 1
+        if self.turn_dynamic_tool_calls[turn_id] > self.MAX_DYNAMIC_TOOL_CALLS_PER_TURN:
+            self._schedule_guard_interrupt(turn_id, "TASKLEDGER_DYNAMIC_TOOL_CALL_LIMIT")
+            raise LedgerError(
+                "TURN_TOOL_LIMIT", "This worker turn exceeded its dynamic-tool allowance and is stopping.",
+                details={"terminal": True, "retryable": False},
+            )
+        if signatures[signature] > self.MAX_REPEAT_DYNAMIC_TOOL_CALLS_PER_TURN:
+            self._schedule_guard_interrupt(turn_id, "TASKLEDGER_REPEATED_TOOL_CALL_LIMIT")
+            raise LedgerError(
+                "REPEATED_TOOL_CALL", "The same worker operation was repeated too many times without a new state.",
+                details={"terminal": True, "retryable": False},
+            )
+
+    def _schedule_guard_interrupt(self, turn_id: str, reason: str) -> None:
+        if turn_id in self.turn_interrupt_reasons:
+            return
+        thread_id = self.turn_threads.get(turn_id)
+        if not thread_id:
+            return
+        self.turn_interrupt_reasons[turn_id] = reason
+        task = asyncio.create_task(self._interrupt_guarded(RuntimeTurnHandle(thread_id, turn_id)))
+        self.server_tasks.add(task)
+        task.add_done_callback(self._server_task_done)
+
+    def _enforce_provider_token_guard(self, thread_id: str, turn_id: str) -> None:
+        before, after = self.turn_usage_before.get(turn_id), self.thread_usage.get(thread_id)
+        if before is None or after is None:
+            return
+        try:
+            used = after.subtract(before).total_tokens
+        except ValueError:
+            return
+        if used > self.MAX_PROVIDER_TOKENS_PER_TURN:
+            self._schedule_guard_interrupt(turn_id, "TASKLEDGER_PROVIDER_TOKEN_LIMIT")
+
+    def _record_command_execution(self, turn_id: str) -> None:
+        """Count one terminal command item and stop only after the generous allowance."""
+        self.turn_command_executions[turn_id] += 1
+        if self.turn_command_executions[turn_id] > self.MAX_COMMAND_EXECUTIONS_PER_TURN:
+            self._schedule_guard_interrupt(turn_id, "TASKLEDGER_COMMAND_EXECUTION_LIMIT")
+
+    async def _interrupt_guarded(self, handle: RuntimeTurnHandle) -> None:
+        try:
+            await self.interrupt_turn(handle)
+        except Exception:
+            # A racing natural completion is safe: durable state remains authoritative.
+            pass
 
     @staticmethod
     def _worker_tool_specs() -> list[dict[str, Any]]:
         descriptions = {
             "context": "Load current assignment-scoped Taskledger context.",
-            "check": "Run and record an assignment-scoped check.",
-            "checkpoint": "Record a durable assignment checkpoint.",
+            "check": "Run one exact declared check and return its receipt. This may commit dirty assignment changes as an evidence commit; a clean worktree afterward is expected. Do not repeat a successful current check.",
+            "checkpoint": "Record a durable assignment checkpoint only when checkpoint_progress.next is present and no checkpoint is pending. Do not use this for assignments with no checkpoint plan.",
             "artifact-register": "Register assignment evidence by relative path.",
             "question": "Ask an assignment-scoped worker question.",
             "blocker": "Create an assignment-scoped blocker.",
             "follow-up": "Propose follow-up work.",
-            "submit": "Submit the completed assignment for independent review.",
+            "submit": "Submit the completed assignment for independent review. unresolved_questions items require body, blocking, blocker_category; risks require description, blocking, blocker_category. A successful result is terminal: stop immediately.",
         }
         text = {"type": "string", "minLength": 1}
         nullable_text = {"type": ["string", "null"]}

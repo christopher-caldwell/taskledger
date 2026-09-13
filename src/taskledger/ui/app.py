@@ -83,6 +83,8 @@ class TaskledgerApp(App):
         self.activity_mode = "recent"
         self._tracked_operations: dict[str, str] = {}
         self._visible_operation_id: str | None = None
+        self._primary_action: str | None = None
+        self._primary_focused = False
 
     def compose(self) -> ComposeResult:
         yield ConsoleHeader("Task Ledger\nLoading snapshot…", id="console-header")
@@ -94,10 +96,9 @@ class TaskledgerApp(App):
         )
         with TabbedContent(id="sections"):
             with TabPane("Overview", id="overview"):
-                with Horizontal(classes="action-bar"):
-                    yield Button("Prepare", id="prepare-overview")
-                    yield Button("Review preparation", id="review-overview")
-                    yield Button("Resume", id="resume-overview")
+                with Horizontal(classes="action-bar primary-action-bar"):
+                    yield Button("LOADING", id="primary-action", variant="primary", disabled=True)
+                    yield Button("Prepare another plan", id="prepare-overview", disabled=True)
                 yield OverviewView("Loading…", id="overview-body", classes="pane")
             with TabPane("Tasks", id="tasks"):
                 with Horizontal(classes="action-bar"):
@@ -220,9 +221,30 @@ class TaskledgerApp(App):
         if not self.is_mounted or not self.snapshot: return
         prep = self.snapshot.preparation
         run = self.snapshot.run
+        blockers = tuple(item for item in self.snapshot.interventions if item.get("kind") in {"BLOCKER", "QUESTION"})
+        action, label, enabled = None, "NO ACTION", False
+        if run and run.get("state") == "RUNNING":
+            action, label, enabled = "PAUSE", "REQUEST PAUSE", bool(run.get("owned_by_host"))
+        elif blockers:
+            action, label, enabled = "RESOLVE", "RESOLVE BLOCKER", True
+        elif run and run.get("state") in {"PAUSED", "FAILED"} and self._available("RESUME"):
+            action, label, enabled = "RESUME", "RESUME RUN", True
+        elif prep and prep.get("state") == "AWAITING_APPROVAL" and prep.get("operator_approved"):
+            action, label, enabled = "START", "START RUN", True
+        elif prep and prep.get("state") == "AWAITING_APPROVAL":
+            action, label, enabled = "REVIEW", "REVIEW PLAN", True
+        elif run and run.get("state") == "COMPLETED":
+            action, label, enabled = "REPORT", "VIEW REPORT", True
+        elif self._available("PREPARE"):
+            action, label, enabled = "PREPARE", "PREPARE PLAN", True
+        primary = self.query_one("#primary-action", Button)
+        primary.label = label
+        primary.disabled = not enabled
+        self._primary_action = action
+        if enabled and not self._primary_focused:
+            primary.focus()
+            self._primary_focused = True
         self.query_one("#prepare-overview", Button).disabled = not self._available("PREPARE")
-        self.query_one("#review-overview", Button).disabled = not bool(prep and prep.get("state") == "AWAITING_APPROVAL")
-        self.query_one("#resume-overview", Button).disabled = not self._available("RESUME")
         self.query_one("#report-usage", Button).disabled = run is None
         self.query_one("#budget-usage", Button).disabled = run is None
 
@@ -376,9 +398,8 @@ class TaskledgerApp(App):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
-        if button_id == "prepare-overview": self.push_screen(PrepareScreen(self.client))
-        elif button_id == "review-overview": self.open_preparation_review()
-        elif button_id == "resume-overview": self.open_resume()
+        if button_id == "primary-action": await self._activate_primary_action()
+        elif button_id == "prepare-overview": self.push_screen(PrepareScreen(self.client))
         elif button_id == "load-more-tasks": await self.load_more_tasks()
         elif button_id == "activity-mode": await self.toggle_activity_mode()
         elif button_id == "load-more-activity": await self.load_history()
@@ -386,6 +407,33 @@ class TaskledgerApp(App):
             self.push_screen(RunReportScreen(self.client, str(self.snapshot.run.get("id"))))
         elif button_id == "budget-usage" and self.snapshot and self.snapshot.run:
             self.push_screen(BudgetDialog(self.client, str(self.snapshot.run.get("id"))))
+
+    async def _activate_primary_action(self) -> None:
+        action = self._primary_action
+        if action == "PREPARE":
+            self.push_screen(PrepareScreen(self.client))
+        elif action == "REVIEW":
+            self.open_preparation_review()
+        elif action == "START" and self.snapshot and self.snapshot.preparation:
+            prep = self.snapshot.preparation
+            receipt = await self.client.start_prepared_project(
+                request_id("start"), preparation_id=prep.get("id"),
+                approve_proposal_hash=prep.get("proposal_hash"), live=True,
+            )
+            if receipt.disposition == "REJECTED":
+                self.push_screen(MessageDialog("Start rejected", receipt_error(receipt)))
+            else:
+                self.track_operation(receipt.operation_id, "Starting run")
+        elif action == "PAUSE":
+            await self.action_pause()
+        elif action == "RESUME":
+            self.open_resume()
+        elif action == "RESOLVE" and self.snapshot:
+            item = next((value for value in self.snapshot.interventions if value.get("kind") in {"BLOCKER", "QUESTION"}), None)
+            if item:
+                self._open_intervention(str(item.get("id")))
+        elif action == "REPORT" and self.snapshot and self.snapshot.run:
+            self.push_screen(RunReportScreen(self.client, str(self.snapshot.run.get("id"))))
 
     async def load_more_tasks(self) -> None:
         try:

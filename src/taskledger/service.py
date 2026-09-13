@@ -113,8 +113,9 @@ class Service:
         source_oid=git.oid(cwd)
         before=self.tree_fingerprint(cwd)
         started=now();timed_out=False;interrupted=False
+        check_environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         process=subprocess.Popen(command,cwd=cwd,shell=True,text=False,stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT,start_new_session=True)
+                                 stderr=subprocess.STDOUT,start_new_session=True,env=check_environment)
         try:
             output,_=process.communicate(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
